@@ -121,18 +121,18 @@
 <script>
 // ============================ DATA ============================
 const POWERUPS = {
-  double: { name:"Double Pts", icon:"⚡", rarity:"common", target:"me",  dur:120, cd:60,
-            desc:"Your player scores 2× for 2 minutes." },
-  freeze: { name:"Freeze",      icon:"🧊", rarity:"rare",   target:"op",  dur:60,  cd:90,
-            desc:"Opponent player scores ZERO for 1 minute." },
-  surge:  { name:"Hail Mary",   icon:"🚀", rarity:"rare",   target:"me",  dur:45,  cd:0,
-            desc:"3× points for 45s, but -5 if they don't score." },
-  shield: { name:"Bodyguard",   icon:"🛡️", rarity:"common", target:"me",  dur:180, cd:0,
-            desc:"Immune to Freeze & Pickpocket for 3 min." },
-  steal:  { name:"Pickpocket",  icon:"🧲", rarity:"rare",   target:"op",  dur:90,  cd:120,
-            desc:"Steal half an opponent's points for 90s." },
-  floor:  { name:"Sure Thing",  icon:"🎯", rarity:"common", target:"me",  dur:60,  cd:60,
-            desc:"Steady guaranteed points for 1 minute." },
+  double: { name:"Double Pts", icon:"⚡", rarity:"common", target:"me",
+            desc:"Your player scores 2× for a full quarter." },
+  freeze: { name:"Freeze",      icon:"🧊", rarity:"rare",   target:"op",
+            desc:"Opponent player scores ZERO for a full quarter." },
+  surge:  { name:"Hail Mary",   icon:"🚀", rarity:"rare",   target:"me",
+            desc:"3× points for a quarter — but -5 if they don't score that quarter." },
+  shield: { name:"Bodyguard",   icon:"🛡️", rarity:"common", target:"me",
+            desc:"Immune to Freeze & Pickpocket for the quarter." },
+  steal:  { name:"Pickpocket",  icon:"🧲", rarity:"rare",   target:"op",
+            desc:"Steal half an opponent's points for a quarter." },
+  floor:  { name:"Sure Thing",  icon:"🎯", rarity:"common", target:"me",
+            desc:"Steady guaranteed points for a quarter." },
 };
 const POS_CFG = { QB:{rate:.55,min:.4,max:5.5}, RB:{rate:.4,min:.3,max:4}, WR:{rate:.38,min:.3,max:6},
                   TE:{rate:.28,min:.2,max:3.5}, K:{rate:.15,min:1,max:3}, DEF:{rate:.3,min:.5,max:5} };
@@ -235,7 +235,7 @@ let app = {
 function freshSim(){
   myStarters.forEach(reset); oppStarters.forEach(reset);
   return { running:false, speed:1, gameSec:0, cd:{}, feed:[], puLog:[], opNext:75,
-           others: OTHER_MATCHUPS.map(m=>({...m})) };
+           scheduled:[], curQ:0, others: OTHER_MATCHUPS.map(m=>({...m})) };
 }
 function reset(p){ Object.assign(p,{pts:0,frozen:0,boosted:0,mult:1,hailmary:false,shielded:0,robbed:0,floored:0,pendingScore:undefined}); }
 
@@ -248,20 +248,41 @@ function clk(){ const q=Math.min(3,Math.floor(app.sim.gameSec/QSEC)); const into
   return { q:q+1, rem:Math.max(0,QSEC-into) }; }
 function feed(t,c){ const {q,rem}=clk(); app.sim.feed.unshift({t:`Q${q} ${fmt(rem)}`,txt:t,c}); app.sim.feed=app.sim.feed.slice(0,40); }
 function clkLabel(){ const {q,rem}=clk(); return `Q${q} ${fmt(rem)}`; }
-function logPU(side,key,target,blocked){ app.sim.puLog.push({side,key,target,t:clkLabel(),blocked:!!blocked}); }
+function logPU(side,key,target,blocked,q){ app.sim.puLog.push({side,key,target,q,t:clkLabel(),blocked:!!blocked}); }
 function ord(n){ return n===1?"st":n===2?"nd":n===3?"rd":"th"; }
-// Light opponent AI — fires a power-up at you every so often so the head-to-head feels alive.
+// Quarter-based power-ups: you schedule an effect on a player for a FUTURE quarter.
+function currentQuarter(){ if(!app.sim.running && app.sim.gameSec===0) return 0; if(app.sim.gameSec>=4*QSEC) return 5; return Math.min(4,Math.floor(app.sim.gameSec/QSEC)+1); }
+function findPlayer(id){ return [...myStarters,...oppStarters].find(p=>p.id===id); }
+function effectsFor(p,q){
+  const list=app.sim.scheduled.filter(x=>x.pid===p.id && x.q===q);
+  const shielded=list.some(x=>x.key==="shield");
+  const e={double:false,surge:false,floor:false,frozen:false,robbed:false,shielded};
+  list.forEach(x=>{
+    if(x.key==="double") e.double=true;
+    else if(x.key==="surge") e.surge=true;
+    else if(x.key==="floor") e.floor=true;
+    else if(x.key==="freeze"){ if(!shielded) e.frozen=true; }
+    else if(x.key==="steal"){ if(!shielded) e.robbed=true; }
+  });
+  return e;
+}
+// Opponent AI — schedules a power-up against you on an upcoming quarter.
 function maybeOpponentAI(adv){
   app.sim.opNext -= adv;
   if(app.sim.opNext>0) return;
-  app.sim.opNext = 130 + Math.random()*110;
+  app.sim.opNext = 200 + Math.random()*160;
+  const cq=currentQuarter();
+  const future=[]; for(let q=1;q<=4;q++) if(q>cq) future.push(q);
+  if(!future.length) return;
+  const q=future[Math.floor(Math.random()*future.length)];
   if(Math.random()<0.5){
-    const tgt = myStarters.reduce((a,b)=> b.pts>=a.pts?b:a);
-    if(tgt.shielded>0){ feed(`🛡️ Your Bodyguard blocked Burrow Bandits' Freeze on ${tgt.name}!`,"ev-pu"); logPU("op","freeze",tgt.name,true); return; }
-    tgt.frozen=60; feed(`🧊 Burrow Bandits FROZE your ${tgt.name}!`,"ev-pu"); logPU("op","freeze",tgt.name);
+    const tgt=myStarters.reduce((a,b)=> b.pts>=a.pts?b:a);
+    app.sim.scheduled.push({key:"freeze",pid:tgt.id,q,by:"op"});
+    feed(`🧊 Burrow Bandits scheduled a FREEZE on your ${tgt.name} for Q${q}!`,"ev-pu"); logPU("op","freeze",tgt.name,false,q);
   } else {
-    const tgt = oppStarters.reduce((a,b)=> b.pts>=a.pts?b:a);
-    tgt.boosted=120; tgt.mult=2; feed(`⚡ Burrow Bandits boosted their ${tgt.name}!`,"ev-pu"); logPU("op","double",tgt.name);
+    const tgt=oppStarters.reduce((a,b)=> b.pts>=a.pts?b:a);
+    app.sim.scheduled.push({key:"double",pid:tgt.id,q,by:"op"});
+    feed(`⚡ Burrow Bandits scheduled Double Pts on ${tgt.name} for Q${q}.`,"ev-pu"); logPU("op","double",tgt.name,false,q);
   }
 }
 function toast(msg){ const t=el("div","toast",msg); document.body.appendChild(t); setTimeout(()=>t.remove(),1800); }
@@ -333,30 +354,43 @@ function tick(){
   if(Math.floor(prev/QSEC)!==Math.floor(app.sim.gameSec/QSEC) && app.sim.gameSec<4*QSEC)
     feed(`— End of Q${Math.floor(app.sim.gameSec/QSEC)} —`,"ev-score");
 
-  [...myStarters,...oppStarters].forEach(p=>{
-    if(p.frozen>0){ p.frozen=Math.max(0,p.frozen-adv); if(p.frozen===0) feed(`${p.name} back in play.`,"ev-pu"); }
-    if(p.boosted>0){ p.boosted=Math.max(0,p.boosted-adv);
-      if(p.boosted===0){ if(p.hailmary&&p.pendingScore===false){p.pts=Math.max(0,p.pts-5);feed(`Hail Mary fizzled — ${p.name} -5.`,"ev-pu");}
-        p.mult=1;p.hailmary=false;p.pendingScore=undefined; } }
-    if(p.shielded>0) p.shielded=Math.max(0,p.shielded-adv);
-    if(p.robbed>0) p.robbed=Math.max(0,p.robbed-adv);
-    if(p.floored>0) p.floored=Math.max(0,p.floored-adv);
-  });
-  Object.keys(app.sim.cd).forEach(k=>{ if(app.sim.cd[k]>0) app.sim.cd[k]=Math.max(0,app.sim.cd[k]-adv); });
-
   maybeOpponentAI(adv);
 
+  // quarter transitions: announce activations for the new quarter, resolve Hail Mary penalties for the one that ended
+  const curQ = app.sim.gameSec>=4*QSEC ? 5 : Math.min(4,Math.floor(app.sim.gameSec/QSEC)+1);
+  if(curQ > (app.sim.curQ||0)){
+    for(let qq=(app.sim.curQ||0)+1; qq<=Math.min(curQ,4); qq++){
+      app.sim.scheduled.filter(x=>x.q===qq).forEach(x=>{
+        const p=findPlayer(x.pid), cfg=POWERUPS[x.key], eff=effectsFor(p,qq);
+        const blocked=(x.key==="freeze"&&!eff.frozen)||(x.key==="steal"&&!eff.robbed);
+        feed(`Q${qq}: ${cfg.icon} ${cfg.name} on ${p.name}${blocked?" (blocked 🛡️)":""}`,"ev-pu");
+      });
+    }
+    for(let qq=(app.sim.curQ||0); qq<curQ; qq++){
+      app.sim.scheduled.filter(x=>x.q===qq && x.key==="surge" && !x.scored).forEach(x=>{
+        const p=findPlayer(x.pid); if(p){ p.pts=Math.max(0,Math.round((p.pts-5)*10)/10);
+          feed(`🚀 Hail Mary fizzled on ${p.name} — -5 (no Q${qq} points).`,"ev-pu"); }
+      });
+    }
+    app.sim.curQ=curQ;
+  }
+
+  const q = Math.min(4,Math.floor(app.sim.gameSec/QSEC)+1);
   [...myStarters,...oppStarters].forEach(p=>{
-    if(p.frozen>0) return;
-    const c=POS_CFG[p.pos]; const chance = p.floored>0?1:c.rate*(adv/30);
+    const eff=effectsFor(p,q);
+    if(eff.frozen) return;
+    const c=POS_CFG[p.pos];
+    const chance = eff.floor?1:c.rate*(adv/30);
     if(Math.random()<chance){
-      let g = p.floored>0 ? c.min+Math.random()*(c.max-c.min)*0.4 : c.min+Math.random()*(c.max-c.min);
-      g*=p.mult; g=Math.round(g*10)/10;
+      let g = eff.floor ? c.min+Math.random()*(c.max-c.min)*0.4 : c.min+Math.random()*(c.max-c.min);
+      const mult = eff.surge?3:eff.double?2:1;
+      g*=mult; g=Math.round(g*10)/10;
+      if(eff.surge){ const sc=app.sim.scheduled.find(x=>x.pid===p.id&&x.q===q&&x.key==="surge"); if(sc)sc.scored=true; }
       let stolen=0;
-      if(p.robbed>0 && oppStarters.includes(p)){ stolen=Math.round(g/2*10)/10; g=Math.round((g-stolen)*10)/10;
+      if(eff.robbed && oppStarters.includes(p)){ stolen=Math.round(g/2*10)/10; g=Math.round((g-stolen)*10)/10;
         const thief=myStarters.reduce((a,b)=>b.pts>=a.pts?b:a); thief.pts=Math.round((thief.pts+stolen)*10)/10; }
-      p.pts=Math.round((p.pts+g)*10)/10; if(p.hailmary)p.pendingScore=true;
-      const m=p.mult>1?` (${p.mult}×)`:""; feed(`${p.name} +${g}${m}`,"ev-score");
+      p.pts=Math.round((p.pts+g)*10)/10;
+      const m=mult>1?` (${mult}×)`:""; feed(`${p.name} +${g}${m}`,"ev-score");
       if(stolen>0) feed(`🧲 +${stolen} swiped from ${p.name}.`,"ev-pu");
     }
   });
@@ -375,24 +409,44 @@ function tick(){
 
 // ============================ POWER-UPS ============================
 function armPU(k){
-  if((app.inv[k]||0)<=0 || (app.sim.cd[k]||0)>0 || !app.sim.running) return;
+  if((app.inv[k]||0)<=0) return;
+  if(currentQuarter()>=4){ toast("No upcoming quarters to target"); return; }
   app.armed = app.armed===k ? null : k; renderMatchup();
 }
 function usePU(k,p){
   const cfg=POWERUPS[k];
   const side = myStarters.includes(p)?"me":"op";
   if(side!==cfg.target){ toast(cfg.target==="me"?"Target YOUR player":"Target the OPPONENT"); return; }
-  if((k==="freeze"||k==="steal") && p.shielded>0){
-    app.inv[k]--; app.sim.cd[k]=cfg.cd; app.armed=null;
-    feed(`🛡️ ${p.name}'s Bodyguard blocked your ${cfg.name}!`,"ev-pu"); logPU("me",k,p.name,true); renderMatchup(); return;
-  }
-  app.inv[k]--; app.sim.cd[k]=cfg.cd; app.armed=null; logPU("me",k,p.name);
-  if(k==="freeze"){ p.frozen=cfg.dur; feed(`🧊 FROZE ${p.name} for 1:00!`,"ev-pu"); }
-  else if(k==="double"){ p.boosted=cfg.dur; p.mult=2; feed(`⚡ Double Points on ${p.name}!`,"ev-pu"); }
-  else if(k==="surge"){ p.boosted=cfg.dur; p.mult=3; p.hailmary=true; p.pendingScore=false; feed(`🚀 Hail Mary on ${p.name}!`,"ev-pu"); }
-  else if(k==="shield"){ p.shielded=cfg.dur; feed(`🛡️ Bodyguard on ${p.name}.`,"ev-pu"); }
-  else if(k==="steal"){ p.robbed=cfg.dur; feed(`🧲 Pickpocket on ${p.name}!`,"ev-pu"); }
-  else if(k==="floor"){ p.floored=cfg.dur; feed(`🎯 Sure Thing on ${p.name}.`,"ev-pu"); }
+  const cq=currentQuarter();
+  const allowed=[]; for(let q=1;q<=4;q++) if(q>cq) allowed.push(q);
+  if(!allowed.length){ toast("No upcoming quarters left"); app.armed=null; renderMatchup(); return; }
+  showQuarterPicker(k,p,allowed);
+}
+function showQuarterPicker(k,p,allowed){
+  const cfg=POWERUPS[k]; const ov=$("overlay");
+  ov.innerHTML=`<div class="modal"><div class="box">
+    <div style="font-size:30px">${cfg.icon}</div>
+    <div style="font-weight:800;margin-top:6px">${cfg.name}</div>
+    <div class="muted" style="font-size:12px;margin:6px 0 2px">on <b style="color:var(--txt)">${p.name}</b></div>
+    <div class="muted" style="font-size:11px">Pick a quarter — one that's already started can't be chosen.</div>
+    <div id="qpick" style="display:flex;gap:8px;justify-content:center;margin:16px 0"></div>
+    <button class="btn sec" id="qcancel" style="width:100%">Cancel</button></div></div>`;
+  const pick=ov.querySelector("#qpick");
+  [1,2,3,4].forEach(q=>{
+    const okq=allowed.includes(q);
+    const b=el("button","btn"+(okq?"":" sec")); b.textContent="Q"+q; b.style.padding="12px 15px";
+    if(!okq){ b.disabled=true; b.style.opacity=".35"; } else b.onclick=()=>schedulePU(k,p,q);
+    pick.appendChild(b);
+  });
+  ov.querySelector("#qcancel").onclick=()=>{ ov.innerHTML=""; app.armed=null; renderMatchup(); };
+}
+function schedulePU(k,p,q){
+  const cfg=POWERUPS[k];
+  app.inv[k]--; app.armed=null; $("overlay").innerHTML="";
+  app.sim.scheduled.push({key:k,pid:p.id,q,by:"me"});
+  logPU("me",k,p.name,false,q);
+  feed(`${cfg.icon} ${cfg.name} scheduled on ${p.name} for Q${q}.`,"ev-pu");
+  toast(`${cfg.name} set for Q${q}`);
   renderMatchup();
 }
 
@@ -609,7 +663,7 @@ function recapCard(){
       <span style="margin-right:6px">${cfg.icon}</span>
       <b style="color:${e.side==='me'?'var(--you)':'var(--opp)'}">${who}</b>
       ${e.blocked?'tried '+cfg.name+' (blocked 🛡️)':'used <b>'+cfg.name+'</b>'} on ${e.target}
-      <span class="muted">· ${e.t}</span></div>`));
+      <span class="muted">· Q${e.q||'?'}</span></div>`));
   });
   return c;
 }
@@ -660,7 +714,7 @@ function renderMatchup(){
     return;
   }
 
-  s.appendChild(el("div","muted","<div style='font-size:11px;margin:-2px 0 12px;text-align:center'>🏆 <b style='color:var(--gold)'>CCF Score</b> = base points + power-up effects. This number is the official result — it sets your W/L. <span style='opacity:.7'>(Demo data until the season.)</span></div>"));
+  s.appendChild(el("div","muted","<div style='font-size:11px;margin:-2px 0 12px;text-align:center'>🏆 <b style='color:var(--gold)'>CCF Score</b> = base points + power-up effects — the official result that sets your W/L. ⏱️ Power-ups are scheduled <b style='color:var(--gold)'>by quarter</b> (a started quarter is locked out).</div>"));
 
   const ctl=el("div","row"); ctl.style.marginBottom="14px";
   const start=el("button","btn", app.sim.running?"⏸ Pause":(app.sim.gameSec>0?"▶ Resume":"▶ Kick Off"));
@@ -675,22 +729,35 @@ function renderMatchup(){
   if(done && app.sim.puLog.length) s.appendChild(recapCard());
 
   const trayCard=el("div","card");
-  trayCard.appendChild(el("h2","title","Your Power-Ups — tap to arm, then tap a player"));
+  trayCard.appendChild(el("h2","title","Power-Ups — arm one, tap a player, pick a quarter"));
+  const noFuture=currentQuarter()>=4;
   const tray=el("div","puwrap");
   Object.entries(POWERUPS).forEach(([k,cfg])=>{
-    const have=app.inv[k]||0, cd=app.sim.cd[k]||0;
-    const dis = have<=0||cd>0||!app.sim.running;
+    const have=app.inv[k]||0;
+    const dis = have<=0||noFuture;
     const chip=el("div","puchip"+(app.armed===k?" armed":"")+(dis?" disabled":""));
-    chip.innerHTML=`<div class="ic">${cfg.icon}</div><div class="nm">${cfg.name}</div>
-      <div class="ct">${cd>0?"cd "+Math.ceil(cd)+"s":"x"+have}</div>
-      ${cd>0?`<div class="cdbar" style="width:${cd/cfg.cd*100}%"></div>`:""}`;
-    chip.onclick=()=>armPU(k);
+    chip.innerHTML=`<div class="ic">${cfg.icon}</div><div class="nm">${cfg.name}</div><div class="ct">x${have}</div>`;
+    chip.onclick=()=>{ if(!dis) armPU(k); };
     tray.appendChild(chip);
   });
   trayCard.appendChild(tray);
-  if(Object.values(app.inv).every(v=>v<=0))
+  if(noFuture) trayCard.appendChild(el("div","muted","<div style='font-size:12px;margin-top:8px'>No upcoming quarters left to target this game.</div>"));
+  else if(Object.values(app.inv).every(v=>v<=0))
     trayCard.appendChild(el("div","muted","<div style='font-size:12px;margin-top:8px'>Out of power-ups — earn more in the ⚡ Power-Ups tab.</div>"));
   s.appendChild(trayCard);
+
+  if(app.sim.scheduled.length){
+    const cq=currentQuarter();
+    const sc=el("div","card"); sc.appendChild(el("h2","title","Scheduled This Game"));
+    app.sim.scheduled.slice().sort((a,b)=>a.q-b.q).forEach(x=>{
+      const p=findPlayer(x.pid), cfg=POWERUPS[x.key];
+      const state = x.q<cq?"done":(x.q===cq&&cq>=1&&cq<=4?"🔴 LIVE":"upcoming");
+      sc.appendChild(el("div","",`<div style="padding:7px 0;border-top:1px solid var(--line);font-size:13px;display:flex;justify-content:space-between;gap:8px">
+        <span>${cfg.icon} <b>${cfg.name}</b> · ${p?p.name:"?"} <span class="muted" style="font-size:11px">(${x.by==='me'?'you':'opp'})</span></span>
+        <span class="muted" style="white-space:nowrap">Q${x.q} · ${state}</span></div>`));
+    });
+    s.appendChild(sc);
+  }
 
   s.appendChild(lineupCard("Your Starters", myStarters, "me"));
   s.appendChild(lineupCard("Burrow Bandits", oppStarters, "op"));
@@ -704,16 +771,15 @@ function lineupCard(title, arr, side){
   const c=el("div","card"); c.appendChild(el("h2","title",title));
   const armedCfg=app.armed?POWERUPS[app.armed]:null;
   const tappable=armedCfg && armedCfg.target===side;
+  const cq=currentQuarter();
   arr.forEach(p=>{
-    let cls="plr"+(p.frozen>0?" frozen":"")+(p.boosted>0?" boosted":"")+(tappable?" tappable":"");
-    const fx=[];
-    if(p.frozen>0)fx.push(`🧊 ${fmt(p.frozen)}`);
-    if(p.boosted>0)fx.push(`${p.hailmary?"🚀3×":"⚡2×"} ${fmt(p.boosted)}`);
-    if(p.floored>0)fx.push(`🎯 ${fmt(p.floored)}`);
-    if(p.shielded>0)fx.push(`🛡️ ${fmt(p.shielded)}`);
-    if(p.robbed>0)fx.push(`🧲 ${fmt(p.robbed)}`);
+    const sched=app.sim.scheduled.filter(x=>x.pid===p.id);
+    const activeNow = cq>=1 && cq<=4 && sched.some(x=>x.q===cq);
+    let cls="plr"+(activeNow?" boosted":"")+(tappable?" tappable":"");
+    const tags=sched.map(x=>`${POWERUPS[x.key].icon}Q${x.q}`).join(" ");
+    const meta = tags ? tags : statusTag(p)+p.opp;
     const d=el("div",cls,`<div class="pos">${p.pos}</div>
-      <div><div class="nm">${p.name}</div><div class="meta2">${fx.length?fx.join(" · "):statusTag(p)+p.opp}</div></div>
+      <div><div class="nm">${p.name}</div><div class="meta2">${meta}</div></div>
       <div class="pt">${p.pts.toFixed(1)}</div>`);
     if(tappable) d.onclick=()=>usePU(app.armed,p);
     c.appendChild(d);
