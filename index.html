@@ -118,6 +118,7 @@
             font-weight:800; font-size:13px; color:#0b1020; }
   .avatar.def { background:#334155; color:var(--txt); font-size:9px; }
   .avatar.sm { width:28px; height:28px; min-width:28px; font-size:11px; }
+  .avatar.img { object-fit:cover; background:#1b2444; }
 
   /* side-by-side matchup rows */
   .mrow { display:grid; grid-template-columns:1fr 30px 1fr; align-items:center; gap:6px; padding:9px 0; border-top:1px solid var(--line); }
@@ -159,6 +160,11 @@
   .dcell.now { box-shadow:0 0 0 2px var(--gold) inset; }
   .dcell .pk { color:var(--muted); font-size:8px; }
   .dcell .pn { font-weight:700; font-size:10px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  /* enlarged draft board */
+  .dboard.big .dhead { font-size:11px; padding:5px 3px; }
+  .dboard.big .dcell { min-height:58px; padding:6px; }
+  .dboard.big .dcell .pk { font-size:9px; }
+  .dboard.big .dcell .pn { font-size:12px; }
 </style>
 </head>
 <body>
@@ -256,6 +262,8 @@ function hashNum(str){ let h=0; for(let i=0;i<(str||"").length;i++){ h=(h*31+str
 function posHue(pos){ return ({QB:"#3b82f6",RB:"#10b981",WR:"#f59e0b",TE:"#a855f7",K:"#94a3b8",DEF:"#64748b"})[pos]||"#334155"; }
 function avatarHTML(p,cls){
   cls=cls||"";
+  if(p.headshot) return `<img class="avatar img ${cls}" src="${p.headshot}" onerror="this.style.visibility='hidden'">`;
+  if(p.logo) return `<img class="avatar img ${cls}" src="${p.logo}" style="object-fit:contain;background:#0d142b" onerror="this.style.visibility='hidden'">`;
   if(p.pos==="DEF"){ const ab=(p.name.split(" ")[0]||"").slice(0,3).toUpperCase(); return `<div class="avatar def ${cls}">${ab}</div>`; }
   return `<div class="avatar ${cls}" style="background:${posHue(p.pos)}">${p.num||""}</div>`;
 }
@@ -333,6 +341,7 @@ let app = {
   leagueId:null, leagueData:null, sleeperUserId:null,
   sim:null, armed:null, matchupIdx:0,
   leagueMatchup:null, schedTeam:"Your Team", pFilter:"ALL", pView:"players", drafted:[],
+  pool:null, poolLoading:false, poolError:null, pDetail:null,
   nfl:{ games:null, loading:false, error:null, selected:null, gamecast:null, view:"plays", pollId:null, pollFor:null },
   settings:{
     scoring:{ passYdsPerPt:25, passTD:4, passInt:-2, rushYdsPerPt:10, rushTD:6,
@@ -627,8 +636,8 @@ function render(){
   renderNav();
 }
 function renderNav(){
-  const tabs=[["home","Home","🏟️"],["nfl","NFL Live","🏈"],["matchup","Matchup","🥊"],["team","My Team","📋"],["players","Players","🔁"],
-              ["league","League","🏆"],["store","Power-Ups","⚡"]];
+  const tabs=[["home","Home","🏟️"],["nfl","NFL Live","🏈"],["matchup","Matchup","🥊"],["team","My Team","📋"],
+              ["players","Players","🔁"],["draft","Draft","🐍"],["league","League","🏆"],["store","Power-Ups","⚡"]];
   let nav=$("nav"); if(nav) nav.remove();
   nav=el("nav","tabbar"); nav.id="nav";
   const inner=el("div","inner");
@@ -644,7 +653,8 @@ function renderTab(){
   else if(app.tab==="nfl"){ ensureNFL(); renderNFL(); }
   else if(app.tab==="matchup") renderMatchup();
   else if(app.tab==="team") renderTeam();
-  else if(app.tab==="players") renderPlayers();
+  else if(app.tab==="players"){ ensurePool(); renderPlayers(); }
+  else if(app.tab==="draft"){ ensurePool(); renderDraft(); }
   else if(app.tab==="league") renderLeague();
   else if(app.tab==="store") renderStore();
   else if(app.tab==="commish") renderCommish();
@@ -951,60 +961,117 @@ function rosterRow(p,isStarter){
 }
 
 // ============================ PLAYERS (in-app add/drop — no Sleeper) ============================
-let _poolCache=null;
-function availablePlayers(){
-  if(_poolCache) return _poolCache;
-  const arr=FREE_AGENTS.slice();
-  const posN={QB:5,RB:8,WR:10,TE:5,K:3,DEF:5};
-  Object.entries(posN).forEach(([pos,ct])=>{
-    for(let i=0;i<ct;i++){
-      const seed=hashNum(pos+"_"+i*13);
-      const nm=_NAMEPOOL[(seed+i)%_NAMEPOOL.length];
-      const name= pos==="DEF" ? (nm+" D/ST") : (_FIRST[seed%_FIRST.length]+". "+nm);
-      arr.push({ id:"fa_"+pos+i, name, pos, num:pos==="DEF"?0:(seed%89)+1,
-        proj:Math.round((3+seed%14)*10)/10, opp:"vs "+["CLE","NYG","LV","MIA","GB","SF","DEN","CHI"][seed%8], pts:0,yds:0,td:0,rec:0 });
-    }
-  });
-  _poolCache=arr; return arr;
+const POS_ORDER={RB:0,WR:1,QB:2,TE:3,K:4,DEF:5};
+function ensurePool(){ if(!app.pool && !app.poolLoading && !app.poolError) loadPool(); }
+async function loadPool(){
+  app.poolLoading=true; app.poolError=null;
+  try{
+    const td=await (await fetch(ESPN+"/teams")).json();
+    const teams=td.sports[0].leagues[0].teams.map(x=>x.team);
+    const rosters=await Promise.all(teams.map(t=> fetch(ESPN+"/teams/"+t.id+"/roster").then(r=>r.json()).catch(()=>null)));
+    const pool=[];
+    rosters.forEach((rd,ti)=>{
+      const team=teams[ti];
+      const logo=(team.logos&&team.logos[0]&&team.logos[0].href)||"";
+      pool.push({ id:"def_"+team.id, name:(team.shortDisplayName||team.abbreviation)+" D/ST", pos:"DEF",
+        teamAb:team.abbreviation, teamId:team.id, logo, proj:0, num:0, injury:"" });
+      if(!rd||!rd.athletes) return;
+      rd.athletes.forEach(grp=>{ (grp.items||[]).forEach(a=>{
+        let pos=(a.position&&a.position.abbreviation)||""; if(pos==="PK")pos="K";
+        if(!["QB","RB","WR","TE","K"].includes(pos)) return;
+        pool.push({ id:"e"+a.id, espnId:a.id, name:a.displayName, pos, teamAb:team.abbreviation, teamId:team.id,
+          headshot:(a.headshot&&a.headshot.href)||"", jersey:a.jersey, num:a.jersey||0, age:a.age,
+          exp:(a.experience&&a.experience.years), college:(a.college&&a.college.name)||"",
+          injury:(a.injuries&&a.injuries[0]&&a.injuries[0].status)||"", proj:0 });
+      }); });
+    });
+    app.pool=pool;
+  }catch(err){ app.poolError="Couldn't load ESPN players — tap retry."; }
+  app.poolLoading=false;
+  if(app.tab==="draft") renderDraft(); else if(app.tab==="players") renderPlayers();
+}
+function availablePlayers(){ return app.pool||[]; }
+async function openPlayerDetail(p){
+  if(!p.espnId){ toast("No profile for "+p.name); return; }
+  app.pDetail={p, loading:true}; showDetailModal();
+  let data=null, bye="";
+  try{ data=await (await fetch("https://site.web.api.espn.com/apis/common/v3/sports/football/nfl/athletes/"+p.espnId+"/overview")).json(); }catch(e){}
+  try{ const sd=await (await fetch(ESPN+"/teams/"+p.teamId+"/schedule")).json();
+    const weeks=new Set((sd.events||[]).map(e=>e.week&&e.week.number).filter(Boolean));
+    for(let w=1;w<=18;w++){ if(!weeks.has(w)){ bye=w; break; } } }catch(e){}
+  app.pDetail = data ? {p, data, bye, loading:false} : {p, error:true, loading:false};
+  showDetailModal();
+}
+function showDetailModal(){
+  const ov=$("overlay"); const D=app.pDetail; if(!D){ ov.innerHTML=""; return; }
+  const p=D.p;
+  const pic = p.headshot?`<img src="${p.headshot}" style="width:56px;height:56px;border-radius:50%;object-fit:cover;background:#1b2444">`
+    : (p.logo?`<img src="${p.logo}" style="width:48px;height:48px;object-fit:contain">`:avatarHTML(p));
+  const head=`<div style="display:flex;align-items:center;gap:12px">${pic}
+    <div><div style="font-weight:800;font-size:18px">${p.name}</div>
+      <div class="muted" style="font-size:12px">${p.pos} · ${p.teamAb||""}${p.jersey?" · #"+p.jersey:""}</div></div></div>`;
+  let body="";
+  if(D.loading) body=`<div class="muted" style="text-align:center;padding:16px">🔄 Loading profile…</div>`;
+  else if(D.error) body=`<div class="muted" style="margin-top:10px">Couldn't load profile.</div>`;
+  else {
+    const d=D.data||{}, f=d.fantasy||{}, st=d.statistics||{}, ro=d.rotowire||{};
+    const bio=[p.age?("Age "+p.age):"", p.exp!=null?(p.exp+" yr exp"):"", p.college||"", (p.injury&&p.injury!=="ACTIVE")?("⚠ "+p.injury):""].filter(Boolean).join(" · ");
+    const sp=(st.splits&&st.splits[0]&&st.splits[0].stats)||null, labels=st.labels||[];
+    let statsHtml="";
+    if(sp){ statsHtml=`<div style="font-size:12px;font-weight:700;color:var(--gold);margin:12px 0 4px">Last Season</div>
+      <div style="overflow-x:auto"><table class="std"><tr>${labels.slice(0,8).map(l=>`<th>${l}</th>`).join("")}</tr>
+      <tr>${sp.slice(0,8).map(v=>`<td>${v}</td>`).join("")}</tr></table></div>`; }
+    body=`${bio?`<div style="font-size:12px;margin-top:10px">${bio}</div>`:""}
+      ${D.bye?`<div class="muted" style="font-size:12px;margin-top:4px">Bye: <b style="color:var(--txt)">Week ${D.bye}</b></div>`:""}
+      ${(f.draftRank||f.positionRank)?`<div style="font-size:12px;margin-top:6px">Draft rank <b style="color:var(--gold)">#${f.draftRank||"—"}</b> · ${p.pos}${f.positionRank||"—"} · ${f.percentOwned||0}% rostered</div>`:""}
+      ${statsHtml}
+      ${f.projection?`<div style="font-size:12px;font-weight:700;color:var(--gold);margin:12px 0 4px">Outlook</div><div style="font-size:12px;line-height:1.5">${f.projection}</div>`:""}
+      ${ro.headline?`<div style="font-size:12px;font-weight:700;color:var(--gold);margin:12px 0 4px">Latest</div><div style="font-size:12px;line-height:1.5"><b>${ro.headline}</b><br><span class="muted">${(ro.story||"").slice(0,220)}…</span></div>`:""}`;
+  }
+  ov.innerHTML=`<div class="modal"><div class="box" style="max-width:410px;text-align:left;max-height:86vh;overflow:auto">
+    ${head}${body}<button class="btn sec" id="pdClose" style="width:100%;margin-top:16px">Close</button></div></div>`;
+  ov.querySelector("#pdClose").onclick=()=>{ app.pDetail=null; ov.innerHTML=""; };
 }
 function posChips(s){
   const chips=el("div","chips");
   ["ALL","QB","RB","WR","TE","K","DEF"].forEach(pos=>{
     const c=el("div","chip"+(app.pFilter===pos?" on":"")); c.textContent=pos;
-    c.onclick=()=>{ app.pFilter=pos; renderPlayers(); }; chips.appendChild(c);
+    c.onclick=()=>{ app.pFilter=pos; app.tab==="draft"?renderDraft():renderPlayers(); }; chips.appendChild(c);
   });
   s.appendChild(chips);
 }
 function faRow(p, btnLabel, btnCls, onClick){
-  const row=el("div","plr"); row.style.gridTemplateColumns="34px 26px 1fr auto";
+  const row=el("div","plr"); row.style.gridTemplateColumns="34px 26px 1fr auto"; row.style.cursor="pointer";
+  const inj = (p.injury && p.injury!=="ACTIVE") ? '<span style="color:var(--opp);font-size:9px;font-weight:800">⚠ </span>' : "";
   row.innerHTML=`${avatarHTML(p)}<div class="pos">${p.pos}</div>
-    <div><div class="nm">${p.name} ${statusTag(p)}</div><div class="meta2">${p.opp||""} · proj ${p.proj}</div></div><div></div>`;
+    <div><div class="nm">${inj}${p.name}</div><div class="meta2">${p.teamAb||p.opp||""}${p.jersey?" · #"+p.jersey:""}</div></div><div></div>`;
+  row.onclick=()=>openPlayerDetail(p);
   const b=el("button","btn sm"+(btnCls||"")); b.textContent=btnLabel; b.style.marginLeft="auto";
-  b.onclick=()=>onClick(b); row.lastElementChild.appendChild(b);
+  b.onclick=(e)=>{ e.stopPropagation(); onClick(b); }; row.lastElementChild.appendChild(b);
   return row;
+}
+function poolGuard(s,rerender){
+  if(app.poolLoading || (!app.pool && !app.poolError)){ s.appendChild(el("div","card","<div class='muted' style='text-align:center;padding:12px'>🔄 Loading real NFL players from ESPN…</div>")); return false; }
+  if(app.poolError){ const c=el("div","card"); c.innerHTML=`<div class="muted">⚠ ${app.poolError}</div>`;
+    const b=el("button","btn"); b.style.width="100%"; b.style.marginTop="10px"; b.textContent="Retry"; b.onclick=()=>{ app.poolError=null; ensurePool(); rerender(); }; c.appendChild(b); s.appendChild(c); return false; }
+  return true;
 }
 function renderPlayers(){
   const s=$("screen"); s.innerHTML="";
-  const ts=el("div","tabset");
-  [["players","Add / Drop"],["draft","Draft Room"]].forEach(([id,lab])=>{
-    const b=el("button",app.pView===id?"on":"",lab); b.onclick=()=>{ app.pView=id; renderPlayers(); }; ts.appendChild(b);
-  });
-  s.appendChild(ts);
-  if(app.pView==="draft"){ renderDraft(s); return; }
-
-  s.appendChild(el("div","card",`<h2 class='title'>Free Agents</h2>
-    <div class='muted' style='font-size:12px'>FAAB budget: <b style='color:var(--gold)'>$74</b> · Add to your bench; if the roster's full you'll pick someone to drop.</div>`));
+  s.appendChild(el("div","card",`<h2 class='title'>Players · real NFL data</h2>
+    <div class='muted' style='font-size:12px'>Real players from ESPN — tap any player for research (stats, projection, bye, news). Add to your bench; roster full → pick a drop.</div>`));
+  if(!poolGuard(s,renderPlayers)) return;
   posChips(s);
   const rostIds=new Set([...myStarters,...myBench].map(p=>p.id));
   const cap=app.settings.league.rosterSize||16;
   const filled=[...myStarters,...myBench].length;
   s.appendChild(el("div","muted",`<div style='font-size:11px;text-align:center;margin-bottom:8px'>Roster <b style="color:${filled>=cap?'var(--opp)':'var(--gold)'}">${filled}/${cap}</b></div>`));
-  const pool=availablePlayers().filter(p=>!rostIds.has(p.id)).filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter).sort((a,b)=>b.proj-a.proj);
+  const pool=availablePlayers().filter(p=>!rostIds.has(p.id)).filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter)
+    .sort((a,b)=> (POS_ORDER[a.pos]-POS_ORDER[b.pos]) || a.name.localeCompare(b.name));
   const c=el("div","card");
-  if(!pool.length) c.appendChild(el("div","muted","<div style='font-size:13px'>No free agents at this position.</div>"));
-  pool.slice(0,40).forEach(p=> c.appendChild(faRow(p,"+ Add","",()=>addPlayer(p))));
+  if(!pool.length) c.appendChild(el("div","muted","<div style='font-size:13px'>No players at this position.</div>"));
+  pool.slice(0,60).forEach(p=> c.appendChild(faRow(p,"+ Add","",()=>addPlayer(p))));
   s.appendChild(c);
-
   const rc=el("div","card"); rc.appendChild(el("h2","title","Your Roster · tap Drop"));
   [...myStarters,...myBench].filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter).forEach(p=>
     rc.appendChild(faRow(p,"Drop"," sec",()=>dropPlayer(p))));
@@ -1044,21 +1111,24 @@ function simDraft(){
     const dset=new Set(app.drafted.map(d=>d.p.id));
     const best=availablePlayers().filter(p=>!dset.has(p.id)).sort((a,b)=>b.proj-a.proj)[0];
     if(!best) break; app.drafted.push({p:best,by:oc,pick:pn}); }
-  renderPlayers();
+  renderDraft();
 }
-function renderDraft(s){
-  const teams=LEAGUE.map(t=>t.team), T=teams.length, ROUNDS=15;
+function renderDraft(){
+  const s=$("screen"); if(!s) return; s.innerHTML="";
+  const teams=LEAGUE.map(t=>t.team), T=teams.length, ROUNDS=15, TOTAL=T*ROUNDS;
   const pickNo=app.drafted.length+1;
+  const complete=app.drafted.length>=TOTAL;
   const curRound=Math.floor((pickNo-1)/T);
-  const onClock=teams[draftSlot(pickNo,T)];
+  const onClock=complete?null:teams[draftSlot(pickNo,T)];
   const isMe=onClock==="Your Team";
-  s.appendChild(el("div","card",`<h2 class='title'>🐍 Draft Board · snake</h2>
-    <div class='muted' style='font-size:12px'>Round ${Math.min(curRound+1,ROUNDS)}, Pick ${pickNo} · On the clock: <b style="color:${isMe?'var(--you)':'var(--txt)'}">${onClock}</b>${isMe?" — you're up! Tap a player below.":""}</div>`));
-  if(!isMe){ const b=el("button","btn"); b.style.width="100%"; b.style.marginBottom="12px"; b.textContent="⏩ Sim to your pick"; b.onclick=simDraft; s.appendChild(b); }
+  s.appendChild(el("div","card",`<h2 class='title'>🐍 Draft Board</h2>
+    <div class='muted' style='font-size:12px'>${complete?"✅ Draft complete — kept here for history.":`Snake · Round ${curRound+1}, Pick ${pickNo} · On the clock: <b style="color:${isMe?'var(--you)':'var(--txt)'}">${onClock}</b>${isMe?" — you're up! Tap a player below.":""}`}</div>`));
+  if(!poolGuard(s,renderDraft)) return;
+  if(!complete && !isMe){ const b=el("button","btn"); b.style.width="100%"; b.style.marginBottom="12px"; b.textContent="⏩ Sim to your pick"; b.onclick=simDraft; s.appendChild(b); }
 
-  const rounds=Math.min(ROUNDS, curRound+2);
-  const board=el("div","dboard"); const grid=el("div","dgrid");
-  grid.style.gridTemplateColumns=`26px repeat(${T},minmax(74px,1fr))`;
+  const rounds=complete?ROUNDS:Math.min(ROUNDS, curRound+2);
+  const board=el("div","dboard big"); const grid=el("div","dgrid");
+  grid.style.gridTemplateColumns=`30px repeat(${T},minmax(96px,1fr))`;
   grid.appendChild(el("div","dhead",""));
   teams.forEach(t=> grid.appendChild(el("div","dhead"+(t==="Your Team"?" me":""), t.split(" ")[0])));
   for(let r=0;r<rounds;r++){
@@ -1067,22 +1137,25 @@ function renderDraft(s){
       const pos = r%2===0 ? col : (T-1-col);
       const pn = r*T + pos + 1;
       const pk = app.drafted[pn-1];
-      const now = pn===pickNo;
+      const now = !complete && pn===pickNo;
       const cell=el("div","dcell"+(pk?"":" empty")+(now?" now":""));
       if(pk){ cell.style.borderLeft="3px solid "+posHue(pk.p.pos);
-        cell.innerHTML=`<div class="pk">${pn} · ${pk.p.pos}</div><div class="pn">${pk.p.name}</div>`; }
+        cell.innerHTML=`<div class="pk">${pn} · ${pk.p.pos} ${pk.p.teamAb||""}</div><div class="pn">${pk.p.name}</div>`; }
       else cell.innerHTML=`<div class="pk">${pn}</div>${now?'<div class="pn" style="color:var(--gold)">on clock</div>':''}`;
       grid.appendChild(cell);
     }
   }
   board.appendChild(grid); s.appendChild(board);
 
-  posChips(s);
-  const dset=new Set(app.drafted.map(d=>d.p.id));
-  const avail=availablePlayers().filter(p=>!dset.has(p.id)).filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter).sort((a,b)=>b.proj-a.proj);
-  const c=el("div","card"); c.appendChild(el("h2","title","Best Available"));
-  avail.slice(0,40).forEach(p=> c.appendChild(faRow(p, isMe?"Draft":"Sim first", "", ()=>{ if(!isMe){ toast("Not your pick — Sim to your turn"); return; } app.drafted.push({p,by:onClock,pick:pickNo}); toast("Drafted "+p.name); renderPlayers(); })));
-  s.appendChild(c);
+  if(!complete){
+    posChips(s);
+    const dset=new Set(app.drafted.map(d=>d.p.id));
+    const avail=availablePlayers().filter(p=>!dset.has(p.id)).filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter)
+      .sort((a,b)=> (POS_ORDER[a.pos]-POS_ORDER[b.pos]) || a.name.localeCompare(b.name));
+    const c=el("div","card"); c.appendChild(el("h2","title","Available · tap for research"));
+    avail.slice(0,60).forEach(p=> c.appendChild(faRow(p, isMe?"Draft":"Sim first", "", ()=>{ if(!isMe){ toast("Not your pick — Sim to your turn"); return; } app.drafted.push({p,by:onClock,pick:pickNo}); toast("Drafted "+p.name); renderDraft(); })));
+    s.appendChild(c);
+  }
 }
 
 // ============================ LEAGUE ============================
