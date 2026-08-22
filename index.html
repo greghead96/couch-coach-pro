@@ -223,7 +223,7 @@ let app = {
   earnedThisWeek:0, pityCount:0, realData:false, chat:CHAT_SEED.slice(),
   leagueId:null, leagueData:null, sleeperUserId:null,
   sim:null, armed:null, matchupIdx:0,
-  nfl:{ games:null, loading:false, error:null, selected:null, gamecast:null },
+  nfl:{ games:null, loading:false, error:null, selected:null, gamecast:null, view:"plays", pollId:null, pollFor:null },
   settings:{
     scoring:{ passYdsPerPt:25, passTD:4, passInt:-2, rushYdsPerPt:10, rushTD:6,
               ppr:0.5, recYdsPerPt:10, recTD:6, fumLost:-2, twoPt:2 },
@@ -511,6 +511,7 @@ function render(){
   top.querySelector("#commishBtn").onclick=()=>{ app.tab="commish"; app.armed=null; render(); };
   top.querySelector("#bellBtn").onclick=()=>{ app.tab="home"; app.armed=null; render(); };
   const scr=el("div"); scr.id="screen"; scr.className="screen"; $("app").appendChild(scr);
+  if(app.tab!=="nfl") stopPoll();
   renderTab();
   renderNav();
 }
@@ -1106,19 +1107,35 @@ async function loadNFLScoreboard(){
   app.nfl.loading=false;
   if(app.tab==="nfl") renderNFL();
 }
-async function loadGamecast(id){
-  app.nfl.selected=id; app.nfl.gamecast=null; renderNFL();
+async function loadGamecast(id, silent){
+  app.nfl.selected=id;
+  if(!silent){ app.nfl.gamecast=null; app.nfl.view="plays"; renderNFL(); }
   try{
     const d=await (await fetch(ESPN+"/summary?event="+id)).json();
-    app.nfl.gamecast={ plays:(d.scoringPlays||[]).map(p=>({
-      q:(p.period&&p.period.number)||"?", clock:(p.clock&&p.clock.displayValue)||"", text:p.text||"" })) };
+    const dr=d.drives||{};
+    const drivesList=[...(dr.previous||[])]; if(dr.current) drivesList.push(dr.current);
+    const plays=[];
+    drivesList.forEach(drv=>(drv.plays||[]).forEach(p=>plays.push({
+      q:(p.period&&p.period.number)||"?", clock:(p.clock&&p.clock.displayValue)||"",
+      text:p.text||"", scoring:!!p.scoringPlay, away:p.awayScore, home:p.homeScore })));
+    const box=((d.boxscore&&d.boxscore.players)||[]).map(tm=>({
+      ab:(tm.team&&tm.team.abbreviation)||"",
+      groups:(tm.statistics||[]).map(g=>({ name:g.name, labels:g.labels||[],
+        rows:(g.athletes||[]).map(a=>({ name:(a.athlete&&a.athlete.displayName)||"", stats:a.stats||[] })) })) }));
+    app.nfl.gamecast={ plays, box };
   }catch(err){ app.nfl.gamecast={error:true}; }
   if(app.tab==="nfl") renderNFL();
 }
+function startPoll(id){
+  if(app.nfl.pollId && app.nfl.pollFor===id) return;
+  stopPoll(); app.nfl.pollFor=id;
+  app.nfl.pollId=setInterval(()=>{ if(app.tab==="nfl" && app.nfl.selected===id) loadGamecast(id,true); else stopPoll(); }, 20000);
+}
+function stopPoll(){ if(app.nfl.pollId){ clearInterval(app.nfl.pollId); app.nfl.pollId=null; app.nfl.pollFor=null; } }
 function renderNFL(){
   const s=$("screen"); if(!s) return; s.innerHTML="";
   s.appendChild(el("div","card",`<h2 class="title">🏈 NFL Live · real ESPN data</h2>
-    <div class="muted" style="font-size:12px">Live games, scores & play-by-play straight from ESPN's public API — the free feed that powers CCF's scoring and power-up quarters.</div>`));
+    <div class="muted" style="font-size:12px">Live scores, full play-by-play, and player box scores — straight from ESPN's public API. Tap a game.</div>`));
   if(app.nfl.loading){ s.appendChild(el("div","card","<div class='muted' style='text-align:center;padding:12px'>🔄 Loading live games…</div>")); return; }
   if(app.nfl.error){
     const c=el("div","card"); c.innerHTML=`<div class="muted">⚠ ${app.nfl.error}</div>`;
@@ -1134,7 +1151,7 @@ function renderNFL(){
     const c=el("div","card"); c.style.cursor="pointer"; c.style.padding="12px"; c.style.marginBottom="10px";
     c.innerHTML=`<div class="row">
       <span style="flex:1"><b>${g.away.ab}</b> ${g.away.score!=null?g.away.score:""}</span>
-      <span style="flex:1;text-align:center;font-size:11px;color:${sc}">${g.status}</span>
+      <span style="flex:1;text-align:center;font-size:11px;color:${sc}">${live?"🔴 ":""}${g.status}</span>
       <span style="flex:1;text-align:right">${g.home.score!=null?g.home.score:""} <b>${g.home.ab}</b></span></div>`;
     c.onclick=()=>loadGamecast(g.id);
     s.appendChild(c);
@@ -1144,25 +1161,59 @@ function renderNFL(){
 }
 function renderGamecast(s){
   const g=app.nfl.games.find(x=>x.id===app.nfl.selected);
+  if(g && g.state==="in") startPoll(g.id); else stopPoll();
   const back=el("button","btn sec"); back.style.width="100%"; back.style.marginBottom="12px"; back.textContent="← All games";
-  back.onclick=()=>{ app.nfl.selected=null; app.nfl.gamecast=null; renderNFL(); };
+  back.onclick=()=>{ stopPoll(); app.nfl.selected=null; app.nfl.gamecast=null; renderNFL(); };
   s.appendChild(back);
   if(g){
     s.appendChild(el("div","card",`<div class="scoreboard">
       <div class="ts me"><div class="nm">${g.away.ab}</div><div class="pts">${g.away.score!=null?g.away.score:0}</div></div>
-      <div class="clock"><div class="q">${g.state==='in'?'LIVE':g.state==='post'?'FINAL':'SOON'}</div><div class="st">${g.status}</div></div>
+      <div class="clock"><div class="q">${g.state==='in'?'🔴 LIVE':g.state==='post'?'FINAL':'SOON'}</div><div class="st">${g.status}${g.state==='in'?' · auto-refresh':''}</div></div>
       <div class="ts op"><div class="nm">${g.home.ab}</div><div class="pts">${g.home.score!=null?g.home.score:0}</div></div>
     </div>`));
   }
-  if(!app.nfl.gamecast){ s.appendChild(el("div","card","<div class='muted' style='text-align:center;padding:12px'>🔄 Loading gamecast…</div>")); return; }
-  if(app.nfl.gamecast.error){ s.appendChild(el("div","card","<div class='muted'>Couldn't load play-by-play.</div>")); return; }
-  const plays=app.nfl.gamecast.plays||[];
-  const c=el("div","card"); c.appendChild(el("h2","title","Scoring Plays · by quarter"));
-  if(!plays.length) c.appendChild(el("div","muted","<div style='font-size:13px'>No scoring plays yet — game hasn't started or is scoreless.</div>"));
-  else plays.forEach(p=> c.appendChild(el("div","",`<div style="padding:8px 0;border-top:1px solid var(--line);font-size:13px">
-    <span class="muted" style="font-size:11px">Q${p.q} ${p.clock}</span> · ${p.text}</div>`)));
+  if(!app.nfl.gamecast){ s.appendChild(el("div","card","<div class='muted' style='text-align:center;padding:12px'>🔄 Loading game details…</div>")); return; }
+  if(app.nfl.gamecast.error){ s.appendChild(el("div","card","<div class='muted'>Couldn't load game details.</div>")); return; }
+  const ts=el("div","tabset");
+  [["plays","Gamecast"],["box","Box Score"]].forEach(([id,lab])=>{
+    const b=el("button",app.nfl.view===id?"on":"",lab); b.onclick=()=>{ app.nfl.view=id; renderNFL(); }; ts.appendChild(b);
+  });
+  s.appendChild(ts);
+  if(app.nfl.view==="box") renderBox(s); else renderPlays(s,g);
+}
+function renderPlays(s,g){
+  const plays=(app.nfl.gamecast.plays||[]).slice().reverse();
+  const c=el("div","card"); c.appendChild(el("h2","title","Play-by-Play · latest first"));
+  if(!plays.length){ c.appendChild(el("div","muted","<div style='font-size:13px'>No plays yet — game hasn't started.</div>")); s.appendChild(c); return; }
+  plays.slice(0,120).forEach(p=>{
+    const d=el("div","");
+    d.style.cssText="padding:8px 0;border-top:1px solid var(--line);font-size:13px"+(p.scoring?";border-left:3px solid var(--gold);padding-left:8px":"");
+    const score=(p.scoring&&p.away!=null)?` <span class="muted" style="font-size:11px">(${g?g.away.ab:''} ${p.away}–${p.home} ${g?g.home.ab:''})</span>`:"";
+    d.innerHTML=`<span class="muted" style="font-size:11px">Q${p.q} ${p.clock}</span> ${p.scoring?'🏈 ':''}${p.text}${score}`;
+    c.appendChild(d);
+  });
   s.appendChild(c);
-  s.appendChild(el("div","muted","<div style='font-size:11px;text-align:center'>💡 Every play is tagged with its quarter — exactly the per-quarter data CCF uses to resolve power-ups.</div>"));
+  s.appendChild(el("div","muted","<div style='font-size:11px;text-align:center'>💡 Each play carries its quarter — the exact data CCF uses to resolve power-ups.</div>"));
+}
+function renderBox(s){
+  const box=app.nfl.gamecast.box||[];
+  const want=["passing","rushing","receiving","kicking","defensive"];
+  const nice={passing:"Passing",rushing:"Rushing",receiving:"Receiving",kicking:"Kicking",defensive:"Defense"};
+  if(!box.length){ s.appendChild(el("div","card","<div class='muted'>No box score yet.</div>")); return; }
+  box.forEach(tm=>{
+    const card=el("div","card"); card.appendChild(el("h2","title",tm.ab+" — Player Stats"));
+    let any=false;
+    want.forEach(gn=>{
+      const g=tm.groups.find(x=>x.name===gn); if(!g||!g.rows.length) return; any=true;
+      card.appendChild(el("div","",`<div style="font-size:12px;font-weight:700;color:var(--gold);margin:12px 0 4px">${nice[gn]||gn}</div>`));
+      const wrap=el("div"); wrap.style.overflowX="auto";
+      let html=`<table class="std"><tr><th>Player</th>${g.labels.map(l=>`<th>${l}</th>`).join("")}</tr>`;
+      g.rows.forEach(r=>{ html+=`<tr><td style="white-space:nowrap">${r.name}</td>${r.stats.map(v=>`<td>${v}</td>`).join("")}</tr>`; });
+      html+=`</table>`; wrap.innerHTML=html; card.appendChild(wrap);
+    });
+    if(!any) card.appendChild(el("div","muted","<div style='font-size:13px'>No stats yet.</div>"));
+    s.appendChild(card);
+  });
 }
 
 // ============================ BOOT ============================
