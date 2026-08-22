@@ -386,7 +386,7 @@ let app = {
   sim:null, armed:null, matchupIdx:0,
   leagueMatchup:null, schedTeam:"Your Team", pFilter:"ALL", pSort:"rank", pView:"players", drafted:[], pStatTab:null,
   myTeam:"Your Team", oppTeam:"Burrow Bandits", realLeague:false,
-  draft:null, draftChannel:null, isCommish:false, members:[], queue:[], draftView:"board", commishMode:false, lineup:null,
+  draft:null, draftChannel:null, isCommish:false, members:[], queue:[], draftView:"board", commishMode:false, lineup:null, trades:[], tradeBuilder:null,
   pool:null, poolLoading:false, poolError:null, pDetail:null,
   nfl:{ games:null, loading:false, error:null, selected:null, gamecast:null, view:"plays", pollId:null, pollFor:null },
   settings:{
@@ -766,7 +766,7 @@ function copyCode(code){
 }
 async function enterLeague(id, name, code){
   app.connectedLeague=name; app.sbLeagueId=id; app.leagueCode=code||null;
-  await loadLeagueData(); await loadDraft(); await loadLineup(); loadQueue(); subscribeDraft();
+  await loadLeagueData(); await loadDraft(); await loadLineup(); await loadTrades(); loadQueue(); subscribeDraft();
   app.sim=freshSim(); app.tab="home"; render();
 }
 async function autoEnterIfSingle(){
@@ -1452,9 +1452,14 @@ function subscribeDraft(){
   if(app.draftChannel || !app.sbLeagueId) return;
   const lid=app.sbLeagueId;
   const refresh=async ()=>{ await loadDraft(); if(app.tab==="draft") renderDraft(); if(app.tab==="team") renderTeam(); };
+  const refreshTrades=async ()=>{ const before=app.trades.filter(t=>t.to_user===app.user.id&&t.status==="pending").length;
+    await loadTrades(); const after=app.trades.filter(t=>t.to_user===app.user.id&&t.status==="pending").length;
+    if(after>before) toast("📨 New trade offer!");
+    if(app.tab==="league") renderLeague(); };
   app.draftChannel=sb.channel("draft-"+lid)
     .on("postgres_changes",{event:"*",schema:"public",table:"draft_picks",filter:"league_id=eq."+lid}, refresh)
     .on("postgres_changes",{event:"*",schema:"public",table:"drafts",filter:"league_id=eq."+lid}, refresh)
+    .on("postgres_changes",{event:"*",schema:"public",table:"trades",filter:"league_id=eq."+lid}, refreshTrades)
     .subscribe();
 }
 function unsubscribeDraft(){ if(app.draftChannel){ try{ sb.removeChannel(app.draftChannel); }catch(e){} app.draftChannel=null; } }
@@ -1526,7 +1531,83 @@ function playerActionModal(pick){
   };
   ov.querySelector("#paCancel").onclick=()=>{ ov.innerHTML=""; };
 }
-function openTradeBuilder(pick){ toast("Trades — coming in the next update"); }
+async function loadTrades(){
+  if(!app.sbLeagueId){ app.trades=[]; return; }
+  try{ const {data}=await sb.from("trades").select("*").eq("league_id",app.sbLeagueId).order("created_at",{ascending:false}); app.trades=data||[]; }
+  catch(e){ app.trades=[]; }
+}
+function teamNameOf(uid){ const m=app.members.find(x=>x.user_id===uid); return m?(m.team_name||"Team"):"Team"; }
+function playerNameOf(pid){ const p=(app.draft?app.draft.picks:[]).find(x=>x.player_id===pid); return p?p.player_name:"player"; }
+function openTradeBuilder(pick){
+  const others=app.members.filter(m=>m.user_id!==app.user.id);
+  if(!others.length){ toast("No other managers to trade with yet"); return; }
+  app.tradeBuilder={ to:others[0].user_id, offer:new Set(pick?[pick.player_id]:[]), request:new Set() };
+  renderTradeBuilder();
+}
+function renderTradeBuilder(){
+  const tb=app.tradeBuilder; const ov=$("overlay"); if(!tb){ ov.innerHTML=""; return; }
+  const myPicks=myDraftPicks();
+  const theirPicks=(app.draft?app.draft.picks:[]).filter(p=>p.user_id===tb.to);
+  const others=app.members.filter(m=>m.user_id!==app.user.id);
+  const rowHtml=(p,side,sel)=>`<button class="btn sec tbP" data-side="${side}" data-id="${p.player_id}" style="width:100%;text-align:left;margin-top:6px;${sel?'border-color:var(--gold);color:var(--gold)':''}">${sel?"✓ ":""}${p.pos} · ${p.player_name} <span class="muted" style="font-size:11px">${p.team||""}</span></button>`;
+  ov.innerHTML=`<div class="modal"><div class="box" style="max-width:400px;text-align:left;max-height:88vh;overflow:auto">
+    <div style="font-weight:800;font-size:16px">Propose a Trade</div>
+    <div class="muted" style="font-size:12px;margin:8px 0 4px">Trade with</div>
+    <select class="input" id="tbTarget">${others.map(m=>`<option value="${m.user_id}" ${m.user_id===tb.to?"selected":""}>${m.team_name||"Team"}</option>`).join("")}</select>
+    <div style="font-size:12px;font-weight:700;color:var(--gold);margin:14px 0 2px">You give — ${teamNameOf(app.user.id)}</div>
+    ${myPicks.map(p=>rowHtml(p,"offer",tb.offer.has(p.player_id))).join("")||'<div class="muted" style="font-size:12px">No players</div>'}
+    <div style="font-size:12px;font-weight:700;color:var(--gold);margin:14px 0 2px">You get — ${teamNameOf(tb.to)}</div>
+    ${theirPicks.map(p=>rowHtml(p,"request",tb.request.has(p.player_id))).join("")||'<div class="muted" style="font-size:12px">No players</div>'}
+    <button class="btn" id="tbPropose" style="width:100%;margin-top:16px">Send Trade Offer</button>
+    <button class="btn sec" id="tbCancel" style="width:100%;margin-top:8px">Cancel</button></div></div>`;
+  ov.querySelector("#tbTarget").onchange=(e)=>{ tb.to=e.target.value; tb.request=new Set(); renderTradeBuilder(); };
+  ov.querySelectorAll(".tbP").forEach(b=> b.onclick=()=>{ const set=b.dataset.side==="offer"?tb.offer:tb.request; const id=b.dataset.id; set.has(id)?set.delete(id):set.add(id); renderTradeBuilder(); });
+  ov.querySelector("#tbCancel").onclick=()=>{ app.tradeBuilder=null; ov.innerHTML=""; };
+  ov.querySelector("#tbPropose").onclick=async ()=>{
+    if(!tb.offer.size||!tb.request.size){ toast("Pick at least one player on each side"); return; }
+    try{ const {error}=await sb.rpc("propose_trade",{ lid:app.sbLeagueId, target:tb.to, offer:[...tb.offer], request:[...tb.request] }); if(error) throw error;
+      app.tradeBuilder=null; ov.innerHTML=""; await loadTrades(); toast("Trade offer sent"); app.tab="league"; app.leagueTab="trades"; render(); }
+    catch(e){ toast(e.message||"Trade failed"); }
+  };
+}
+async function respondTrade(id, accept){
+  try{ const {error}=await sb.rpc("respond_trade",{ tid:id, accept }); if(error) throw error;
+    await loadTrades(); await loadDraft(); await loadLineup(); toast(accept?"Trade accepted! ✅":"Trade rejected"); renderLeague(); }
+  catch(e){ toast(e.message||"Failed"); }
+}
+async function cancelTrade(id){
+  try{ const {error}=await sb.rpc("cancel_trade",{ tid:id }); if(error) throw error; await loadTrades(); toast("Trade cancelled"); renderLeague(); }
+  catch(e){ toast(e.message||"Failed"); }
+}
+function renderTrades(s){
+  const meId=app.user.id;
+  const incoming=app.trades.filter(t=>t.to_user===meId && t.status==="pending");
+  const outgoing=app.trades.filter(t=>t.from_user===meId && t.status==="pending");
+  const history=app.trades.filter(t=>t.status!=="pending").slice(0,8);
+  const names=(ids)=>(ids||[]).map(playerNameOf).join(", ")||"—";
+  s.appendChild(el("div","card","<div class='muted' style='font-size:12px'>Start a trade from <b style='color:var(--txt)'>My Team</b> or <b style='color:var(--txt)'>Players</b> → tap a player → <b style='color:var(--txt)'>Offer in Trade</b>.</div>"));
+  const tradeCard=(t,kind)=>{
+    const c=el("div","card");
+    c.innerHTML=`<div style="font-size:12px;font-weight:700">${kind==="in"?("From "+teamNameOf(t.from_user)):("To "+teamNameOf(t.to_user))}</div>
+      <div style="font-size:13px;margin-top:6px"><span class="muted">You get:</span> ${kind==="in"?names(t.offer):names(t.request)}</div>
+      <div style="font-size:13px;margin-top:2px"><span class="muted">You give:</span> ${kind==="in"?names(t.request):names(t.offer)}</div>`;
+    if(kind==="in"){
+      const row=el("div","row"); row.style.marginTop="10px";
+      const a=el("button","btn"); a.style.flex="1"; a.textContent="Accept"; a.onclick=()=>respondTrade(t.id,true);
+      const r=el("button","btn sec"); r.style.flex="1"; r.textContent="Reject"; r.onclick=()=>respondTrade(t.id,false);
+      row.append(a,r); c.appendChild(row);
+    } else {
+      const cx=el("button","btn sec"); cx.style.width="100%"; cx.style.marginTop="10px"; cx.textContent="Cancel Offer"; cx.onclick=()=>cancelTrade(t.id); c.appendChild(cx);
+    }
+    return c;
+  };
+  if(incoming.length){ s.appendChild(el("h2","title","📨 Incoming ("+incoming.length+")")); incoming.forEach(t=>s.appendChild(tradeCard(t,"in"))); }
+  if(outgoing.length){ s.appendChild(el("h2","title","📤 Sent")); outgoing.forEach(t=>s.appendChild(tradeCard(t,"out"))); }
+  if(!incoming.length && !outgoing.length) s.appendChild(el("div","card","<div class='muted' style='font-size:13px'>No pending trades.</div>"));
+  if(history.length){ const h=el("div","card"); h.appendChild(el("h2","title","History"));
+    history.forEach(t=>{ const mine=t.from_user===meId; h.appendChild(el("div","",`<div style="padding:7px 0;border-top:1px solid var(--line);font-size:12px"><b>${t.status}</b> · ${mine?"you → "+teamNameOf(t.to_user):teamNameOf(t.from_user)+" → you"}</div>`)); });
+    s.appendChild(h); }
+}
 function openLineupChooser(i){
   const slot=SLOTS[i]; const myPicks=myDraftPicks();
   const eligible=myPicks.filter(p=>slot.pos.includes(p.pos));
@@ -1679,7 +1760,8 @@ function renderDraft(){
 function renderLeague(){
   const s=$("screen"); s.innerHTML="";
   const ts=el("div","tabset");
-  [["scoreboard","Scores"],["standings","Standings"],["playoffs","Playoffs"],["schedule","Schedule"],["chat","Chat"]].forEach(([id,lab])=>{
+  const incomingN = (app.trades||[]).filter(t=>t.to_user===(app.user&&app.user.id)&&t.status==="pending").length;
+  [["scoreboard","Scores"],["standings","Standings"],["playoffs","Playoffs"],["trades","Trades"+(incomingN?" ("+incomingN+")":"")],["schedule","Schedule"],["chat","Chat"]].forEach(([id,lab])=>{
     const b=el("button",app.leagueTab===id?"on":"",lab); b.onclick=()=>{app.leagueTab=id;app.leagueMatchup=null;renderLeague();}; ts.appendChild(b);
   });
   s.appendChild(ts);
@@ -1700,6 +1782,8 @@ function renderLeague(){
         s.appendChild(c);
       });
     }
+  } else if(app.leagueTab==="trades"){
+    renderTrades(s);
   } else if(app.leagueTab==="playoffs"){
     renderPlayoffs(s);
   } else if(app.leagueTab==="standings"){
