@@ -963,29 +963,28 @@ function rosterRow(p,isStarter){
 // ============================ PLAYERS (in-app add/drop — no Sleeper) ============================
 const POS_ORDER={RB:0,WR:1,QB:2,TE:3,K:4,DEF:5};
 function ensurePool(){ if(!app.pool && !app.poolLoading && !app.poolError) loadPool(); }
+const NFL_TEAM_IDS=[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,33,34];
 async function loadPool(){
   app.poolLoading=true; app.poolError=null;
   try{
-    const td=await (await fetch(ESPN+"/teams")).json();
-    const teams=td.sports[0].leagues[0].teams.map(x=>x.team);
-    const rosters=await Promise.all(teams.map(t=> fetch(ESPN+"/teams/"+t.id+"/roster").then(r=>r.json()).catch(()=>null)));
+    const rosters=await Promise.all(NFL_TEAM_IDS.map(id=>
+      fetch(ESPN+"/teams/"+id+"/roster").then(r=>r.ok?r.json():null).then(d=>({id,d})).catch(()=>({id,d:null}))));
     const pool=[];
-    rosters.forEach((rd,ti)=>{
-      const team=teams[ti];
-      const logo=(team.logos&&team.logos[0]&&team.logos[0].href)||"";
-      pool.push({ id:"def_"+team.id, name:(team.shortDisplayName||team.abbreviation)+" D/ST", pos:"DEF",
-        teamAb:team.abbreviation, teamId:team.id, logo, proj:0, num:0, injury:"" });
-      if(!rd||!rd.athletes) return;
-      rd.athletes.forEach(grp=>{ (grp.items||[]).forEach(a=>{
+    rosters.forEach(({id,d:rd})=>{
+      if(!rd) return;
+      const team=rd.team||{}; const ab=team.abbreviation||"";
+      const logo=team.logo||("https://a.espncdn.com/i/teamlogos/nfl/500/"+ab.toLowerCase()+".png");
+      pool.push({ id:"def_"+id, name:(team.name||ab)+" D/ST", pos:"DEF", teamAb:ab, teamId:id, logo, proj:0, num:0, injury:"" });
+      (rd.athletes||[]).forEach(grp=> (grp.items||[]).forEach(a=>{
         let pos=(a.position&&a.position.abbreviation)||""; if(pos==="PK")pos="K";
         if(!["QB","RB","WR","TE","K"].includes(pos)) return;
-        pool.push({ id:"e"+a.id, espnId:a.id, name:a.displayName, pos, teamAb:team.abbreviation, teamId:team.id,
+        pool.push({ id:"e"+a.id, espnId:a.id, name:a.displayName, pos, teamAb:ab, teamId:id,
           headshot:(a.headshot&&a.headshot.href)||"", jersey:a.jersey, num:a.jersey||0, age:a.age,
           exp:(a.experience&&a.experience.years), college:(a.college&&a.college.name)||"",
           injury:(a.injuries&&a.injuries[0]&&a.injuries[0].status)||"", proj:0 });
-      }); });
+      }));
     });
-    app.pool=pool;
+    if(pool.length) app.pool=pool; else app.poolError="No players returned — tap retry.";
   }catch(err){ app.poolError="Couldn't load ESPN players — tap retry."; }
   app.poolLoading=false;
   if(app.tab==="draft") renderDraft(); else if(app.tab==="players") renderPlayers();
