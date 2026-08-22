@@ -344,6 +344,7 @@ let app = {
   sim:null, armed:null, matchupIdx:0,
   leagueMatchup:null, schedTeam:"Your Team", pFilter:"ALL", pSort:"rank", pView:"players", drafted:[], pStatTab:null,
   myTeam:"Your Team", oppTeam:"Burrow Bandits", realLeague:false,
+  draft:null, draftChannel:null, isCommish:false,
   pool:null, poolLoading:false, poolError:null, pDetail:null,
   nfl:{ games:null, loading:false, error:null, selected:null, gamecast:null, view:"plays", pollId:null, pollFor:null },
   settings:{
@@ -702,6 +703,7 @@ async function loadLeagueData(){
     const members=(data||[]);
     const me=members.find(m=>m.user_id===app.user.id);
     app.myTeam=(me&&me.team_name)||"My Team";
+    app.isCommish=!!(me && me.role==="commissioner");
     app.schedTeam=app.myTeam;
     const others=members.filter(m=>m.user_id!==app.user.id);
     app.oppTeam=others.length ? (others[0].team_name||"Opponent") : "(waiting for opponents)";
@@ -753,7 +755,7 @@ function renderLeaguePicker(){
         <div class="muted" style="font-size:12px">${m.team_name||"(no team)"}${m.role==="commissioner"?" · commissioner":""}</div>
         <div style="font-size:12px;margin-top:8px">Invite code: <b style="color:var(--gold);letter-spacing:2px">${code}</b></div>`;
       const enter=el("button","btn"); enter.style.width="100%"; enter.style.marginTop="10px"; enter.textContent="Enter League →";
-      enter.onclick=async ()=>{ app.connectedLeague=(m.leagues&&m.leagues.name)||"League"; app.sbLeagueId=m.league_id; app.leagueCode=code; await loadLeagueData(); app.sim=freshSim(); render(); };
+      enter.onclick=async ()=>{ app.connectedLeague=(m.leagues&&m.leagues.name)||"League"; app.sbLeagueId=m.league_id; app.leagueCode=code; await loadLeagueData(); await loadDraft(); subscribeDraft(); app.sim=freshSim(); render(); };
       const cp=el("button","btn sec"); cp.style.width="100%"; cp.style.marginTop="6px"; cp.textContent="📋 Copy invite code";
       cp.onclick=()=>copyCode(code);
       card.appendChild(enter); card.appendChild(cp);
@@ -792,13 +794,14 @@ function accountModal(){
     <button class="btn sec" id="signOutBtn" style="width:100%;margin-top:8px">Sign Out</button>
     <button class="btn sec" id="acctClose" style="width:100%;margin-top:8px">Close</button></div></div>`;
   ov.querySelector("#copyCodeBtn").onclick=()=>copyCode(code);
-  ov.querySelector("#switchLg").onclick=()=>{ ov.innerHTML=""; app.connectedLeague=null; app.sbLeagueId=null; render(); };
+  ov.querySelector("#switchLg").onclick=()=>{ ov.innerHTML=""; unsubscribeDraft(); app.draft=null; app.realLeague=false; app.connectedLeague=null; app.sbLeagueId=null; render(); };
   ov.querySelector("#signOutBtn").onclick=()=>{ ov.innerHTML=""; signOut(); };
   ov.querySelector("#acctClose").onclick=()=>{ ov.innerHTML=""; };
 }
 async function signOut(){
   try{ await sb.auth.signOut(); }catch(e){}
-  app.user=null; app.connectedLeague=null; app.sbLeagueId=null; app.myLeagues=[]; app.authMode="login"; app.authErr=""; render();
+  unsubscribeDraft();
+  app.user=null; app.connectedLeague=null; app.sbLeagueId=null; app.myLeagues=[]; app.draft=null; app.realLeague=false; app.authMode="login"; app.authErr=""; render();
 }
 
 // ============================ CONNECT SLEEPER ============================
@@ -1076,6 +1079,25 @@ function playerCell(p,side,armedCfg,cq,leftSide){
 let swapPick=null;
 function renderTeam(){
   const s=$("screen"); s.innerHTML="";
+  if(app.realLeague){
+    const myPicks=((app.draft&&app.draft.picks)||[]).filter(p=>p.user_id===(app.user&&app.user.id));
+    if(!myPicks.length){
+      s.appendChild(el("div","card","<h2 class='title'>My Team</h2><div class='muted' style='font-size:13px'>You haven't drafted yet — head to the 🐍 <b style='color:var(--txt)'>Draft</b> tab to build your roster. Your team saves automatically.</div>"));
+      return;
+    }
+    s.appendChild(el("div","card",`<h2 class='title'>${app.myTeam} · Roster</h2>
+      <div class='muted' style='font-size:12px'>Your drafted players (saved to the league). Setting starters vs. bench comes in the next update.</div>`));
+    const order={QB:0,RB:1,WR:2,TE:3,K:4,DEF:5};
+    const sorted=myPicks.slice().sort((a,b)=>(order[a.pos]??9)-(order[b.pos]??9));
+    const c=el("div","card");
+    sorted.forEach(p=>{
+      const row=el("div","plr"); row.style.gridTemplateColumns="34px 26px 1fr auto";
+      row.innerHTML=`${avatarHTML({pos:p.pos,name:p.player_name,headshot:p.headshot})}<div class="pos">${p.pos}</div>
+        <div><div class="nm">${p.player_name}</div><div class="meta2">${p.team||""} · R${p.round}</div></div><div></div>`;
+      c.appendChild(row);
+    });
+    s.appendChild(c); return;
+  }
   s.appendChild(el("div","card",`<h2 class='title'>Set Your Lineup — Week 11</h2>
     <div class='muted' style='font-size:12px'>Tap a bench player, then a starter of the same position to swap. The colored tag shows the opponent's season rank vs that position — <b style="color:var(--you)">green = great matchup</b> (weak defense), <b style="color:var(--opp)">red = tough</b>.</div>`));
   const start=el("div","card"); start.appendChild(el("h2","title","Starters"));
@@ -1340,47 +1362,96 @@ function simDraft(){
     if(!best) break; app.drafted.push({p:best,by:oc,pick:pn}); }
   renderDraft();
 }
+// ---- real, persisted, multi-user draft (Supabase + realtime) ----
+async function loadDraft(){
+  const lid=app.sbLeagueId; if(!lid) return;
+  try{
+    const [dr,pk,mm]=await Promise.all([
+      sb.from("drafts").select("*").eq("league_id",lid).maybeSingle(),
+      sb.from("draft_picks").select("*").eq("league_id",lid).order("pick_no"),
+      sb.from("league_members").select("user_id, team_name").eq("league_id",lid)
+    ]);
+    const memMap={}; (mm.data||[]).forEach(m=>memMap[m.user_id]=m.team_name||"Team");
+    const d=dr.data;
+    app.draft={ status:(d&&d.status)||"pre", rounds:(d&&d.rounds)||15, order:(d&&d.member_order)||[], picks:pk.data||[], memMap };
+  }catch(e){ app.draft={ status:"pre", rounds:15, order:[], picks:[], memMap:{} }; }
+}
+function subscribeDraft(){
+  if(app.draftChannel || !app.sbLeagueId) return;
+  const lid=app.sbLeagueId;
+  const refresh=async ()=>{ await loadDraft(); if(app.tab==="draft") renderDraft(); if(app.tab==="team") renderTeam(); };
+  app.draftChannel=sb.channel("draft-"+lid)
+    .on("postgres_changes",{event:"*",schema:"public",table:"draft_picks",filter:"league_id=eq."+lid}, refresh)
+    .on("postgres_changes",{event:"*",schema:"public",table:"drafts",filter:"league_id=eq."+lid}, refresh)
+    .subscribe();
+}
+function unsubscribeDraft(){ if(app.draftChannel){ try{ sb.removeChannel(app.draftChannel); }catch(e){} app.draftChannel=null; } }
 function renderDraft(){
   const s=$("screen"); if(!s) return; s.innerHTML="";
-  const teams=LEAGUE.map(t=>t.team), T=teams.length, ROUNDS=15, TOTAL=T*ROUNDS;
-  const pickNo=app.drafted.length+1;
-  const complete=app.drafted.length>=TOTAL;
-  const curRound=Math.floor((pickNo-1)/T);
-  const onClock=complete?null:teams[draftSlot(pickNo,T)];
-  const isMe=onClock===app.myTeam;
-  s.appendChild(el("div","card",`<h2 class='title'>🐍 Draft Board</h2>
-    <div class='muted' style='font-size:12px'>${complete?"✅ Draft complete — kept here for history.":`Snake · Round ${curRound+1}, Pick ${pickNo} · On the clock: <b style="color:${isMe?'var(--you)':'var(--txt)'}">${onClock}</b>${isMe?" — you're up! Tap a player below.":""}`}</div>`));
-  if(!poolGuard(s,renderDraft)) return;
-  if(!complete && !isMe){ const b=el("button","btn"); b.style.width="100%"; b.style.marginBottom="12px"; b.textContent="⏩ Sim to your pick"; b.onclick=simDraft; s.appendChild(b); }
+  if(!app.draft){ s.appendChild(el("div","card","<div class='muted' style='text-align:center;padding:12px'>🔄 Loading draft…</div>")); loadDraft().then(()=>{ if(app.tab==="draft") renderDraft(); }); return; }
+  ensurePool();
+  const D=app.draft, order=D.order||[], N=order.length, ROUNDS=D.rounds||15, TOTAL=N*ROUNDS;
+  const done = D.status==="done" || (N>0 && D.picks.length>=TOTAL);
+  const live = D.status==="live" && !done;
+  const pno = D.picks.length+1;
+  const onclock = (live && N) ? order[draftSlot(pno,N)] : null;
+  const isMe = onclock===(app.user&&app.user.id);
+  const onclockName = onclock ? (D.memMap[onclock]||"Team") : "";
 
-  const rounds=complete?ROUNDS:Math.min(ROUNDS, curRound+2);
+  if(D.status==="pre"){
+    const c=el("div","card"); c.appendChild(el("h2","title","🐍 Draft"));
+    c.appendChild(el("div","muted","<div style='font-size:13px'>The draft hasn't started yet. This page updates live for everyone.</div>"));
+    if(app.isCommish){
+      const b=el("button","btn"); b.style.width="100%"; b.style.marginTop="12px"; b.textContent="▶ Start Draft (snake, 15 rounds)";
+      b.onclick=async ()=>{ b.disabled=true; b.textContent="Starting…";
+        try{ const {error}=await sb.rpc("start_draft",{lid:app.sbLeagueId, n_rounds:15}); if(error) throw error; await loadDraft(); renderDraft(); }
+        catch(e){ toast(e.message||"Start failed"); b.disabled=false; b.textContent="▶ Start Draft"; } };
+      c.appendChild(b);
+    } else {
+      c.appendChild(el("div","muted","<div style='font-size:12px;margin-top:8px'>Waiting for the commissioner to start it.</div>"));
+    }
+    s.appendChild(c); return;
+  }
+
+  s.appendChild(el("div","card",`<h2 class='title'>🐍 Draft Board</h2>
+    <div class='muted' style='font-size:12px'>${done?"✅ Draft complete.":`Round ${Math.floor((pno-1)/N)+1}, Pick ${pno} · On the clock: <b style="color:${isMe?'var(--you)':'var(--txt)'}">${onclockName}</b>${isMe?" — you're up! Tap a player below.":" — waiting…"}`}</div>`));
+  if(!poolGuard(s,renderDraft)) return;
+
+  const rounds = done?ROUNDS:Math.min(ROUNDS, Math.floor((pno-1)/N)+2);
   const board=el("div","dboard big"); const grid=el("div","dgrid");
-  grid.style.gridTemplateColumns=`30px repeat(${T},minmax(96px,1fr))`;
+  grid.style.gridTemplateColumns=`30px repeat(${N},minmax(96px,1fr))`;
   grid.appendChild(el("div","dhead",""));
-  teams.forEach(t=> grid.appendChild(el("div","dhead"+(t===app.myTeam?" me":""), t.split(" ")[0])));
+  order.forEach(uid=> grid.appendChild(el("div","dhead"+(uid===(app.user&&app.user.id)?" me":""), (D.memMap[uid]||"Team").split(" ")[0])));
+  const byNo={}; D.picks.forEach(p=>byNo[p.pick_no]=p);
   for(let r=0;r<rounds;r++){
     grid.appendChild(el("div","dhead","R"+(r+1)));
-    for(let col=0;col<T;col++){
-      const pos = r%2===0 ? col : (T-1-col);
-      const pn = r*T + pos + 1;
-      const pk = app.drafted[pn-1];
-      const now = !complete && pn===pickNo;
+    for(let col=0;col<N;col++){
+      const sl = r%2===0 ? col : (N-1-col);
+      const pnum = r*N + sl + 1;
+      const pk = byNo[pnum];
+      const now = !done && pnum===pno;
       const cell=el("div","dcell"+(pk?"":" empty")+(now?" now":""));
-      if(pk){ cell.style.borderLeft="3px solid "+posHue(pk.p.pos);
-        cell.innerHTML=`<div class="pk">${pn} · ${pk.p.pos} ${pk.p.teamAb||""}</div><div class="pn">${pk.p.name}</div>`; }
-      else cell.innerHTML=`<div class="pk">${pn}</div>${now?'<div class="pn" style="color:var(--gold)">on clock</div>':''}`;
+      if(pk){ cell.style.borderLeft="3px solid "+posHue(pk.pos);
+        cell.innerHTML=`<div class="pk">${pnum} · ${pk.pos} ${pk.team||""}</div><div class="pn">${pk.player_name}</div>`; }
+      else cell.innerHTML=`<div class="pk">${pnum}</div>${now?'<div class="pn" style="color:var(--gold)">on clock</div>':''}`;
       grid.appendChild(cell);
     }
   }
   board.appendChild(grid); s.appendChild(board);
 
-  if(!complete){
+  if(live && isMe){
     posChips(s); sortControl(s);
-    const dset=new Set(app.drafted.map(d=>d.p.id));
-    const avail=sortPool(availablePlayers().filter(p=>!dset.has(p.id)).filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter));
+    const drafted=new Set(D.picks.map(p=>p.player_id));
+    const avail=sortPool(availablePlayers().filter(p=>!drafted.has(p.id)).filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter));
     const c=el("div","card"); c.appendChild(el("h2","title","Available · tap for research"));
-    avail.slice(0,60).forEach(p=> c.appendChild(faRow(p, isMe?"Draft":"Sim first", "", ()=>{ if(!isMe){ toast("Not your pick — Sim to your turn"); return; } app.drafted.push({p,by:onClock,pick:pickNo}); toast("Drafted "+p.name); renderDraft(); })));
+    avail.slice(0,60).forEach(p=> c.appendChild(faRow(p,"Draft","",async ()=>{
+      try{ const {error}=await sb.rpc("make_pick",{ lid:app.sbLeagueId, pid:p.id, pname:p.name, ppos:p.pos, pteam:p.teamAb||"", phead:p.headshot||p.logo||"" }); if(error) throw error;
+        toast("Drafted "+p.name); await loadDraft(); renderDraft(); }
+      catch(e){ toast(e.message||"Pick failed"); }
+    })));
     s.appendChild(c);
+  } else if(live){
+    s.appendChild(el("div","muted",`<div style='font-size:12px;text-align:center'>Waiting for <b>${onclockName}</b> to pick… (updates live)</div>`));
   }
 }
 
