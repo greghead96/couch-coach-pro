@@ -344,7 +344,7 @@ let app = {
   sim:null, armed:null, matchupIdx:0,
   leagueMatchup:null, schedTeam:"Your Team", pFilter:"ALL", pSort:"rank", pView:"players", drafted:[], pStatTab:null,
   myTeam:"Your Team", oppTeam:"Burrow Bandits", realLeague:false,
-  draft:null, draftChannel:null, isCommish:false, members:[], queue:[],
+  draft:null, draftChannel:null, isCommish:false, members:[], queue:[], draftView:"board", commishMode:false,
   pool:null, poolLoading:false, poolError:null, pDetail:null,
   nfl:{ games:null, loading:false, error:null, selected:null, gamecast:null, view:"plays", pollId:null, pollFor:null },
   settings:{
@@ -1320,18 +1320,24 @@ function renderPlayers(){
     <div class='muted' style='font-size:12px'>Real players from ESPN — tap any player for research (stats, projection, bye, news). Add to your bench; roster full → pick a drop.</div>`));
   if(!poolGuard(s,renderPlayers)) return;
   posChips(s); sortControl(s);
-  const rostIds=new Set([...myStarters,...myBench].map(p=>p.id));
-  const cap=app.settings.league.rosterSize||16;
-  const filled=[...myStarters,...myBench].length;
-  s.appendChild(el("div","muted",`<div style='font-size:11px;text-align:center;margin-bottom:8px'>Roster <b style="color:${filled>=cap?'var(--opp)':'var(--gold)'}">${filled}/${cap}</b></div>`));
-  const pool=sortPool(availablePlayers().filter(p=>!rostIds.has(p.id)).filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter));
+  // In a real league, "taken" players = everyone's draft picks; otherwise the mock roster
+  const draftPicks = (app.realLeague && app.draft) ? app.draft.picks : [];
+  const takenIds = new Set( app.realLeague ? draftPicks.map(p=>p.player_id) : [...myStarters,...myBench].map(p=>p.id) );
+  const pool=sortPool(availablePlayers().filter(p=>!takenIds.has(p.id)).filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter));
   const c=el("div","card");
-  if(!pool.length) c.appendChild(el("div","muted","<div style='font-size:13px'>No players at this position.</div>"));
-  pool.slice(0,60).forEach(p=> c.appendChild(faRow(p,"+ Add","",()=>addPlayer(p))));
+  if(!pool.length) c.appendChild(el("div","muted","<div style='font-size:13px'>No available players at this position.</div>"));
+  pool.slice(0,60).forEach(p=> c.appendChild(faRow(p, app.realLeague?"＋":"+ Add", app.realLeague?" sec":"", ()=>{ if(app.realLeague){ toast("Add/drop (waivers) is coming in a future update"); } else addPlayer(p); })));
   s.appendChild(c);
-  const rc=el("div","card"); rc.appendChild(el("h2","title","Your Roster · tap Drop"));
-  [...myStarters,...myBench].filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter).forEach(p=>
-    rc.appendChild(faRow(p,"Drop"," sec",()=>dropPlayer(p))));
+  const rc=el("div","card"); rc.appendChild(el("h2","title","Your Roster"));
+  if(app.realLeague){
+    const mine=draftPicks.filter(p=>p.user_id===(app.user&&app.user.id)).filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter);
+    if(!mine.length) rc.appendChild(el("div","muted","<div style='font-size:13px'>No players yet — draft your team in the 🐍 Draft tab.</div>"));
+    mine.forEach(p=>{ const row=el("div","plr"); row.style.gridTemplateColumns="34px 26px 1fr auto";
+      row.innerHTML=`${avatarHTML({pos:p.pos,name:p.player_name,headshot:p.headshot})}<div class="pos">${p.pos}</div><div><div class="nm">${p.player_name}</div><div class="meta2">${p.team||""}</div></div><div></div>`;
+      row.onclick=()=>openPlayerDetail({espnId:(p.player_id||"").replace(/^e/,""),name:p.player_name,pos:p.pos,teamAb:p.team,headshot:p.headshot}); rc.appendChild(row); });
+  } else {
+    [...myStarters,...myBench].filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter).forEach(p=> rc.appendChild(faRow(p,"Drop"," sec",()=>dropPlayer(p))));
+  }
   s.appendChild(rc);
 }
 function rosterAll(){ return [...myStarters,...myBench]; }
@@ -1399,6 +1405,18 @@ function queueKey(){ return "ccf_q_"+app.sbLeagueId+"_"+(app.user&&app.user.id);
 function loadQueue(){ try{ app.queue=JSON.parse(localStorage.getItem(queueKey())||"[]"); }catch(e){ app.queue=[]; } }
 function saveQueue(){ try{ localStorage.setItem(queueKey(), JSON.stringify(app.queue)); }catch(e){} }
 function toggleQueue(id){ const i=app.queue.indexOf(id); if(i>=0)app.queue.splice(i,1); else app.queue.push(id); saveQueue(); renderDraft(); }
+// Fit a manager's picks into standard starting slots (+ bench), leaving empties for reference
+function fillRoster(picks){
+  const filled=[["QB",["QB"]],["RB",["RB"]],["RB",["RB"]],["WR",["WR"]],["WR",["WR"]],["TE",["TE"]],["FLEX",["RB","WR","TE"]],["K",["K"]],["DEF",["DEF"]]]
+    .map(([lbl,pos])=>({lbl,pos,p:null}));
+  const bench=[];
+  picks.forEach(pk=>{
+    let slot=filled.find(f=>!f.p && f.lbl!=="FLEX" && f.pos.includes(pk.pos));
+    if(!slot) slot=filled.find(f=>!f.p && f.lbl==="FLEX" && f.pos.includes(pk.pos));
+    if(slot) slot.p=pk; else bench.push(pk);
+  });
+  return {filled, bench};
+}
 function renderDraft(){
   const s=$("screen"); if(!s) return; s.innerHTML="";
   if(!app.draft){ s.appendChild(el("div","card","<div class='muted' style='text-align:center;padding:12px'>🔄 Loading draft…</div>")); loadDraft().then(()=>{ if(app.tab==="draft") renderDraft(); }); return; }
@@ -1429,6 +1447,28 @@ function renderDraft(){
   s.appendChild(el("div","card",`<h2 class='title'>🐍 Draft Board</h2>
     <div class='muted' style='font-size:12px'>${done?"✅ Draft complete.":`Round ${Math.floor((pno-1)/N)+1}, Pick ${pno} · On the clock: <b style="color:${isMe?'var(--you)':'var(--txt)'}">${onclockName}</b>${isMe?" — you're up! Tap a player below.":" — waiting…"}`}</div>`));
   if(!poolGuard(s,renderDraft)) return;
+
+  // sub-tabs: Board vs My Roster
+  const dts=el("div","tabset");
+  [["board","Board"],["roster","My Roster"]].forEach(([id,lab])=>{ const b=el("button",app.draftView===id?"on":"",lab); b.onclick=()=>{ app.draftView=id; renderDraft(); }; dts.appendChild(b); });
+  s.appendChild(dts);
+
+  if(app.draftView==="roster"){
+    const myPicks=D.picks.filter(p=>p.user_id===(app.user&&app.user.id));
+    const {filled,bench}=fillRoster(myPicks);
+    const c=el("div","card"); c.appendChild(el("h2","title","Your Roster So Far"));
+    filled.forEach(f=>{
+      const row=el("div","plr"); row.style.gridTemplateColumns="46px 1fr auto";
+      if(f.p) row.innerHTML=`<div class="pos">${f.lbl}</div><div><div class="nm">${f.p.player_name}</div><div class="meta2">${f.p.pos} · ${f.p.team||""}</div></div><div></div>`;
+      else { row.style.opacity=".55"; row.innerHTML=`<div class="pos">${f.lbl}</div><div><div class="nm">— empty</div><div class="meta2">need a ${f.pos.join("/")}</div></div><div></div>`; }
+      c.appendChild(row);
+    });
+    s.appendChild(c);
+    if(bench.length){ const bc=el("div","card"); bc.appendChild(el("h2","title","Bench"));
+      bench.forEach(pk=>{ const row=el("div","plr"); row.style.gridTemplateColumns="46px 1fr auto"; row.innerHTML=`<div class="pos">BN</div><div><div class="nm">${pk.player_name}</div><div class="meta2">${pk.pos} · ${pk.team||""}</div></div><div></div>`; bc.appendChild(row); });
+      s.appendChild(bc); }
+    return;
+  }
 
   const rounds = done?ROUNDS:Math.min(ROUNDS, Math.floor((pno-1)/N)+2);
   const board=el("div","dboard big"); const grid=el("div","dgrid");
@@ -1476,14 +1516,22 @@ function renderDraft(){
     s.appendChild(qc);
   }
 
+  // Commissioner: opt-in "pick for the on-clock manager". Off by default so commish queues like everyone.
+  if(!isMe && app.isCommish){
+    const tg=el("button","btn"+(app.commishMode?"":" sec")); tg.style.width="100%"; tg.style.marginBottom="10px";
+    tg.textContent=app.commishMode ? ("🧑‍⚖️ Picking for "+onclockName+" — ON (tap to just queue)") : ("🧑‍⚖️ Pick for "+onclockName+" (commissioner)");
+    tg.onclick=()=>{ app.commishMode=!app.commishMode; renderDraft(); };
+    s.appendChild(tg);
+  }
   posChips(s); sortControl(s);
   const avail=sortPool(poolAll.filter(p=>!draftedSet.has(p.id)).filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter));
   const c=el("div","card"); c.appendChild(el("h2","title","Available · tap for research"));
-  if(!isMe && !app.isCommish) c.appendChild(el("div","muted",`<div style='font-size:11px;margin-bottom:6px'>Waiting for <b>${onclockName}</b>. Queue players for your next pick.</div>`));
+  const commishPicking = app.isCommish && app.commishMode && !isMe;
+  if(!isMe && !commishPicking) c.appendChild(el("div","muted",`<div style='font-size:11px;margin-bottom:6px'>Waiting for <b>${onclockName}</b>. Queue players for your next pick.</div>`));
   avail.slice(0,60).forEach(p=>{
     let label,cls="",act;
     if(isMe){ label="Draft"; act=()=>draftPlayer(p); }
-    else if(app.isCommish){ label="Pick for "+onclockName.split(" ")[0]; act=()=>commishPick(p); }
+    else if(commishPicking){ label="Pick for "+onclockName.split(" ")[0]; act=()=>commishPick(p); }
     else { label=app.queue.includes(p.id)?"✓ Queued":"＋ Queue"; cls=" sec"; act=()=>toggleQueue(p.id); }
     c.appendChild(faRow(p,label,cls,act));
   });
