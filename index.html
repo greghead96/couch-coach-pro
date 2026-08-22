@@ -223,16 +223,16 @@ const FREE_AGENTS = [
 ];
 
 const LEAGUE = [
-  { team:"Your Team", w:7, l:3, pf:1284, pa:1176, streak:"W2", me:true },
-  { team:"Gridiron Goblins", w:8, l:2, pf:1342, pa:1120, streak:"W4" },
-  { team:"Dak to the Future", w:7, l:3, pf:1301, pa:1198, streak:"L1" },
-  { team:"Burrow Bandits", w:6, l:4, pf:1255, pa:1210, streak:"W1" },
-  { team:"Hurts So Good", w:5, l:5, pf:1198, pa:1205, streak:"L2" },
-  { team:"CMC Hammer", w:5, l:5, pf:1176, pa:1188, streak:"W1" },
-  { team:"Kelce's Angels", w:4, l:6, pf:1142, pa:1230, streak:"L3" },
-  { team:"Waiver Wired", w:3, l:7, pf:1098, pa:1255, streak:"W1" },
-  { team:"Bye Week Blues", w:3, l:7, pf:1055, pa:1240, streak:"L1" },
-  { team:"The Tankers", w:2, l:8, pf:1011, pa:1290, streak:"L5" },
+  { team:"Your Team", w:7, l:3, pf:1284, pa:1176, streak:"W2", pu:52.4, me:true },
+  { team:"Gridiron Goblins", w:8, l:2, pf:1342, pa:1120, streak:"W4", pu:71.8 },
+  { team:"Dak to the Future", w:7, l:3, pf:1301, pa:1198, streak:"L1", pu:38.2 },
+  { team:"Burrow Bandits", w:6, l:4, pf:1255, pa:1210, streak:"W1", pu:66.5 },
+  { team:"Hurts So Good", w:5, l:5, pf:1198, pa:1205, streak:"L2", pu:29.0 },
+  { team:"CMC Hammer", w:5, l:5, pf:1176, pa:1188, streak:"W1", pu:58.1 },
+  { team:"Kelce's Angels", w:4, l:6, pf:1142, pa:1230, streak:"L3", pu:41.7 },
+  { team:"Waiver Wired", w:3, l:7, pf:1098, pa:1255, streak:"W1", pu:47.3 },
+  { team:"Bye Week Blues", w:3, l:7, pf:1055, pa:1240, streak:"L1", pu:22.5 },
+  { team:"The Tankers", w:2, l:8, pf:1011, pa:1290, streak:"L5", pu:18.9 },
 ];
 const OTHER_MATCHUPS = [
   { a:"Gridiron Goblins", as:96.4, b:"Hurts So Good", bs:88.1 },
@@ -989,8 +989,15 @@ async function loadPool(){
     try{
       const adp=await (await fetch("adp.json")).json();
       const list=adp.players||adp||[];
-      const map={}; list.forEach(x=>{ map[normName(x.name)]=x.adp; });
-      pool.forEach(p=>{ const a=map[normName(p.name)]; if(a) p.adp=a; });
+      const nameMap={}, defMap={};
+      list.forEach(x=>{
+        if(x.position==="DEF"||x.position==="DST"||x.position==="D/ST"){ if(x.team) defMap[String(x.team).toUpperCase()]=x.adp; }
+        else nameMap[normName(x.name)]=x.adp;
+      });
+      pool.forEach(p=>{
+        const a = p.pos==="DEF" ? defMap[String(p.teamAb||"").toUpperCase()] : nameMap[normName(p.name)];
+        if(a) p.adp=a;
+      });
       pool.filter(p=>p.adp).sort((a,b)=>a.adp-b.adp).forEach((p,i)=> p.rank=i+1);
       const byPos={}; pool.filter(p=>p.adp).sort((a,b)=>a.adp-b.adp).forEach(p=>{ byPos[p.pos]=(byPos[p.pos]||0)+1; p.posRank=byPos[p.pos]; });
     }catch(e){}
@@ -1266,12 +1273,15 @@ function renderLeague(){
     renderPlayoffs(s);
   } else if(app.leagueTab==="standings"){
     const c=el("div","card");
-    let html=`<table class="std"><tr><th>#</th><th>Team</th><th>W-L</th><th>PF</th><th>PA</th><th>Strk</th></tr>`;
+    c.appendChild(el("div","muted","<div style='font-size:11px;margin-bottom:8px'>💡 <b style='color:var(--gold)'>Coach Eff</b> = net fantasy points swung by power-ups this season (points gained + prevented). Higher = better power-up management.</div>"));
+    const wrap=el("div"); wrap.style.overflowX="auto";
+    let html=`<table class="std"><tr><th>#</th><th>Team</th><th>W-L</th><th>PF</th><th>PA</th><th>Strk</th><th>Coach&nbsp;Eff</th></tr>`;
     getStandings().forEach((t,i)=>{
       const st=t.streak||""; const sc= st[0]==="W"?"var(--you)":st[0]==="L"?"var(--opp)":"var(--muted)";
-      html+=`<tr class="${t.me?'me':''}"><td>${i+1}</td><td>${t.team}</td><td>${t.w}-${t.l}</td><td>${t.pf}</td><td>${t.pa||"—"}</td><td style="color:${sc};font-weight:700">${st||"—"}</td></tr>`;
+      const pu=(t.pu!=null)?("+"+t.pu.toFixed(1)):"—";
+      html+=`<tr class="${t.me?'me':''}"><td>${i+1}</td><td>${t.team}</td><td>${t.w}-${t.l}</td><td>${t.pf}</td><td>${t.pa||"—"}</td><td style="color:${sc};font-weight:700">${st||"—"}</td><td style="color:var(--gold);font-weight:700;white-space:nowrap">${pu}</td></tr>`;
     });
-    html+=`</table>`; c.innerHTML=html; s.appendChild(c);
+    html+=`</table>`; wrap.innerHTML=html; c.appendChild(wrap); s.appendChild(c);
   } else if(app.leagueTab==="schedule"){
     const teams=LEAGUE.map(t=>t.team);
     const ci=Math.max(0,teams.indexOf(app.schedTeam));
