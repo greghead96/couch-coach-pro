@@ -992,6 +992,7 @@ async function loadPool(){
       const map={}; list.forEach(x=>{ map[normName(x.name)]=x.adp; });
       pool.forEach(p=>{ const a=map[normName(p.name)]; if(a) p.adp=a; });
       pool.filter(p=>p.adp).sort((a,b)=>a.adp-b.adp).forEach((p,i)=> p.rank=i+1);
+      const byPos={}; pool.filter(p=>p.adp).sort((a,b)=>a.adp-b.adp).forEach(p=>{ byPos[p.pos]=(byPos[p.pos]||0)+1; p.posRank=byPos[p.pos]; });
     }catch(e){}
     if(pool.length) app.pool=pool; else app.poolError="No players returned — tap retry.";
   }catch(err){ app.poolError="Couldn't load ESPN players — tap retry."; }
@@ -1109,10 +1110,7 @@ function posChips(s){
 function sortControl(s){
   const wrap=el("div","chips"); wrap.style.marginBottom="10px";
   wrap.appendChild(el("span","muted",`<span style="font-size:10px;align-self:center;margin-right:4px">Sort:</span>`));
-  [["rank","ESPN Rank"],["pos","Position"],["name","A–Z"]].forEach(([id,lab])=>{
-    const c=el("div","chip"+(app.pSort===id?" on":"")); c.textContent=lab;
-    c.onclick=()=>{ app.pSort=id; app.tab==="draft"?renderDraft():renderPlayers(); }; wrap.appendChild(c);
-  });
+  const c=el("div","chip on"); c.textContent="Rankings"; wrap.appendChild(c);
   s.appendChild(wrap);
 }
 function sortPool(list){
@@ -1124,7 +1122,9 @@ function sortPool(list){
 function faRow(p, btnLabel, btnCls, onClick){
   const row=el("div","plr"); row.style.gridTemplateColumns="34px 26px 1fr auto"; row.style.cursor="pointer";
   const inj = (p.injury && p.injury!=="ACTIVE") ? '<span style="color:var(--opp);font-size:9px;font-weight:800">⚠ </span>' : "";
-  const rk = p.rank ? `<span style="color:var(--gold);font-size:10px;font-weight:800">#${p.rank}</span> ` : "";
+  const isPos = app.pFilter && app.pFilter!=="ALL";
+  const rnum = isPos ? p.posRank : p.rank;
+  const rk = rnum ? `<span style="color:var(--gold);font-size:10px;font-weight:800">#${rnum}</span> ` : "";
   row.innerHTML=`${avatarHTML(p)}<div class="pos">${p.pos}</div>
     <div><div class="nm">${rk}${inj}${p.name}</div><div class="meta2">${p.teamAb||p.opp||""}${p.jersey?" · #"+p.jersey:""}</div></div><div></div>`;
   row.onclick=()=>openPlayerDetail(p);
