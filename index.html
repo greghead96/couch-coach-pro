@@ -387,6 +387,7 @@ let app = {
   leagueMatchup:null, schedTeam:"Your Team", pFilter:"ALL", pSort:"rank", pView:"players", drafted:[], pStatTab:null,
   myTeam:"Your Team", oppTeam:"Burrow Bandits", realLeague:false,
   draft:null, draftChannel:null, isCommish:false, members:[], queue:[], draftView:"board", commishMode:false, lineup:null, lineupEdit:false, trades:[], tradeBuilder:null, transactions:[], teamTab:"lineup", txFilter:"all",
+  schedule:[], currentWeek:1, lineupsByUser:{},
   pool:null, poolLoading:false, poolError:null, pDetail:null,
   nfl:{ games:null, loading:false, error:null, selected:null, gamecast:null, view:"plays", pollId:null, pollFor:null },
   settings:{
@@ -535,7 +536,7 @@ function tick(){
   [...myStarters,...oppStarters,...myBench,...oppBench].forEach(p=>{
     const eff=effectsFor(p,q);
     if(eff.frozen) return;
-    const c=POS_CFG[p.pos];
+    const c=POS_CFG[p.pos]; if(!c) return;
     const chance = c.rate*(adv/30);
     if(Math.random()<chance){
       let g = c.min+Math.random()*(c.max-c.min);
@@ -687,7 +688,7 @@ function renderNav(){
 function renderTab(){
   if(app.tab==="home") renderHome();
   else if(app.tab==="nfl"){ ensureNFL(); renderNFL(); }
-  else if(app.tab==="matchup") renderMatchup();
+  else if(app.tab==="matchup"){ if(app.realLeague && app.sim && !app.sim.running && app.sim.gameSec===0){ setupRealMatchup(); app.sim=freshSim(); } renderMatchup(); }
   else if(app.tab==="team") renderTeam();
   else if(app.tab==="players"){ ensurePool(); renderPlayers(); }
   else if(app.tab==="draft"){ ensurePool(); renderDraft(); }
@@ -766,7 +767,8 @@ function copyCode(code){
 }
 async function enterLeague(id, name, code){
   app.connectedLeague=name; app.sbLeagueId=id; app.leagueCode=code||null;
-  await loadLeagueData(); await loadDraft(); await loadLineup(); await loadTrades(); await loadTransactions(); loadQueue(); subscribeDraft();
+  await loadLeagueData(); await loadDraft(); await loadLineup(); await loadAllLineups(); await loadSchedule(); await loadTrades(); await loadTransactions(); loadQueue(); subscribeDraft();
+  if(app.realLeague) setupRealMatchup();
   app.sim=freshSim(); app.tab="home"; render();
 }
 async function autoEnterIfSingle(){
@@ -1033,7 +1035,7 @@ function renderMatchup(){
     return;
   }
 
-  s.appendChild(el("div","muted","<div style='font-size:11px;margin:-2px 0 12px;text-align:center'>🏆 <b style='color:var(--gold)'>CCF Score</b> = base points + power-up effects — the official result that sets your W/L. ⏱️ Power-ups are scheduled <b style='color:var(--gold)'>by quarter</b> (a started quarter is locked out).</div>"));
+  s.appendChild(el("div","muted",`<div style='font-size:11px;margin:-2px 0 12px;text-align:center'>${app.realLeague?("🗓️ <b>Week "+(app.currentWeek||1)+"</b> · your lineup vs "+app.oppTeam+" — "):""}🏆 <b style='color:var(--gold)'>CCF Score</b> = points + power-ups. ⏱️ Power-ups scheduled <b style='color:var(--gold)'>by quarter</b>. <span style='opacity:.7'>Simulated preview until live scoring.</span></div>`));
 
   const ctl=el("div","row"); ctl.style.marginBottom="14px";
   const start=el("button","btn", app.sim.running?"⏸ Pause":(app.sim.gameSec>0?"▶ Resume":"▶ Kick Off"));
@@ -1478,11 +1480,15 @@ function subscribeDraft(){
     if(after>before) toast("📨 New trade offer!");
     if(!app.showConfirm && app.user && app.connectedLeague) render(); };
   const refreshTx=async ()=>{ await loadTransactions(); if(!app.showConfirm && app.user && app.connectedLeague) render(); };
+  const refreshSchedule=async ()=>{ await loadSchedule(); if(app.realLeague) setupRealMatchup();
+    if(!app.showConfirm && app.user && app.connectedLeague) render(); };
   app.draftChannel=sb.channel("draft-"+lid)
     .on("postgres_changes",{event:"*",schema:"public",table:"draft_picks",filter:"league_id=eq."+lid}, refresh)
     .on("postgres_changes",{event:"*",schema:"public",table:"drafts",filter:"league_id=eq."+lid}, refresh)
     .on("postgres_changes",{event:"*",schema:"public",table:"trades",filter:"league_id=eq."+lid}, refreshTrades)
     .on("postgres_changes",{event:"*",schema:"public",table:"transactions",filter:"league_id=eq."+lid}, refreshTx)
+    .on("postgres_changes",{event:"*",schema:"public",table:"schedule",filter:"league_id=eq."+lid}, refreshSchedule)
+    .on("postgres_changes",{event:"UPDATE",schema:"public",table:"leagues",filter:"id=eq."+lid}, refreshSchedule)
     .subscribe();
 }
 function unsubscribeDraft(){ if(app.draftChannel){ try{ sb.removeChannel(app.draftChannel); }catch(e){} app.draftChannel=null; } }
@@ -1686,6 +1692,69 @@ function openLineupChooser(i){
   ov.querySelector("#lcCancel").onclick=()=>{ ov.innerHTML=""; };
 }
 function poolInfo(pid){ return (app.pool||[]).find(p=>p.id===pid); }
+// ---- schedule + real weekly matchup ----
+async function loadSchedule(){
+  if(!app.sbLeagueId){ app.schedule=[]; app.currentWeek=1; return; }
+  try{
+    const [sc,lg]=await Promise.all([
+      sb.from("schedule").select("*").eq("league_id",app.sbLeagueId).order("week"),
+      sb.from("leagues").select("current_week").eq("id",app.sbLeagueId).maybeSingle()
+    ]);
+    app.schedule=sc.data||[]; app.currentWeek=(lg.data&&lg.data.current_week)||1;
+  }catch(e){ app.schedule=[]; app.currentWeek=1; }
+}
+async function setWeek(wk){
+  wk=Math.max(1,wk);
+  try{ const {error}=await sb.rpc("set_week",{lid:app.sbLeagueId, wk}); if(error) throw error;
+    app.currentWeek=wk; if(app.realLeague) setupRealMatchup(); toast("Week "+wk); renderCommish(); }
+  catch(e){ toast(e.message||"Failed"); }
+}
+async function loadAllLineups(){
+  app.lineupsByUser={};
+  if(!app.sbLeagueId) return;
+  try{ const {data}=await sb.from("lineups").select("user_id, starters").eq("league_id",app.sbLeagueId);
+    (data||[]).forEach(r=>{ app.lineupsByUser[r.user_id]=r.starters; }); }catch(e){}
+}
+function computeRoundRobin(ids, weeks){
+  const teams=ids.slice(); if(teams.length%2) teams.push(null);
+  const n=teams.length, rounds=Math.max(1,n-1), half=n/2;
+  let lst=teams.slice(1); const games=[];
+  for(let w=0; w<weeks; w++){
+    const roundArr=[teams[0]].concat(lst);
+    for(let i=0;i<half;i++){
+      const a=roundArr[i], b=roundArr[n-1-i];
+      if(a&&b){ const swap=(w+i)%2===0; games.push({week:w+1, home:swap?a:b, away:swap?b:a}); }
+    }
+    lst.unshift(lst.pop());
+  }
+  return games;
+}
+function simPlayer(pick){ return { id:pick.player_id, name:pick.player_name, pos:pick.pos, teamAb:pick.team, headshot:pick.headshot, num:0, pts:0,yds:0,td:0,rec:0, opp:"" }; }
+function emptyP(){ return { id:"e_"+Math.floor(Math.random()*1e9), name:"(empty)", pos:"", teamAb:"", headshot:"", num:0, pts:0,yds:0,td:0,rec:0, opp:"" }; }
+function startersForUser(uid, starterIds){
+  const picks=(app.draft?app.draft.picks:[]).filter(p=>p.user_id===uid);
+  let starters = Array.isArray(starterIds)&&starterIds.length===SLOTS.length ? starterIds : defaultStarters(picks);
+  const byId={}; picks.forEach(p=>byId[p.player_id]=p);
+  const startersOut=starters.map(id=> (id&&byId[id])? simPlayer(byId[id]) : emptyP());
+  const startedSet=new Set(starters.filter(Boolean));
+  const bench=picks.filter(p=>!startedSet.has(p.player_id)).map(simPlayer);
+  return {startersOut, bench};
+}
+function weekOpponent(){
+  const wk=app.currentWeek||1;
+  const g=(app.schedule||[]).find(x=>x.week===wk && (x.home_user===app.user.id||x.away_user===app.user.id));
+  return g ? (g.home_user===app.user.id?g.away_user:g.home_user) : null;
+}
+function setupRealMatchup(){
+  const oppId=weekOpponent();
+  app.oppTeam = oppId ? teamNameOf(oppId) : "(no game scheduled)";
+  const me=startersForUser(app.user.id, app.lineup);
+  const op= oppId ? startersForUser(oppId, app.lineupsByUser[oppId]) : {startersOut:SLOTS.map(()=>emptyP()), bench:[]};
+  myStarters.length=0; me.startersOut.forEach(p=>myStarters.push(p));
+  myBench.length=0; me.bench.forEach(p=>myBench.push(p));
+  oppStarters.length=0; op.startersOut.forEach(p=>oppStarters.push(p));
+  oppBench.length=0; op.bench.forEach(p=>oppBench.push(p));
+}
 function openBenchMove(pick){
   const ov=$("overlay"); const myPicks=myDraftPicks();
   const items=SLOTS.map((s,i)=>({s,i})).filter(o=>o.s.pos.includes(pick.pos)).map(o=>{
@@ -1881,7 +1950,14 @@ function renderLeague(){
     nav.append(pv,lab,nx); s.appendChild(nav);
     const c=el("div","card");
     if(app.realLeague){
-      c.appendChild(el("div","muted","<div style='font-size:13px'>🗓️ The full season schedule is generated when your commissioner starts the season.</div>"));
+      const uid=(app.members.find(m=>(m.team_name||"Team")===app.schedTeam)||{}).user_id;
+      if(!app.schedule.length){ c.appendChild(el("div","muted","<div style='font-size:13px'>No schedule yet — the commissioner can generate it in the ⚙️ Commish tab.</div>")); }
+      else { [...new Set(app.schedule.map(g=>g.week))].sort((a,b)=>a-b).forEach(wk=>{
+        const g=app.schedule.find(x=>x.week===wk && (x.home_user===uid||x.away_user===uid));
+        const oppUid=g?(g.home_user===uid?g.away_user:g.home_user):null;
+        const oppName=oppUid?teamNameOf(oppUid):"BYE";
+        c.appendChild(el("div","schrow",`<span class="wk">Wk ${wk}${wk===app.currentWeek?" ●":""}</span><span style="flex:1">${g?("vs "+oppName):"—"}</span><span class="muted" style="font-size:11px">${wk<app.currentWeek?"final":wk===app.currentWeek?"this week":"upcoming"}</span>`));
+      }); }
     } else {
       genSchedule(app.schedTeam).forEach(g=>{
         const r=el("div","schrow",`<span class="wk">Wk ${g.wk}</span>
@@ -2077,6 +2153,25 @@ function renderCommish(){
       mc.appendChild(row);
     });
     s.appendChild(mc);
+  }
+
+  if(app.realLeague){
+    const scw=el("div","card"); scw.appendChild(el("h2","title","Schedule & Week"));
+    const nWeeks=[...new Set((app.schedule||[]).map(g=>g.week))].length;
+    scw.appendChild(el("div","muted",`<div style="font-size:12px">Current week: <b style="color:var(--gold)">${app.currentWeek||1}</b> · ${nWeeks?(nWeeks+"-week schedule set"):"no schedule yet"}</div>`));
+    const gen=el("button","btn"); gen.style.width="100%"; gen.style.marginTop="10px"; gen.textContent=nWeeks?"↻ Regenerate Schedule":"Generate Schedule";
+    gen.onclick=async ()=>{ const ids=app.members.map(m=>m.user_id); if(ids.length<2){ toast("Need at least 2 managers"); return; }
+      if(nWeeks && !confirm("Regenerate the schedule? This replaces the current one.")) return;
+      const weeks=(app.settings.league&&app.settings.league.regSeasonWeeks)||14;
+      try{ const {error}=await sb.rpc("set_schedule",{lid:app.sbLeagueId, games:computeRoundRobin(ids, weeks)}); if(error) throw error; await loadSchedule(); toast("Schedule generated"); renderCommish(); }
+      catch(e){ toast(e.message||"Failed"); } };
+    scw.appendChild(gen);
+    const wr=el("div","row"); wr.style.marginTop="10px";
+    const pv=el("button","btn sec","‹"); pv.style.padding="10px 16px"; pv.onclick=()=>setWeek((app.currentWeek||1)-1);
+    const nx=el("button","btn sec","›"); nx.style.padding="10px 16px"; nx.onclick=()=>setWeek((app.currentWeek||1)+1);
+    const wl=el("div","",`<div style="text-align:center;font-weight:800">Week ${app.currentWeek||1}</div>`); wl.style.flex="1";
+    wr.append(pv,wl,nx); scw.appendChild(wr);
+    s.appendChild(scw);
   }
 
   // Scoring presets
