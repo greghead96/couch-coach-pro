@@ -386,7 +386,7 @@ let app = {
   sim:null, armed:null, matchupIdx:0,
   leagueMatchup:null, schedTeam:"Your Team", pFilter:"ALL", pSort:"rank", pView:"players", drafted:[], pStatTab:null,
   myTeam:"Your Team", oppTeam:"Burrow Bandits", realLeague:false,
-  draft:null, draftChannel:null, isCommish:false, members:[], queue:[], draftView:"board", commishMode:false, lineup:null, lineupEdit:false, trades:[], tradeBuilder:null,
+  draft:null, draftChannel:null, isCommish:false, members:[], queue:[], draftView:"board", commishMode:false, lineup:null, lineupEdit:false, trades:[], tradeBuilder:null, transactions:[], teamTab:"lineup", txFilter:"all",
   pool:null, poolLoading:false, poolError:null, pDetail:null,
   nfl:{ games:null, loading:false, error:null, selected:null, gamecast:null, view:"plays", pollId:null, pollFor:null },
   settings:{
@@ -766,7 +766,7 @@ function copyCode(code){
 }
 async function enterLeague(id, name, code){
   app.connectedLeague=name; app.sbLeagueId=id; app.leagueCode=code||null;
-  await loadLeagueData(); await loadDraft(); await loadLineup(); await loadTrades(); loadQueue(); subscribeDraft();
+  await loadLeagueData(); await loadDraft(); await loadLineup(); await loadTrades(); await loadTransactions(); loadQueue(); subscribeDraft();
   app.sim=freshSim(); app.tab="home"; render();
 }
 async function autoEnterIfSingle(){
@@ -957,10 +957,17 @@ function renderHome(){
   stc.appendChild(stb); s.appendChild(stc);
 
   const act=el("div","card"); act.appendChild(el("h2","title","🔔 League Activity"));
-  ACTIVITY.forEach(a=> act.appendChild(el("div","",
-    `<div style="padding:9px 0;border-top:1px solid var(--line);font-size:13px">
-      <span style="margin-right:7px">${a.ic}</span>${a.txt}
-      <div class="muted" style="font-size:11px;margin-top:2px">${a.time}</div></div>`)));
+  if(app.realLeague){
+    const tx=(app.transactions||[]).slice(0,8);
+    if(!tx.length) act.appendChild(el("div","muted","<div style='font-size:13px'>No league activity yet — trades and drops show up here.</div>"));
+    tx.forEach(t=>{ const ic=t.kind==="trade"?"🔁":t.kind==="drop"?"🗑️":"➕";
+      act.appendChild(el("div","",`<div style="padding:9px 0;border-top:1px solid var(--line);font-size:13px"><span style="margin-right:7px">${ic}</span>${t.detail}</div>`)); });
+  } else {
+    ACTIVITY.forEach(a=> act.appendChild(el("div","",
+      `<div style="padding:9px 0;border-top:1px solid var(--line);font-size:13px">
+        <span style="margin-right:7px">${a.ic}</span>${a.txt}
+        <div class="muted" style="font-size:11px;margin-top:2px">${a.time}</div></div>`)));
+  }
   s.appendChild(act);
 }
 function recapCard(){
@@ -1130,6 +1137,11 @@ let swapPick=null;
 function renderTeam(){
   const s=$("screen"); s.innerHTML="";
   if(app.realLeague){
+    const incomingN=(app.trades||[]).filter(t=>t.to_user===(app.user&&app.user.id)&&t.status==="pending").length;
+    const tt=el("div","tabset");
+    [["lineup","Lineup"],["trades","Trades"+(incomingN?" ("+incomingN+")":"")]].forEach(([id,lab])=>{ const b=el("button",app.teamTab===id?"on":"",lab); b.onclick=()=>{app.teamTab=id;renderTeam();}; tt.appendChild(b); });
+    s.appendChild(tt);
+    if(app.teamTab==="trades"){ renderTrades(s); return; }
     const myPicks=myDraftPicks();
     if(!myPicks.length){
       s.appendChild(el("div","card","<h2 class='title'>My Team</h2><div class='muted' style='font-size:13px'>You haven't drafted yet — head to the 🐍 <b style='color:var(--txt)'>Draft</b> tab to build your roster.</div>"));
@@ -1464,11 +1476,13 @@ function subscribeDraft(){
   const refreshTrades=async ()=>{ const before=app.trades.filter(t=>t.to_user===app.user.id&&t.status==="pending").length;
     await loadTrades(); const after=app.trades.filter(t=>t.to_user===app.user.id&&t.status==="pending").length;
     if(after>before) toast("📨 New trade offer!");
-    if(app.tab==="league") renderLeague(); };
+    if(!app.showConfirm && app.user && app.connectedLeague) render(); };
+  const refreshTx=async ()=>{ await loadTransactions(); if(!app.showConfirm && app.user && app.connectedLeague) render(); };
   app.draftChannel=sb.channel("draft-"+lid)
     .on("postgres_changes",{event:"*",schema:"public",table:"draft_picks",filter:"league_id=eq."+lid}, refresh)
     .on("postgres_changes",{event:"*",schema:"public",table:"drafts",filter:"league_id=eq."+lid}, refresh)
     .on("postgres_changes",{event:"*",schema:"public",table:"trades",filter:"league_id=eq."+lid}, refreshTrades)
+    .on("postgres_changes",{event:"*",schema:"public",table:"transactions",filter:"league_id=eq."+lid}, refreshTx)
     .subscribe();
 }
 function unsubscribeDraft(){ if(app.draftChannel){ try{ sb.removeChannel(app.draftChannel); }catch(e){} app.draftChannel=null; } }
@@ -1535,7 +1549,7 @@ function playerActionModal(pick){
     if(!confirm("Drop "+pick.player_name+"? They become a free agent.")) return;
     try{ const {error}=await sb.rpc("drop_player",{lid:app.sbLeagueId, pid:pick.player_id}); if(error) throw error;
       if(Array.isArray(app.lineup)){ const j=app.lineup.indexOf(pick.player_id); if(j>=0){ app.lineup[j]=null; saveLineup(); } }
-      ov.innerHTML=""; await loadDraft(); toast("Dropped "+pick.player_name); renderTeam();
+      ov.innerHTML=""; await loadDraft(); await loadTransactions(); toast("Dropped "+pick.player_name); renderTeam();
     }catch(e){ toast(e.message||"Drop failed"); }
   };
   ov.querySelector("#paCancel").onclick=()=>{ ov.innerHTML=""; };
@@ -1544,6 +1558,24 @@ async function loadTrades(){
   if(!app.sbLeagueId){ app.trades=[]; return; }
   try{ const {data}=await sb.from("trades").select("*").eq("league_id",app.sbLeagueId).order("created_at",{ascending:false}); app.trades=data||[]; }
   catch(e){ app.trades=[]; }
+}
+async function loadTransactions(){
+  if(!app.sbLeagueId){ app.transactions=[]; return; }
+  try{ const {data}=await sb.from("transactions").select("*").eq("league_id",app.sbLeagueId).order("created_at",{ascending:false}); app.transactions=data||[]; }
+  catch(e){ app.transactions=[]; }
+}
+function renderTransactions(s){
+  const chips=el("div","chips"); chips.style.marginBottom="10px";
+  [["all","All"],["trade","Trades"],["waiver","Waivers"]].forEach(([id,lab])=>{ const c=el("div","chip"+(app.txFilter===id?" on":"")); c.textContent=lab; c.onclick=()=>{app.txFilter=id;renderLeague();}; chips.appendChild(c); });
+  s.appendChild(chips);
+  const rows=(app.transactions||[]).filter(t=> app.txFilter==="all" || (app.txFilter==="trade"?t.kind==="trade":(t.kind==="drop"||t.kind==="add")));
+  const c=el("div","card"); c.appendChild(el("h2","title","League Transactions"));
+  if(!rows.length) c.appendChild(el("div","muted","<div style='font-size:13px'>No transactions yet.</div>"));
+  rows.slice(0,60).forEach(t=>{
+    const ic = t.kind==="trade"?"🔁":t.kind==="drop"?"🗑️":"➕";
+    c.appendChild(el("div","",`<div style="padding:9px 0;border-top:1px solid var(--line);font-size:13px"><span style="margin-right:7px">${ic}</span>${t.detail}</div>`));
+  });
+  s.appendChild(c);
 }
 function teamNameOf(uid){ const m=app.members.find(x=>x.user_id===uid); return m?(m.team_name||"Team"):"Team"; }
 function playerNameOf(pid){ const p=(app.draft?app.draft.picks:[]).find(x=>x.player_id===pid); return p?p.player_name:"player"; }
@@ -1589,7 +1621,7 @@ function renderTradeBuilder(){
     const send=el("button","btn"); send.style.width="100%"; send.style.marginTop="14px"; send.textContent="Send Trade Offer";
     send.onclick=async ()=>{ if(!tb.request.size){ toast("Select at least one of their players"); return; }
       try{ const {error}=await sb.rpc("propose_trade",{ lid:app.sbLeagueId, target:tb.to, offer:[...tb.offer], request:[...tb.request] }); if(error) throw error;
-        app.tradeBuilder=null; ov.innerHTML=""; await loadTrades(); toast("Trade offer sent"); app.tab="league"; app.leagueTab="trades"; render(); }
+        app.tradeBuilder=null; ov.innerHTML=""; await loadTrades(); toast("Trade offer sent"); app.tab="team"; app.teamTab="trades"; render(); }
       catch(e){ toast(e.message||"Trade failed"); } };
     box.appendChild(send);
     const back=el("button","btn sec"); back.style.width="100%"; back.style.marginTop="8px"; back.textContent="← Back"; back.onclick=()=>{ tb.step=1; renderTradeBuilder(); }; box.appendChild(back);
@@ -1598,11 +1630,11 @@ function renderTradeBuilder(){
 }
 async function respondTrade(id, accept){
   try{ const {error}=await sb.rpc("respond_trade",{ tid:id, accept }); if(error) throw error;
-    await loadTrades(); await loadDraft(); await loadLineup(); toast(accept?"Trade accepted! ✅":"Trade rejected"); renderLeague(); }
+    await loadTrades(); await loadDraft(); await loadLineup(); await loadTransactions(); toast(accept?"Trade accepted! ✅":"Trade rejected"); render(); }
   catch(e){ toast(e.message||"Failed"); }
 }
 async function cancelTrade(id){
-  try{ const {error}=await sb.rpc("cancel_trade",{ tid:id }); if(error) throw error; await loadTrades(); toast("Trade cancelled"); renderLeague(); }
+  try{ const {error}=await sb.rpc("cancel_trade",{ tid:id }); if(error) throw error; await loadTrades(); toast("Trade cancelled"); render(); }
   catch(e){ toast(e.message||"Failed"); }
 }
 function renderTrades(s){
@@ -1800,8 +1832,7 @@ function renderDraft(){
 function renderLeague(){
   const s=$("screen"); s.innerHTML="";
   const ts=el("div","tabset");
-  const incomingN = (app.trades||[]).filter(t=>t.to_user===(app.user&&app.user.id)&&t.status==="pending").length;
-  [["scoreboard","Scores"],["standings","Standings"],["playoffs","Playoffs"],["trades","Trades"+(incomingN?" ("+incomingN+")":"")],["schedule","Schedule"],["chat","Chat"]].forEach(([id,lab])=>{
+  [["scoreboard","Scores"],["standings","Standings"],["playoffs","Playoffs"],["transactions","Transactions"],["schedule","Schedule"],["chat","Chat"]].forEach(([id,lab])=>{
     const b=el("button",app.leagueTab===id?"on":"",lab); b.onclick=()=>{app.leagueTab=id;app.leagueMatchup=null;renderLeague();}; ts.appendChild(b);
   });
   s.appendChild(ts);
@@ -1822,8 +1853,8 @@ function renderLeague(){
         s.appendChild(c);
       });
     }
-  } else if(app.leagueTab==="trades"){
-    renderTrades(s);
+  } else if(app.leagueTab==="transactions"){
+    renderTransactions(s);
   } else if(app.leagueTab==="playoffs"){
     renderPlayoffs(s);
   } else if(app.leagueTab==="standings"){
