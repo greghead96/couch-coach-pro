@@ -1160,7 +1160,7 @@ function renderTeam(){
     if(!bench.length) bc.appendChild(el("div","muted","<div style='font-size:13px'>No bench players.</div>"));
     bench.forEach(p=>{ const row=el("div","plr"); row.style.gridTemplateColumns="34px 26px 1fr auto"; row.style.cursor="pointer";
       row.innerHTML=`${avatarHTML({pos:p.pos,name:p.player_name,headshot:p.headshot})}<div class="pos">${p.pos}</div><div><div class="nm">${p.player_name}</div><div class="meta2">${p.team||""}</div></div><div></div>`;
-      row.onclick=()=>openPlayerDetail({espnId:(p.player_id||"").replace(/^e/,""),name:p.player_name,pos:p.pos,teamAb:p.team,headshot:p.headshot});
+      row.onclick=()=>playerActionModal(p);
       bc.appendChild(row); });
     s.appendChild(bc); return;
   }
@@ -1392,7 +1392,7 @@ function renderPlayers(){
     if(!mine.length) rc.appendChild(el("div","muted","<div style='font-size:13px'>No players yet — draft your team in the 🐍 Draft tab.</div>"));
     mine.forEach(p=>{ const row=el("div","plr"); row.style.gridTemplateColumns="34px 26px 1fr auto";
       row.innerHTML=`${avatarHTML({pos:p.pos,name:p.player_name,headshot:p.headshot})}<div class="pos">${p.pos}</div><div><div class="nm">${p.player_name}</div><div class="meta2">${p.team||""}</div></div><div></div>`;
-      row.onclick=()=>openPlayerDetail({espnId:(p.player_id||"").replace(/^e/,""),name:p.player_name,pos:p.pos,teamAb:p.team,headshot:p.headshot}); rc.appendChild(row); });
+      row.onclick=()=>playerActionModal(p); rc.appendChild(row); });
   } else {
     [...myStarters,...myBench].filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter).forEach(p=> rc.appendChild(faRow(p,"Drop"," sec",()=>dropPlayer(p))));
   }
@@ -1495,6 +1495,38 @@ async function saveLineup(){
   try{ await sb.from("lineups").upsert({ league_id:app.sbLeagueId, user_id:app.user.id, starters:app.lineup, updated_at:new Date().toISOString() }); }catch(e){}
 }
 function myDraftPicks(){ return (app.draft?app.draft.picks:[]).filter(p=>p.user_id===(app.user&&app.user.id)); }
+// Draft rule: once remaining picks == unfilled required starting slots, you can only draft to fill them
+function allowedDraftPositions(userId){
+  const picks=(app.draft?app.draft.picks:[]).filter(p=>p.user_id===userId);
+  const rounds=(app.draft&&app.draft.rounds)||15;
+  const remainingPicks=rounds-picks.length; // includes the pick about to be made
+  const {filled}=fillRoster(picks);
+  const empty=filled.filter(f=>!f.p);
+  if(remainingPicks>empty.length) return null;   // spare picks → anything goes
+  const set=new Set(); empty.forEach(f=>f.pos.forEach(p=>set.add(p)));
+  return { set, labels:empty.map(f=>f.lbl) };
+}
+function playerActionModal(pick){
+  if(pick.user_id!==(app.user&&app.user.id)){ openPlayerDetail({espnId:(pick.player_id||"").replace(/^e/,""),name:pick.player_name,pos:pick.pos,teamAb:pick.team,headshot:pick.headshot}); return; }
+  const ov=$("overlay");
+  ov.innerHTML=`<div class="modal"><div class="box" style="max-width:340px">
+    <div style="display:flex;align-items:center;gap:10px;text-align:left">${avatarHTML({pos:pick.pos,name:pick.player_name,headshot:pick.headshot})}<div><div style="font-weight:800">${pick.player_name}</div><div class="muted" style="font-size:12px">${pick.pos} · ${pick.team||""}</div></div></div>
+    <button class="btn sec" id="paInfo" style="width:100%;margin-top:14px">📊 Player Info</button>
+    <button class="btn sec" id="paTrade" style="width:100%;margin-top:8px">🔁 Offer in Trade</button>
+    <button class="btn" id="paDrop" style="width:100%;margin-top:8px">🗑️ Drop Player</button>
+    <button class="btn sec" id="paCancel" style="width:100%;margin-top:8px">Cancel</button></div></div>`;
+  ov.querySelector("#paInfo").onclick=()=> openPlayerDetail({espnId:(pick.player_id||"").replace(/^e/,""),name:pick.player_name,pos:pick.pos,teamAb:pick.team,headshot:pick.headshot});
+  ov.querySelector("#paTrade").onclick=()=> openTradeBuilder(pick);
+  ov.querySelector("#paDrop").onclick=async ()=>{
+    if(!confirm("Drop "+pick.player_name+"? They become a free agent.")) return;
+    try{ const {error}=await sb.rpc("drop_player",{lid:app.sbLeagueId, pid:pick.player_id}); if(error) throw error;
+      if(Array.isArray(app.lineup)){ const j=app.lineup.indexOf(pick.player_id); if(j>=0){ app.lineup[j]=null; saveLineup(); } }
+      ov.innerHTML=""; await loadDraft(); toast("Dropped "+pick.player_name); renderTeam();
+    }catch(e){ toast(e.message||"Drop failed"); }
+  };
+  ov.querySelector("#paCancel").onclick=()=>{ ov.innerHTML=""; };
+}
+function openTradeBuilder(pick){ toast("Trades — coming in the next update"); }
 function openLineupChooser(i){
   const slot=SLOTS[i]; const myPicks=myDraftPicks();
   const eligible=myPicks.filter(p=>slot.pos.includes(p.pos));
@@ -1605,11 +1637,18 @@ function renderDraft(){
   async function draftPlayer(p){ try{ const {error}=await sb.rpc("make_pick",{lid:app.sbLeagueId,pid:p.id,pname:p.name,ppos:p.pos,pteam:p.teamAb||"",phead:p.headshot||p.logo||""}); if(error) throw error; app.queue=app.queue.filter(x=>x!==p.id); saveQueue(); toast("Drafted "+p.name); await loadDraft(); renderDraft(); }catch(e){ toast(e.message||"Pick failed"); } }
   async function commishPick(p){ try{ const {error}=await sb.rpc("commish_pick",{lid:app.sbLeagueId,pid:p.id,pname:p.name,ppos:p.pos,pteam:p.teamAb||"",phead:p.headshot||p.logo||""}); if(error) throw error; toast("Picked "+p.name+" for "+onclockName); await loadDraft(); renderDraft(); }catch(e){ toast(e.message||"Pick failed"); } }
 
+  const commishPicking = app.isCommish && app.commishMode && !isMe;
+  const restrict = (isMe || commishPicking) ? allowedDraftPositions(onclock) : null;
+  const posOK = p => !restrict || restrict.set.has(p.pos);
+
   // Your queue
   if(app.queue.length){
     const qc=el("div","card"); qc.appendChild(el("h2","title","⭐ Your Queue"));
     app.queue.forEach(id=>{ const p=byId[id]; if(!p) return;
-      qc.appendChild(faRow(p, isMe?"Draft":"✕ Remove", isMe?"":" sec", ()=>{ if(isMe) draftPlayer(p); else toggleQueue(id); })); });
+      if(isMe){ const ok=posOK(p);
+        qc.appendChild(faRow(p, ok?"Draft":("🔒 "+restrict.labels.join("/")+" first"), ok?"":" sec", ()=>{ if(ok) draftPlayer(p); else toast("You must fill "+restrict.labels.join(", ")+" first"); }));
+      } else qc.appendChild(faRow(p, "✕ Remove", " sec", ()=>toggleQueue(id)));
+    });
     s.appendChild(qc);
   }
 
@@ -1621,10 +1660,11 @@ function renderDraft(){
     s.appendChild(tg);
   }
   posChips(s); sortControl(s);
-  const avail=sortPool(poolAll.filter(p=>!draftedSet.has(p.id)).filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter));
+  let avail=sortPool(poolAll.filter(p=>!draftedSet.has(p.id)).filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter));
+  if(restrict) avail=avail.filter(posOK);
   const c=el("div","card"); c.appendChild(el("h2","title","Available · tap for research"));
-  const commishPicking = app.isCommish && app.commishMode && !isMe;
-  if(!isMe && !commishPicking) c.appendChild(el("div","muted",`<div style='font-size:11px;margin-bottom:6px'>Waiting for <b>${onclockName}</b>. Queue players for your next pick.</div>`));
+  if(restrict) c.appendChild(el("div","muted",`<div style='font-size:11px;margin-bottom:6px;color:var(--gold)'>🔒 Roster rules: you still need <b>${restrict.labels.join(", ")}</b> — only those positions are draftable now.</div>`));
+  else if(!isMe && !commishPicking) c.appendChild(el("div","muted",`<div style='font-size:11px;margin-bottom:6px'>Waiting for <b>${onclockName}</b>. Queue players for your next pick.</div>`));
   avail.slice(0,60).forEach(p=>{
     let label,cls="",act;
     if(isMe){ label="Draft"; act=()=>draftPlayer(p); }
