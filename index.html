@@ -386,7 +386,7 @@ let app = {
   sim:null, armed:null, matchupIdx:0,
   leagueMatchup:null, schedTeam:"Your Team", pFilter:"ALL", pSort:"rank", pView:"players", drafted:[], pStatTab:null,
   myTeam:"Your Team", oppTeam:"Burrow Bandits", realLeague:false,
-  draft:null, draftChannel:null, isCommish:false, members:[], queue:[], draftView:"board", commishMode:false,
+  draft:null, draftChannel:null, isCommish:false, members:[], queue:[], draftView:"board", commishMode:false, lineup:null,
   pool:null, poolLoading:false, poolError:null, pDetail:null,
   nfl:{ games:null, loading:false, error:null, selected:null, gamecast:null, view:"plays", pollId:null, pollFor:null },
   settings:{
@@ -766,7 +766,7 @@ function copyCode(code){
 }
 async function enterLeague(id, name, code){
   app.connectedLeague=name; app.sbLeagueId=id; app.leagueCode=code||null;
-  await loadLeagueData(); await loadDraft(); loadQueue(); subscribeDraft();
+  await loadLeagueData(); await loadDraft(); await loadLineup(); loadQueue(); subscribeDraft();
   app.sim=freshSim(); app.tab="home"; render();
 }
 async function autoEnterIfSingle(){
@@ -1130,23 +1130,39 @@ let swapPick=null;
 function renderTeam(){
   const s=$("screen"); s.innerHTML="";
   if(app.realLeague){
-    const myPicks=((app.draft&&app.draft.picks)||[]).filter(p=>p.user_id===(app.user&&app.user.id));
+    const myPicks=myDraftPicks();
     if(!myPicks.length){
-      s.appendChild(el("div","card","<h2 class='title'>My Team</h2><div class='muted' style='font-size:13px'>You haven't drafted yet — head to the 🐍 <b style='color:var(--txt)'>Draft</b> tab to build your roster. Your team saves automatically.</div>"));
+      s.appendChild(el("div","card","<h2 class='title'>My Team</h2><div class='muted' style='font-size:13px'>You haven't drafted yet — head to the 🐍 <b style='color:var(--txt)'>Draft</b> tab to build your roster.</div>"));
       return;
     }
-    s.appendChild(el("div","card",`<h2 class='title'>${app.myTeam} · Roster</h2>
-      <div class='muted' style='font-size:12px'>Your drafted players (saved to the league). Setting starters vs. bench comes in the next update.</div>`));
-    const order={QB:0,RB:1,WR:2,TE:3,K:4,DEF:5};
-    const sorted=myPicks.slice().sort((a,b)=>(order[a.pos]??9)-(order[b.pos]??9));
-    const c=el("div","card");
-    sorted.forEach(p=>{
-      const row=el("div","plr"); row.style.gridTemplateColumns="34px 26px 1fr auto";
-      row.innerHTML=`${avatarHTML({pos:p.pos,name:p.player_name,headshot:p.headshot})}<div class="pos">${p.pos}</div>
-        <div><div class="nm">${p.player_name}</div><div class="meta2">${p.team||""} · R${p.round}</div></div><div></div>`;
-      c.appendChild(row);
+    // ensure a valid lineup exists (default if none), and drop any stale ids
+    const validIds=new Set(myPicks.map(p=>p.player_id));
+    let lu = Array.isArray(app.lineup) && app.lineup.length===SLOTS.length ? app.lineup.slice() : defaultStarters(myPicks);
+    lu = lu.map(id => (id && validIds.has(id)) ? id : null);
+    if(JSON.stringify(lu)!==JSON.stringify(app.lineup)){ app.lineup=lu; saveLineup(); } else { app.lineup=lu; }
+    const pickById=id=>myPicks.find(p=>p.player_id===id);
+
+    s.appendChild(el("div","card",`<h2 class='title'>${app.myTeam} · Lineup</h2>
+      <div class='muted' style='font-size:12px'>Tap a slot to set your starter. Saves automatically to the league.</div>`));
+    const sc=el("div","card"); sc.appendChild(el("h2","title","Starters"));
+    SLOTS.forEach((slot,i)=>{
+      const p=app.lineup[i]?pickById(app.lineup[i]):null;
+      const row=el("div","plr tappable"); row.style.gridTemplateColumns="42px 34px 1fr auto"; row.style.cursor="pointer";
+      if(p) row.innerHTML=`<div class="pos">${slot.lbl}</div>${avatarHTML({pos:p.pos,name:p.player_name,headshot:p.headshot})}<div><div class="nm">${p.player_name}</div><div class="meta2">${p.pos} · ${p.team||""}</div></div><div class="muted" style="font-size:11px">change</div>`;
+      else row.innerHTML=`<div class="pos">${slot.lbl}</div><div class="avatar" style="background:var(--ink)"></div><div><div class="nm muted">— empty</div><div class="meta2">tap to set a ${slot.pos.join("/")}</div></div><div></div>`;
+      row.onclick=()=>openLineupChooser(i);
+      sc.appendChild(row);
     });
-    s.appendChild(c); return;
+    s.appendChild(sc);
+    const startedIds=new Set(app.lineup.filter(Boolean));
+    const bench=myPicks.filter(p=>!startedIds.has(p.player_id));
+    const bc=el("div","card"); bc.appendChild(el("h2","title","Bench ("+bench.length+")"));
+    if(!bench.length) bc.appendChild(el("div","muted","<div style='font-size:13px'>No bench players.</div>"));
+    bench.forEach(p=>{ const row=el("div","plr"); row.style.gridTemplateColumns="34px 26px 1fr auto"; row.style.cursor="pointer";
+      row.innerHTML=`${avatarHTML({pos:p.pos,name:p.player_name,headshot:p.headshot})}<div class="pos">${p.pos}</div><div><div class="nm">${p.player_name}</div><div class="meta2">${p.team||""}</div></div><div></div>`;
+      row.onclick=()=>openPlayerDetail({espnId:(p.player_id||"").replace(/^e/,""),name:p.player_name,pos:p.pos,teamAb:p.team,headshot:p.headshot});
+      bc.appendChild(row); });
+    s.appendChild(bc); return;
   }
   s.appendChild(el("div","card",`<h2 class='title'>Set Your Lineup — Week 11</h2>
     <div class='muted' style='font-size:12px'>Tap a bench player, then a starter of the same position to swap. The colored tag shows the opponent's season rank vs that position — <b style="color:var(--you)">green = great matchup</b> (weak defense), <b style="color:var(--opp)">red = tough</b>.</div>`));
@@ -1447,10 +1463,11 @@ function queueKey(){ return "ccf_q_"+app.sbLeagueId+"_"+(app.user&&app.user.id);
 function loadQueue(){ try{ app.queue=JSON.parse(localStorage.getItem(queueKey())||"[]"); }catch(e){ app.queue=[]; } }
 function saveQueue(){ try{ localStorage.setItem(queueKey(), JSON.stringify(app.queue)); }catch(e){} }
 function toggleQueue(id){ const i=app.queue.indexOf(id); if(i>=0)app.queue.splice(i,1); else app.queue.push(id); saveQueue(); renderDraft(); }
-// Fit a manager's picks into standard starting slots (+ bench), leaving empties for reference
+// Standard starting-lineup slot template (shared by draft view + lineup editor)
+const SLOTS=[{lbl:"QB",pos:["QB"]},{lbl:"RB",pos:["RB"]},{lbl:"RB",pos:["RB"]},{lbl:"WR",pos:["WR"]},{lbl:"WR",pos:["WR"]},{lbl:"TE",pos:["TE"]},{lbl:"FLEX",pos:["RB","WR","TE"]},{lbl:"K",pos:["K"]},{lbl:"DEF",pos:["DEF"]}];
+// Fit a manager's picks into the slots (+ bench), leaving empties for reference
 function fillRoster(picks){
-  const filled=[["QB",["QB"]],["RB",["RB"]],["RB",["RB"]],["WR",["WR"]],["WR",["WR"]],["TE",["TE"]],["FLEX",["RB","WR","TE"]],["K",["K"]],["DEF",["DEF"]]]
-    .map(([lbl,pos])=>({lbl,pos,p:null}));
+  const filled=SLOTS.map(s=>({lbl:s.lbl,pos:s.pos,p:null}));
   const bench=[];
   picks.forEach(pk=>{
     let slot=filled.find(f=>!f.p && f.lbl!=="FLEX" && f.pos.includes(pk.pos));
@@ -1458,6 +1475,44 @@ function fillRoster(picks){
     if(slot) slot.p=pk; else bench.push(pk);
   });
   return {filled, bench};
+}
+// Default starter assignment (array of player_ids aligned to SLOTS)
+function defaultStarters(picks){
+  const assign=SLOTS.map(()=>null); const used=new Set();
+  SLOTS.forEach((slot,i)=>{ if(slot.lbl==="FLEX")return; const p=picks.find(x=>!used.has(x.player_id)&&slot.pos.includes(x.pos)); if(p){assign[i]=p.player_id;used.add(p.player_id);} });
+  const fi=SLOTS.findIndex(s=>s.lbl==="FLEX");
+  if(fi>=0){ const p=picks.find(x=>!used.has(x.player_id)&&SLOTS[fi].pos.includes(x.pos)); if(p){assign[fi]=p.player_id;used.add(p.player_id);} }
+  return assign;
+}
+async function loadLineup(){
+  if(!app.sbLeagueId||!app.user){ app.lineup=null; return; }
+  try{ const {data}=await sb.from("lineups").select("starters").eq("league_id",app.sbLeagueId).eq("user_id",app.user.id).maybeSingle();
+    app.lineup=(data && Array.isArray(data.starters))? data.starters : null;
+  }catch(e){ app.lineup=null; }
+}
+async function saveLineup(){
+  if(!app.realLeague||!app.sbLeagueId||!app.user) return;
+  try{ await sb.from("lineups").upsert({ league_id:app.sbLeagueId, user_id:app.user.id, starters:app.lineup, updated_at:new Date().toISOString() }); }catch(e){}
+}
+function myDraftPicks(){ return (app.draft?app.draft.picks:[]).filter(p=>p.user_id===(app.user&&app.user.id)); }
+function openLineupChooser(i){
+  const slot=SLOTS[i]; const myPicks=myDraftPicks();
+  const eligible=myPicks.filter(p=>slot.pos.includes(p.pos));
+  const ov=$("overlay");
+  const items=eligible.map(p=>{ const here=app.lineup[i]===p.player_id; const elsewhere=app.lineup.includes(p.player_id)&&!here;
+    return `<button class="btn sec lc" data-id="${p.player_id}" style="width:100%;text-align:left;margin-top:6px${here?';border-color:var(--gold)':''}">${p.pos} · ${p.player_name} <span class="muted" style="font-size:11px">${p.team||""}${here?" · here":elsewhere?" · starting elsewhere":""}</span></button>`; }).join("");
+  ov.innerHTML=`<div class="modal"><div class="box" style="max-width:360px;text-align:left">
+    <div style="font-weight:800">Set ${slot.lbl}</div>
+    <div class="muted" style="font-size:12px;margin:4px 0 8px">Choose a ${slot.pos.join("/")}:</div>
+    <div style="max-height:50vh;overflow:auto">${items||'<div class="muted" style="font-size:13px">No eligible players on your roster.</div>'}</div>
+    ${app.lineup[i]?'<button class="btn sec" id="lcClear" style="width:100%;margin-top:10px">Clear slot</button>':''}
+    <button class="btn sec" id="lcCancel" style="width:100%;margin-top:8px">Cancel</button></div></div>`;
+  ov.querySelectorAll(".lc").forEach(b=> b.onclick=()=>{
+    const id=b.dataset.id; const j=app.lineup.indexOf(id); if(j>=0 && j!==i) app.lineup[j]=null;
+    app.lineup[i]=id; saveLineup(); ov.innerHTML=""; renderTeam();
+  });
+  const cl=ov.querySelector("#lcClear"); if(cl) cl.onclick=()=>{ app.lineup[i]=null; saveLineup(); ov.innerHTML=""; renderTeam(); };
+  ov.querySelector("#lcCancel").onclick=()=>{ ov.innerHTML=""; };
 }
 function renderDraft(){
   const s=$("screen"); if(!s) return; s.innerHTML="";
