@@ -148,6 +148,17 @@
   .bmatch { background:var(--panel2); border:1px solid var(--line); border-radius:8px; padding:7px 9px; font-size:11px; }
   .bmatch .bt { padding:3px 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .bmatch .bt.me { color:var(--you); font-weight:700; }
+
+  /* sleeper-style draft board */
+  .dboard { overflow-x:auto; padding-bottom:8px; margin-bottom:14px; }
+  .dgrid { display:grid; gap:4px; }
+  .dhead { font-size:9px; color:var(--muted); text-align:center; font-weight:700; white-space:nowrap; padding:3px 2px; }
+  .dhead.me { color:var(--you); }
+  .dcell { background:var(--panel2); border:1px solid var(--line); border-radius:6px; min-height:42px; padding:4px 5px; overflow:hidden; }
+  .dcell.empty { opacity:.35; }
+  .dcell.now { box-shadow:0 0 0 2px var(--gold) inset; }
+  .dcell .pk { color:var(--muted); font-size:8px; }
+  .dcell .pn { font-weight:700; font-size:10px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 </style>
 </head>
 <body>
@@ -195,6 +206,8 @@ const oppStarters = [
   P("M. Nabers","WR",12.2,"@ PHI"), P("J. Tucker","K",9.2,"@ CIN"),
   P("Ravens D/ST","DEF",8.0,"@ CIN"),
 ];
+const oppBench = [ P("C. Kupp","WR",11.9,"@ DEN"), P("A. Jones","RB",10.4,"vs NYG"),
+  P("D. Schultz","TE",6.8,"vs CIN"), P("W. Lutz","K",7.9,"@ DEN") ];
 
 const FREE_AGENTS = [
   P("J. Dobbins","RB",11.4,"@ KC"), P("W. Robinson","WR",9.8,"@ PHI"),
@@ -239,7 +252,7 @@ const SCHEDULE = [
 // ---- player visuals + stats helpers ----
 function hashNum(str){ let h=0; for(let i=0;i<(str||"").length;i++){ h=(h*31+str.charCodeAt(i))>>>0; } return h; }
 // assign deterministic jersey numbers
-[myStarters,myBench,oppStarters,FREE_AGENTS].forEach(arr=>arr.forEach(p=>{ p.num = p.pos==="DEF"?0:(hashNum(p.name)%89)+1; }));
+[myStarters,myBench,oppStarters,oppBench,FREE_AGENTS].forEach(arr=>arr.forEach(p=>{ p.num = p.pos==="DEF"?0:(hashNum(p.name)%89)+1; }));
 function posHue(pos){ return ({QB:"#3b82f6",RB:"#10b981",WR:"#f59e0b",TE:"#a855f7",K:"#94a3b8",DEF:"#64748b"})[pos]||"#334155"; }
 function avatarHTML(p,cls){
   cls=cls||"";
@@ -331,7 +344,7 @@ let app = {
   },
 };
 function freshSim(){
-  myStarters.forEach(reset); oppStarters.forEach(reset);
+  [...myStarters,...myBench,...oppStarters,...oppBench].forEach(reset);
   return { running:false, speed:1, gameSec:0, cd:{}, feed:[], puLog:[], opNext:75,
            scheduled:[], curQ:0, others: OTHER_MATCHUPS.map(m=>({...m})) };
 }
@@ -474,7 +487,7 @@ function tick(){
   }
 
   const q = Math.min(4,Math.floor(app.sim.gameSec/QSEC)+1);
-  [...myStarters,...oppStarters].forEach(p=>{
+  [...myStarters,...oppStarters,...myBench,...oppBench].forEach(p=>{
     const eff=effectsFor(p,q);
     if(eff.frozen) return;
     const c=POS_CFG[p.pos];
@@ -867,20 +880,21 @@ function renderMatchup(){
     s.appendChild(sc);
   }
 
-  s.appendChild(matchupLineups());
+  s.appendChild(matchupLineups(myStarters,oppStarters,"Starters",true));
+  s.appendChild(matchupLineups(myBench,oppBench,"Bench",false));
 }
-function matchupLineups(){
+function matchupLineups(myArr,opArr,title,allowTap){
   const c=el("div","card");
   const head=el("div","row"); head.style.marginBottom="4px";
-  head.innerHTML=`<span style="color:var(--you);font-size:12px;font-weight:700">Your Starters</span>
+  head.innerHTML=`<span style="color:var(--you);font-size:12px;font-weight:700">Your ${title}</span>
     <span class="muted" style="font-size:10px">vs</span>
-    <span style="color:var(--opp);font-size:12px;font-weight:700">Burrow Bandits</span>`;
+    <span style="color:var(--opp);font-size:12px;font-weight:700">Their ${title}</span>`;
   c.appendChild(head);
-  const armedCfg=app.armed?POWERUPS[app.armed]:null;
+  const armedCfg=(allowTap && app.armed)?POWERUPS[app.armed]:null;
   const cq=currentQuarter();
-  const n=Math.max(myStarters.length,oppStarters.length);
+  const n=Math.max(myArr.length,opArr.length);
   for(let i=0;i<n;i++){
-    const lp=myStarters[i], rp=oppStarters[i];
+    const lp=myArr[i], rp=opArr[i];
     const pos=(lp&&lp.pos)||(rp&&rp.pos)||"";
     const row=el("div","mrow");
     row.appendChild(playerCell(lp,"me",armedCfg,cq,true));
@@ -979,55 +993,96 @@ function renderPlayers(){
   if(app.pView==="draft"){ renderDraft(s); return; }
 
   s.appendChild(el("div","card",`<h2 class='title'>Free Agents</h2>
-    <div class='muted' style='font-size:12px'>FAAB budget: <b style='color:var(--gold)'>$74</b> · Add to your bench, drop from your roster. Waivers process Wed 3 AM.</div>`));
+    <div class='muted' style='font-size:12px'>FAAB budget: <b style='color:var(--gold)'>$74</b> · Add to your bench; if the roster's full you'll pick someone to drop.</div>`));
   posChips(s);
-  const pool=availablePlayers().filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter).sort((a,b)=>b.proj-a.proj);
+  const rostIds=new Set([...myStarters,...myBench].map(p=>p.id));
+  const cap=app.settings.league.rosterSize||16;
+  const filled=[...myStarters,...myBench].length;
+  s.appendChild(el("div","muted",`<div style='font-size:11px;text-align:center;margin-bottom:8px'>Roster <b style="color:${filled>=cap?'var(--opp)':'var(--gold)'}">${filled}/${cap}</b></div>`));
+  const pool=availablePlayers().filter(p=>!rostIds.has(p.id)).filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter).sort((a,b)=>b.proj-a.proj);
   const c=el("div","card");
   if(!pool.length) c.appendChild(el("div","muted","<div style='font-size:13px'>No free agents at this position.</div>"));
-  pool.slice(0,40).forEach(p=> c.appendChild(faRow(p,"+ Add","",(b)=>{ toast("Added "+p.name+" to your bench"); b.textContent="Added"; b.disabled=true; })));
+  pool.slice(0,40).forEach(p=> c.appendChild(faRow(p,"+ Add","",()=>addPlayer(p))));
   s.appendChild(c);
 
   const rc=el("div","card"); rc.appendChild(el("h2","title","Your Roster · tap Drop"));
   [...myStarters,...myBench].filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter).forEach(p=>
-    rc.appendChild(faRow(p,"Drop"," sec",(b)=>{ toast("Dropped "+p.name); b.textContent="Dropped"; b.disabled=true; })));
+    rc.appendChild(faRow(p,"Drop"," sec",()=>dropPlayer(p))));
   s.appendChild(rc);
 }
+function rosterAll(){ return [...myStarters,...myBench]; }
+function addPlayer(p){
+  const cap=app.settings.league.rosterSize||16;
+  if(rosterAll().length>=cap){ openDropModal(p); return; }
+  myBench.push(p); toast("✅ Added "+p.name); renderPlayers();
+}
+function dropPlayer(p){
+  let i=myBench.indexOf(p); if(i>=0){ myBench.splice(i,1); }
+  else { i=myStarters.indexOf(p); if(i>=0) myStarters.splice(i,1); }
+  toast("Dropped "+p.name); renderPlayers();
+}
+function openDropModal(pAdd){
+  const ov=$("overlay"); const all=rosterAll();
+  const list=all.map((p,i)=>`<button class="btn sec dropOpt" data-i="${i}" style="width:100%;text-align:left;margin-top:6px">${p.pos} · ${p.name}</button>`).join("");
+  ov.innerHTML=`<div class="modal"><div class="box" style="max-width:360px">
+    <div style="font-weight:800">Roster full (${all.length}/${app.settings.league.rosterSize||16})</div>
+    <div class="muted" style="font-size:12px;margin:6px 0 4px">Drop a player to add <b style="color:var(--txt)">${pAdd.name}</b>:</div>
+    <div style="max-height:48vh;overflow:auto">${list}</div>
+    <button class="btn sec" id="dropCancel" style="width:100%;margin-top:12px">Cancel</button></div></div>`;
+  ov.querySelectorAll(".dropOpt").forEach(b=> b.onclick=()=>{
+    const victim=all[+b.dataset.i];
+    let j=myBench.indexOf(victim); if(j>=0) myBench.splice(j,1); else { j=myStarters.indexOf(victim); if(j>=0) myStarters.splice(j,1); }
+    myBench.push(pAdd); $("overlay").innerHTML=""; toast("Dropped "+victim.name+", added "+pAdd.name); renderPlayers();
+  });
+  ov.querySelector("#dropCancel").onclick=()=>{ $("overlay").innerHTML=""; };
+}
+function draftSlot(pickNo,T){ const r=Math.floor((pickNo-1)/T); const i=(pickNo-1)%T; return r%2===0? i : T-1-i; }
+function simDraft(){
+  const teams=LEAGUE.map(t=>t.team), T=teams.length; let guard=0;
+  while(guard++<600){ const pn=app.drafted.length+1; const oc=teams[draftSlot(pn,T)];
+    if(oc==="Your Team") break;
+    const dset=new Set(app.drafted.map(d=>d.p.id));
+    const best=availablePlayers().filter(p=>!dset.has(p.id)).sort((a,b)=>b.proj-a.proj)[0];
+    if(!best) break; app.drafted.push({p:best,by:oc,pick:pn}); }
+  renderPlayers();
+}
 function renderDraft(s){
-  const teams=LEAGUE.map(t=>t.team);
+  const teams=LEAGUE.map(t=>t.team), T=teams.length, ROUNDS=15;
   const pickNo=app.drafted.length+1;
-  const onClock=teams[(pickNo-1)%teams.length];
+  const curRound=Math.floor((pickNo-1)/T);
+  const onClock=teams[draftSlot(pickNo,T)];
   const isMe=onClock==="Your Team";
-  s.appendChild(el("div","card",`<h2 class='title'>🐍 Draft Room · snake</h2>
-    <div class='muted' style='font-size:12px'>Pick ${pickNo} · On the clock: <b style="color:${isMe?'var(--you)':'var(--txt)'}">${onClock}</b>${isMe?" — you're up! Tap a player to draft.":""}</div>`));
-  const strip=el("div","chips");
-  teams.forEach((t,i)=>{ const c=el("div","chip"+(t===onClock?" on":"")); c.textContent=(i+1)+". "+t.split(" ")[0]; strip.appendChild(c); });
-  s.appendChild(strip);
+  s.appendChild(el("div","card",`<h2 class='title'>🐍 Draft Board · snake</h2>
+    <div class='muted' style='font-size:12px'>Round ${Math.min(curRound+1,ROUNDS)}, Pick ${pickNo} · On the clock: <b style="color:${isMe?'var(--you)':'var(--txt)'}">${onClock}</b>${isMe?" — you're up! Tap a player below.":""}</div>`));
+  if(!isMe){ const b=el("button","btn"); b.style.width="100%"; b.style.marginBottom="12px"; b.textContent="⏩ Sim to your pick"; b.onclick=simDraft; s.appendChild(b); }
 
-  if(!isMe){
-    const b=el("button","btn"); b.style.width="100%"; b.style.marginBottom="12px"; b.textContent="⏩ Sim to your pick";
-    b.onclick=()=>{ let guard=0;
-      while(guard++<200){ const pn=app.drafted.length+1; const oc=teams[(pn-1)%teams.length];
-        if(oc==="Your Team") break;
-        const dset=new Set(app.drafted.map(d=>d.p.id));
-        const best=availablePlayers().filter(p=>!dset.has(p.id)).sort((a,b)=>b.proj-a.proj)[0];
-        if(!best) break; app.drafted.push({p:best,by:oc,pick:pn}); }
-      renderPlayers(); };
-    s.appendChild(b);
+  const rounds=Math.min(ROUNDS, curRound+2);
+  const board=el("div","dboard"); const grid=el("div","dgrid");
+  grid.style.gridTemplateColumns=`26px repeat(${T},minmax(74px,1fr))`;
+  grid.appendChild(el("div","dhead",""));
+  teams.forEach(t=> grid.appendChild(el("div","dhead"+(t==="Your Team"?" me":""), t.split(" ")[0])));
+  for(let r=0;r<rounds;r++){
+    grid.appendChild(el("div","dhead","R"+(r+1)));
+    for(let col=0;col<T;col++){
+      const pos = r%2===0 ? col : (T-1-col);
+      const pn = r*T + pos + 1;
+      const pk = app.drafted[pn-1];
+      const now = pn===pickNo;
+      const cell=el("div","dcell"+(pk?"":" empty")+(now?" now":""));
+      if(pk){ cell.style.borderLeft="3px solid "+posHue(pk.p.pos);
+        cell.innerHTML=`<div class="pk">${pn} · ${pk.p.pos}</div><div class="pn">${pk.p.name}</div>`; }
+      else cell.innerHTML=`<div class="pk">${pn}</div>${now?'<div class="pn" style="color:var(--gold)">on clock</div>':''}`;
+      grid.appendChild(cell);
+    }
   }
-
-  const mine=app.drafted.filter(d=>d.by==="Your Team");
-  const yc=el("div","card"); yc.appendChild(el("h2","title","Your Picks ("+mine.length+")"));
-  if(!mine.length) yc.appendChild(el("div","muted","<div style='font-size:13px'>No picks yet.</div>"));
-  mine.forEach(d=> yc.appendChild(el("div","",`<div style="padding:6px 0;border-top:1px solid var(--line);font-size:13px;display:flex;align-items:center;gap:8px">${avatarHTML(d.p,'sm')}<b>${d.p.name}</b><span class="muted">${d.p.pos} · pick ${d.pick}</span></div>`)));
-  s.appendChild(yc);
+  board.appendChild(grid); s.appendChild(board);
 
   posChips(s);
-  const drafted=new Set(app.drafted.map(d=>d.p.id));
-  const avail=availablePlayers().filter(p=>!drafted.has(p.id)).filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter).sort((a,b)=>b.proj-a.proj);
+  const dset=new Set(app.drafted.map(d=>d.p.id));
+  const avail=availablePlayers().filter(p=>!dset.has(p.id)).filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter).sort((a,b)=>b.proj-a.proj);
   const c=el("div","card"); c.appendChild(el("h2","title","Best Available"));
-  avail.slice(0,40).forEach(p=> c.appendChild(faRow(p, isMe?"Draft":"—", "", (b)=>{ if(!isMe)return; app.drafted.push({p,by:onClock,pick:pickNo}); toast("Drafted "+p.name); renderPlayers(); })));
+  avail.slice(0,40).forEach(p=> c.appendChild(faRow(p, isMe?"Draft":"Sim first", "", ()=>{ if(!isMe){ toast("Not your pick — Sim to your turn"); return; } app.drafted.push({p,by:onClock,pick:pickNo}); toast("Drafted "+p.name); renderPlayers(); })));
   s.appendChild(c);
-  s.appendChild(el("div","muted","<div style='font-size:11px;text-align:center'>Demo draft — the snake auto-runs other managers when you tap “Sim to your pick.”</div>"));
 }
 
 // ============================ LEAGUE ============================
@@ -1344,6 +1399,7 @@ function renderCommish(){
 
 // ============================ NFL LIVE (real ESPN data) ============================
 const ESPN="https://site.api.espn.com/apis/site/v2/sports/football/nfl";
+function teamLogo(u,sz){ return u?`<img src="${u}" style="width:${sz||18}px;height:${sz||18}px;vertical-align:middle" onerror="this.style.display='none'">`:""; }
 function seasonLabel(s){ const t={1:"Preseason",2:"Regular Season",3:"Postseason",4:"Offseason"}; return (s&&t[s.type]||"NFL")+" "+((s&&s.year)||""); }
 function ensureNFL(){ if(!app.nfl.games && !app.nfl.loading && !app.nfl.error) loadNFLScoreboard(); }
 async function loadNFLScoreboard(){
@@ -1356,8 +1412,8 @@ async function loadNFLScoreboard(){
       const home=c.competitors.find(x=>x.homeAway==="home")||c.competitors[0];
       const away=c.competitors.find(x=>x.homeAway==="away")||c.competitors[1];
       return { id:e.id, state:e.status.type.state, status:e.status.type.shortDetail,
-        home:{ab:home.team.abbreviation, score:home.score},
-        away:{ab:away.team.abbreviation, score:away.score} };
+        home:{ab:home.team.abbreviation, score:home.score, logo:(home.team&&home.team.logo)||""},
+        away:{ab:away.team.abbreviation, score:away.score, logo:(away.team&&away.team.logo)||""} };
     });
   }catch(err){ app.nfl.error="Couldn't reach ESPN — tap retry."; }
   app.nfl.loading=false;
@@ -1406,9 +1462,9 @@ function renderNFL(){
     const sc=live?"var(--you)":post?"var(--muted)":"var(--gold)";
     const c=el("div","card"); c.style.cursor="pointer"; c.style.padding="12px"; c.style.marginBottom="10px";
     c.innerHTML=`<div class="row">
-      <span style="flex:1"><b>${g.away.ab}</b> ${g.away.score!=null?g.away.score:""}</span>
+      <span style="flex:1">${teamLogo(g.away.logo)} <b>${g.away.ab}</b> ${g.away.score!=null?g.away.score:""}</span>
       <span style="flex:1;text-align:center;font-size:11px;color:${sc}">${live?"🔴 ":""}${g.status}</span>
-      <span style="flex:1;text-align:right">${g.home.score!=null?g.home.score:""} <b>${g.home.ab}</b></span></div>`;
+      <span style="flex:1;text-align:right">${g.home.score!=null?g.home.score:""} <b>${g.home.ab}</b> ${teamLogo(g.home.logo)}</span></div>`;
     c.onclick=()=>loadGamecast(g.id);
     s.appendChild(c);
   });
@@ -1423,9 +1479,9 @@ function renderGamecast(s){
   s.appendChild(back);
   if(g){
     s.appendChild(el("div","card",`<div class="scoreboard">
-      <div class="ts me"><div class="nm">${g.away.ab}</div><div class="pts">${g.away.score!=null?g.away.score:0}</div></div>
+      <div class="ts me"><div class="nm">${teamLogo(g.away.logo,22)}<br>${g.away.ab}</div><div class="pts">${g.away.score!=null?g.away.score:0}</div></div>
       <div class="clock"><div class="q">${g.state==='in'?'🔴 LIVE':g.state==='post'?'FINAL':'SOON'}</div><div class="st">${g.status}${g.state==='in'?' · auto-refresh':''}</div></div>
-      <div class="ts op"><div class="nm">${g.home.ab}</div><div class="pts">${g.home.score!=null?g.home.score:0}</div></div>
+      <div class="ts op"><div class="nm">${teamLogo(g.home.logo,22)}<br>${g.home.ab}</div><div class="pts">${g.home.score!=null?g.home.score:0}</div></div>
     </div>`));
   }
   if(!app.nfl.gamecast){ s.appendChild(el("div","card","<div class='muted' style='text-align:center;padding:12px'>🔄 Loading game details…</div>")); return; }
