@@ -223,6 +223,7 @@ let app = {
   earnedThisWeek:0, pityCount:0, realData:false, chat:CHAT_SEED.slice(),
   leagueId:null, leagueData:null, sleeperUserId:null,
   sim:null, armed:null, matchupIdx:0,
+  nfl:{ games:null, loading:false, error:null, selected:null, gamecast:null },
   settings:{
     scoring:{ passYdsPerPt:25, passTD:4, passInt:-2, rushYdsPerPt:10, rushTD:6,
               ppr:0.5, recYdsPerPt:10, recTD:6, fumLost:-2, twoPt:2 },
@@ -514,7 +515,7 @@ function render(){
   renderNav();
 }
 function renderNav(){
-  const tabs=[["home","Home","🏟️"],["matchup","Matchup","🥊"],["team","My Team","📋"],["players","Players","🔁"],
+  const tabs=[["home","Home","🏟️"],["nfl","NFL Live","🏈"],["matchup","Matchup","🥊"],["team","My Team","📋"],["players","Players","🔁"],
               ["league","League","🏆"],["store","Power-Ups","⚡"]];
   let nav=$("nav"); if(nav) nav.remove();
   nav=el("nav","tabbar"); nav.id="nav";
@@ -528,6 +529,7 @@ function renderNav(){
 }
 function renderTab(){
   if(app.tab==="home") renderHome();
+  else if(app.tab==="nfl"){ ensureNFL(); renderNFL(); }
   else if(app.tab==="matchup") renderMatchup();
   else if(app.tab==="team") renderTeam();
   else if(app.tab==="players") renderPlayers();
@@ -609,9 +611,11 @@ function renderHome(){
 
   const banner=el("div","card");
   banner.style.borderColor="var(--gold)";
-  banner.innerHTML=`<div style="font-weight:800">🏆 League Edition</div>
-    <div class="muted" style="font-size:12px;margin-top:4px">No Sleeper required — Couch Coach <b style="color:var(--txt)">is</b> the league. Your power-up-adjusted <b style="color:var(--gold)">CCF Score</b> decides every matchup, the standings, and the playoffs.</div>`;
-  s.appendChild(banner);
+  banner.innerHTML=`<div style="font-weight:800">🏆 League Edition · powered by ESPN</div>
+    <div class="muted" style="font-size:12px;margin-top:4px">No Sleeper — Couch Coach <b style="color:var(--txt)">is</b> the league, running on <b style="color:var(--txt)">free live ESPN data</b>. Your power-up-adjusted <b style="color:var(--gold)">CCF Score</b> decides every matchup, the standings, and the playoffs.</div>`;
+  const nflBtn=el("button","btn sec"); nflBtn.style.width="100%"; nflBtn.style.marginTop="10px"; nflBtn.textContent="🏈 See today's real NFL games";
+  nflBtn.onclick=()=>{ app.tab="nfl"; render(); };
+  banner.appendChild(nflBtn); s.appendChild(banner);
 
   const hero=el("div","card");
   hero.innerHTML=`<h2 class="title">Week 11 · Your Matchup</h2>
@@ -1079,6 +1083,86 @@ function renderCommish(){
   const save=el("button","btn"); save.style.width="100%"; save.style.marginBottom="20px"; save.textContent="Save League Settings";
   save.onclick=()=>toast("League settings saved ✓");
   s.appendChild(save);
+}
+
+// ============================ NFL LIVE (real ESPN data) ============================
+const ESPN="https://site.api.espn.com/apis/site/v2/sports/football/nfl";
+function seasonLabel(s){ const t={1:"Preseason",2:"Regular Season",3:"Postseason",4:"Offseason"}; return (s&&t[s.type]||"NFL")+" "+((s&&s.year)||""); }
+function ensureNFL(){ if(!app.nfl.games && !app.nfl.loading && !app.nfl.error) loadNFLScoreboard(); }
+async function loadNFLScoreboard(){
+  app.nfl.loading=true; app.nfl.error=null;
+  try{
+    const d=await (await fetch(ESPN+"/scoreboard")).json();
+    app.nfl.season=d.season;
+    app.nfl.games=(d.events||[]).map(e=>{
+      const c=e.competitions[0];
+      const home=c.competitors.find(x=>x.homeAway==="home")||c.competitors[0];
+      const away=c.competitors.find(x=>x.homeAway==="away")||c.competitors[1];
+      return { id:e.id, state:e.status.type.state, status:e.status.type.shortDetail,
+        home:{ab:home.team.abbreviation, score:home.score},
+        away:{ab:away.team.abbreviation, score:away.score} };
+    });
+  }catch(err){ app.nfl.error="Couldn't reach ESPN — tap retry."; }
+  app.nfl.loading=false;
+  if(app.tab==="nfl") renderNFL();
+}
+async function loadGamecast(id){
+  app.nfl.selected=id; app.nfl.gamecast=null; renderNFL();
+  try{
+    const d=await (await fetch(ESPN+"/summary?event="+id)).json();
+    app.nfl.gamecast={ plays:(d.scoringPlays||[]).map(p=>({
+      q:(p.period&&p.period.number)||"?", clock:(p.clock&&p.clock.displayValue)||"", text:p.text||"" })) };
+  }catch(err){ app.nfl.gamecast={error:true}; }
+  if(app.tab==="nfl") renderNFL();
+}
+function renderNFL(){
+  const s=$("screen"); if(!s) return; s.innerHTML="";
+  s.appendChild(el("div","card",`<h2 class="title">🏈 NFL Live · real ESPN data</h2>
+    <div class="muted" style="font-size:12px">Live games, scores & play-by-play straight from ESPN's public API — the free feed that powers CCF's scoring and power-up quarters.</div>`));
+  if(app.nfl.loading){ s.appendChild(el("div","card","<div class='muted' style='text-align:center;padding:12px'>🔄 Loading live games…</div>")); return; }
+  if(app.nfl.error){
+    const c=el("div","card"); c.innerHTML=`<div class="muted">⚠ ${app.nfl.error}</div>`;
+    const b=el("button","btn"); b.style.width="100%"; b.style.marginTop="10px"; b.textContent="Retry";
+    b.onclick=()=>{ app.nfl.error=null; ensureNFL(); renderNFL(); }; c.appendChild(b); s.appendChild(c); return;
+  }
+  if(!app.nfl.games) return;
+  if(app.nfl.selected){ renderGamecast(s); return; }
+  s.appendChild(el("div","muted",`<div style='font-size:11px;text-align:center;margin-bottom:8px'>${seasonLabel(app.nfl.season)} · ${app.nfl.games.length} games</div>`));
+  app.nfl.games.forEach(g=>{
+    const live=g.state==="in", post=g.state==="post";
+    const sc=live?"var(--you)":post?"var(--muted)":"var(--gold)";
+    const c=el("div","card"); c.style.cursor="pointer"; c.style.padding="12px"; c.style.marginBottom="10px";
+    c.innerHTML=`<div class="row">
+      <span style="flex:1"><b>${g.away.ab}</b> ${g.away.score!=null?g.away.score:""}</span>
+      <span style="flex:1;text-align:center;font-size:11px;color:${sc}">${g.status}</span>
+      <span style="flex:1;text-align:right">${g.home.score!=null?g.home.score:""} <b>${g.home.ab}</b></span></div>`;
+    c.onclick=()=>loadGamecast(g.id);
+    s.appendChild(c);
+  });
+  const r=el("button","btn sec"); r.style.width="100%"; r.textContent="↻ Refresh"; r.onclick=()=>{ app.nfl.games=null; ensureNFL(); renderNFL(); };
+  s.appendChild(r);
+}
+function renderGamecast(s){
+  const g=app.nfl.games.find(x=>x.id===app.nfl.selected);
+  const back=el("button","btn sec"); back.style.width="100%"; back.style.marginBottom="12px"; back.textContent="← All games";
+  back.onclick=()=>{ app.nfl.selected=null; app.nfl.gamecast=null; renderNFL(); };
+  s.appendChild(back);
+  if(g){
+    s.appendChild(el("div","card",`<div class="scoreboard">
+      <div class="ts me"><div class="nm">${g.away.ab}</div><div class="pts">${g.away.score!=null?g.away.score:0}</div></div>
+      <div class="clock"><div class="q">${g.state==='in'?'LIVE':g.state==='post'?'FINAL':'SOON'}</div><div class="st">${g.status}</div></div>
+      <div class="ts op"><div class="nm">${g.home.ab}</div><div class="pts">${g.home.score!=null?g.home.score:0}</div></div>
+    </div>`));
+  }
+  if(!app.nfl.gamecast){ s.appendChild(el("div","card","<div class='muted' style='text-align:center;padding:12px'>🔄 Loading gamecast…</div>")); return; }
+  if(app.nfl.gamecast.error){ s.appendChild(el("div","card","<div class='muted'>Couldn't load play-by-play.</div>")); return; }
+  const plays=app.nfl.gamecast.plays||[];
+  const c=el("div","card"); c.appendChild(el("h2","title","Scoring Plays · by quarter"));
+  if(!plays.length) c.appendChild(el("div","muted","<div style='font-size:13px'>No scoring plays yet — game hasn't started or is scoreless.</div>"));
+  else plays.forEach(p=> c.appendChild(el("div","",`<div style="padding:8px 0;border-top:1px solid var(--line);font-size:13px">
+    <span class="muted" style="font-size:11px">Q${p.q} ${p.clock}</span> · ${p.text}</div>`)));
+  s.appendChild(c);
+  s.appendChild(el("div","muted","<div style='font-size:11px;text-align:center'>💡 Every play is tagged with its quarter — exactly the per-quarter data CCF uses to resolve power-ups.</div>"));
 }
 
 // ============================ BOOT ============================
