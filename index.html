@@ -174,18 +174,14 @@
 <script>
 // ============================ DATA ============================
 const POWERUPS = {
-  double: { name:"Double Pts", icon:"⚡", rarity:"common", target:"me",
-            desc:"Your player scores 2× for a full quarter." },
-  freeze: { name:"Freeze",      icon:"🧊", rarity:"rare",   target:"op",
-            desc:"Opponent player scores ZERO for a full quarter." },
-  surge:  { name:"Hail Mary",   icon:"🚀", rarity:"rare",   target:"me",
-            desc:"3× points for a quarter — but -5 if they don't score that quarter." },
-  shield: { name:"Bodyguard",   icon:"🛡️", rarity:"common", target:"me",
-            desc:"Immune to Freeze & Pickpocket for the quarter." },
-  steal:  { name:"Pickpocket",  icon:"🧲", rarity:"rare",   target:"op",
-            desc:"Steal half an opponent's points for a quarter." },
-  floor:  { name:"Sure Thing",  icon:"🎯", rarity:"common", target:"me",
-            desc:"Steady guaranteed points for a quarter." },
+  double:   { name:"Double Pts",    icon:"⚡", rarity:"common", target:"me", mode:"quarter",
+              desc:"Your player scores 2× for a full quarter." },
+  freeze:   { name:"Freeze",        icon:"🧊", rarity:"rare",   target:"op", mode:"quarter",
+              desc:"An opponent's player scores ZERO for a full quarter." },
+  sub:      { name:"Emergency Sub", icon:"🔁", rarity:"rare",   target:"me", mode:"sub",
+              desc:"First half only: swap a starter whose game is underway for a bench player who hasn't kicked off — for an early injury or dud." },
+  hotstart: { name:"Hot Start",     icon:"🔥", rarity:"common", target:"me", mode:"pregame",
+              desc:"Set pre-kickoff. If your pick scores your lineup's FASTEST TD (rush/rec/DEF — not passing), that TD is worth 3×." },
 };
 const POS_CFG = { QB:{rate:.55,min:.4,max:5.5}, RB:{rate:.4,min:.3,max:4}, WR:{rate:.38,min:.3,max:6},
                   TE:{rate:.28,min:.2,max:3.5}, K:{rate:.15,min:1,max:3}, DEF:{rate:.3,min:.5,max:5} };
@@ -275,9 +271,11 @@ function statLine(p){
   return `${(p.pts||0).toFixed(1)} pts`;
 }
 function addStat(p,g){
+  let qualTD=false; // rushing/receiving TD (counts for Hot Start); passing TDs do not
   if(p.pos==="QB"){ if(Math.random()<0.28){ p.td++; p.yds+=Math.round(g*4); } else p.yds+=Math.round(g*22); }
-  else if(p.pos==="RB"){ if(Math.random()<0.30){ p.td++; p.yds+=Math.round(g*3); } else p.yds+=Math.round(g*9); }
-  else if(p.pos==="WR"||p.pos==="TE"){ p.rec++; if(Math.random()<0.35){ p.td++; p.yds+=Math.round(g*3); } else p.yds+=Math.round(g*9); }
+  else if(p.pos==="RB"){ if(Math.random()<0.30){ p.td++; p.yds+=Math.round(g*3); qualTD=true; } else p.yds+=Math.round(g*9); }
+  else if(p.pos==="WR"||p.pos==="TE"){ p.rec++; if(Math.random()<0.35){ p.td++; p.yds+=Math.round(g*3); qualTD=true; } else p.yds+=Math.round(g*9); }
+  return qualTD;
 }
 // opponent's season rank vs this position (1=toughest defense, 32=easiest matchup)
 function oppAbbr(p){ return (p.opp||"").replace(/^(vs|@)\s*/,"").trim(); }
@@ -337,7 +335,7 @@ const PITY_THRESHOLD = 8; // silent: guarantee a rare after this many rare-less 
 let app = {
   loggedIn:false, connectedLeague:null, foundLeagues:null,
   tab:"home", leagueTab:"scoreboard",
-  inv:{ double:1, freeze:0, surge:0, shield:0, steal:0, floor:0 },
+  inv:{ double:1, freeze:1, sub:1, hotstart:1 },
   earnedThisWeek:0, pityCount:0, realData:false, chat:CHAT_SEED.slice(),
   leagueId:null, leagueData:null, sleeperUserId:null,
   sim:null, armed:null, matchupIdx:0,
@@ -356,7 +354,7 @@ let app = {
 function freshSim(){
   [...myStarters,...myBench,...oppStarters,...oppBench].forEach(reset);
   return { running:false, speed:1, gameSec:0, cd:{}, feed:[], puLog:[], opNext:75,
-           scheduled:[], curQ:0, others: OTHER_MATCHUPS.map(m=>({...m})) };
+           scheduled:[], curQ:0, hotStart:null, firstTD:null, others: OTHER_MATCHUPS.map(m=>({...m})) };
 }
 function reset(p){ Object.assign(p,{pts:0,yds:0,td:0,rec:0,frozen:0,boosted:0,mult:1,hailmary:false,shielded:0,robbed:0,floored:0,pendingScore:undefined}); }
 
@@ -376,15 +374,8 @@ function currentQuarter(){ if(!app.sim.running && app.sim.gameSec===0) return 0;
 function findPlayer(id){ return [...myStarters,...oppStarters].find(p=>p.id===id); }
 function effectsFor(p,q){
   const list=app.sim.scheduled.filter(x=>x.pid===p.id && x.q===q);
-  const shielded=list.some(x=>x.key==="shield");
-  const e={double:false,surge:false,floor:false,frozen:false,robbed:false,shielded};
-  list.forEach(x=>{
-    if(x.key==="double") e.double=true;
-    else if(x.key==="surge") e.surge=true;
-    else if(x.key==="floor") e.floor=true;
-    else if(x.key==="freeze"){ if(!shielded) e.frozen=true; }
-    else if(x.key==="steal"){ if(!shielded) e.robbed=true; }
-  });
+  const e={double:false,frozen:false};
+  list.forEach(x=>{ if(x.key==="double") e.double=true; else if(x.key==="freeze") e.frozen=true; });
   return e;
 }
 // Opponent AI — schedules a power-up against you on an upcoming quarter.
@@ -482,15 +473,8 @@ function tick(){
   if(curQ > (app.sim.curQ||0)){
     for(let qq=(app.sim.curQ||0)+1; qq<=Math.min(curQ,4); qq++){
       app.sim.scheduled.filter(x=>x.q===qq).forEach(x=>{
-        const p=findPlayer(x.pid), cfg=POWERUPS[x.key], eff=effectsFor(p,qq);
-        const blocked=(x.key==="freeze"&&!eff.frozen)||(x.key==="steal"&&!eff.robbed);
-        feed(`Q${qq}: ${cfg.icon} ${cfg.name} on ${p.name}${blocked?" (blocked 🛡️)":""}`,"ev-pu");
-      });
-    }
-    for(let qq=(app.sim.curQ||0); qq<curQ; qq++){
-      app.sim.scheduled.filter(x=>x.q===qq && x.key==="surge" && !x.scored).forEach(x=>{
-        const p=findPlayer(x.pid); if(p){ p.pts=Math.max(0,Math.round((p.pts-5)*10)/10);
-          feed(`🚀 Hail Mary fizzled on ${p.name} — -5 (no Q${qq} points).`,"ev-pu"); }
+        const p=findPlayer(x.pid), cfg=POWERUPS[x.key];
+        feed(`Q${qq}: ${cfg.icon} ${cfg.name} on ${p?p.name:"?"}`,"ev-pu");
       });
     }
     app.sim.curQ=curQ;
@@ -501,19 +485,26 @@ function tick(){
     const eff=effectsFor(p,q);
     if(eff.frozen) return;
     const c=POS_CFG[p.pos];
-    const chance = eff.floor?1:c.rate*(adv/30);
+    const chance = c.rate*(adv/30);
     if(Math.random()<chance){
-      let g = eff.floor ? c.min+Math.random()*(c.max-c.min)*0.4 : c.min+Math.random()*(c.max-c.min);
-      const mult = eff.surge?3:eff.double?2:1;
+      let g = c.min+Math.random()*(c.max-c.min);
+      const mult = eff.double?2:1;
       g*=mult; g=Math.round(g*10)/10;
-      if(eff.surge){ const sc=app.sim.scheduled.find(x=>x.pid===p.id&&x.q===q&&x.key==="surge"); if(sc)sc.scored=true; }
-      let stolen=0;
-      if(eff.robbed && oppStarters.includes(p)){ stolen=Math.round(g/2*10)/10; g=Math.round((g-stolen)*10)/10;
-        const thief=myStarters.reduce((a,b)=>b.pts>=a.pts?b:a); thief.pts=Math.round((thief.pts+stolen)*10)/10; }
-      addStat(p, g+stolen);
+      const qualTD = addStat(p, g);
       p.pts=Math.round((p.pts+g)*10)/10;
       const m=mult>1?` (${mult}×)`:""; feed(`${p.name} +${g}${m}`,"ev-score");
-      if(stolen>0) feed(`🧲 +${stolen} swiped from ${p.name}.`,"ev-pu");
+      // Hot Start: first rush/rec TD in YOUR lineup this game — if it's your pick, 3× that TD
+      if(qualTD && myStarters.includes(p) && !app.sim.firstTD){
+        app.sim.firstTD={pid:p.id, t:app.sim.gameSec};
+        if(app.sim.hotStart===p.id){
+          const bonus=2*(app.settings.scoring.rushTD||6);
+          p.pts=Math.round((p.pts+bonus)*10)/10;
+          feed(`🔥 HOT START! ${p.name} scored your lineup's fastest TD — 3× (+${bonus})`,"ev-pu");
+        } else if(app.sim.hotStart){
+          const hp=findPlayer(app.sim.hotStart);
+          feed(`🔥 Hot Start missed — ${(hp&&hp.name)||"your pick"} didn't get the fastest TD.`,"ev-pu");
+        }
+      }
     }
   });
 
@@ -532,17 +523,48 @@ function tick(){
 // ============================ POWER-UPS ============================
 function armPU(k){
   if((app.inv[k]||0)<=0) return;
-  if(currentQuarter()>=4){ toast("No upcoming quarters to target"); return; }
   app.armed = app.armed===k ? null : k; renderMatchup();
 }
 function usePU(k,p){
   const cfg=POWERUPS[k];
   const side = myStarters.includes(p)?"me":"op";
   if(side!==cfg.target){ toast(cfg.target==="me"?"Target YOUR player":"Target the OPPONENT"); return; }
+  if(k==="hotstart"){
+    if(app.sim.gameSec>0 || app.sim.running){ toast("Set Hot Start before kickoff"); return; }
+    app.inv.hotstart--; app.sim.hotStart=p.id; app.armed=null;
+    logPU("me","hotstart",p.name,false,1);
+    feed(`🔥 Hot Start set on ${p.name} — 3× on your lineup's fastest TD.`,"ev-pu");
+    toast("Hot Start: "+p.name); renderMatchup(); return;
+  }
+  if(k==="sub"){
+    const cq=currentQuarter();
+    if(!app.sim.running || cq>2){ toast("Emergency Sub: first half of a live game only"); return; }
+    openSubModal(p); return;
+  }
   const cq=currentQuarter();
   const allowed=[]; for(let q=1;q<=4;q++) if(q>cq) allowed.push(q);
   if(!allowed.length){ toast("No upcoming quarters left"); app.armed=null; renderMatchup(); return; }
   showQuarterPicker(k,p,allowed);
+}
+function openSubModal(starter){
+  const ov=$("overlay");
+  const list=myBench.map((p,i)=>`<button class="btn sec subOpt" data-i="${i}" style="width:100%;text-align:left;margin-top:6px">${p.pos} · ${p.name} <span class="muted" style="font-size:11px">· not kicked off</span></button>`).join("");
+  ov.innerHTML=`<div class="modal"><div class="box" style="max-width:360px">
+    <div style="font-weight:800">🔁 Emergency Sub</div>
+    <div class="muted" style="font-size:12px;margin:6px 0 8px">Sub in for <b style="color:var(--txt)">${starter.name}</b> (${starter.pos}, game underway). Pick a bench player who hasn't kicked off — they start fresh:</div>
+    <div style="max-height:46vh;overflow:auto">${list||'<div class="muted">No bench players available.</div>'}</div>
+    <button class="btn sec" id="subCancel" style="width:100%;margin-top:12px">Cancel</button></div></div>`;
+  ov.querySelectorAll(".subOpt").forEach(b=> b.onclick=()=>{
+    const bp=myBench[+b.dataset.i];
+    const si=myStarters.indexOf(starter), bi=myBench.indexOf(bp);
+    reset(bp);
+    myStarters[si]=bp; myBench[bi]=starter;
+    app.inv.sub--; app.armed=null; $("overlay").innerHTML="";
+    feed(`🔁 Emergency Sub — ${bp.name} in for ${starter.name} (fresh game)!`,"ev-pu");
+    logPU("me","sub",bp.name,false,currentQuarter());
+    toast("Subbed in "+bp.name); renderMatchup();
+  });
+  ov.querySelector("#subCancel").onclick=()=>{ $("overlay").innerHTML=""; app.armed=null; renderMatchup(); };
 }
 function showQuarterPicker(k,p,allowed){
   const cfg=POWERUPS[k]; const ov=$("overlay");
@@ -856,21 +878,26 @@ function renderMatchup(){
   if(done && app.sim.puLog.length) s.appendChild(recapCard());
 
   const trayCard=el("div","card");
-  trayCard.appendChild(el("h2","title","Power-Ups — arm one, tap a player, pick a quarter"));
-  const noFuture=currentQuarter()>=4;
+  trayCard.appendChild(el("h2","title","Power-Ups — arm one, then tap a player"));
   const tray=el("div","puwrap");
   Object.entries(POWERUPS).forEach(([k,cfg])=>{
     const have=app.inv[k]||0;
-    const dis = have<=0||noFuture;
+    const dis = have<=0;
     const chip=el("div","puchip"+(app.armed===k?" armed":"")+(dis?" disabled":""));
     chip.innerHTML=`<div class="ic">${cfg.icon}</div><div class="nm">${cfg.name}</div><div class="ct">x${have}</div>`;
     chip.onclick=()=>{ if(!dis) armPU(k); };
     tray.appendChild(chip);
   });
   trayCard.appendChild(tray);
-  if(noFuture) trayCard.appendChild(el("div","muted","<div style='font-size:12px;margin-top:8px'>No upcoming quarters left to target this game.</div>"));
+  const armedHint = app.armed==="hotstart" ? "Tap one of YOUR starters — set before kickoff."
+    : app.armed==="sub" ? "Tap the STARTER to replace (first half only)."
+    : app.armed==="freeze" ? "Tap an OPPONENT, then pick a quarter."
+    : app.armed==="double" ? "Tap one of YOUR starters, then pick a quarter." : "";
+  if(armedHint) trayCard.appendChild(el("div","muted",`<div style='font-size:12px;margin-top:8px;color:var(--gold)'>⚠ ${armedHint}</div>`));
   else if(Object.values(app.inv).every(v=>v<=0))
     trayCard.appendChild(el("div","muted","<div style='font-size:12px;margin-top:8px'>Out of power-ups — earn more in the ⚡ Power-Ups tab.</div>"));
+  if(app.sim.hotStart){ const hp=findPlayer(app.sim.hotStart);
+    trayCard.appendChild(el("div","muted",`<div style='font-size:12px;margin-top:8px'>🔥 Hot Start: <b style="color:var(--txt)">${(hp&&hp.name)||"—"}</b>${app.sim.firstTD?(app.sim.firstTD.pid===app.sim.hotStart?" — hit! 3× applied":" — missed (someone scored first)"):" — awaiting first TD"}</div>`)); }
   s.appendChild(trayCard);
 
   const fc=el("div","card"); fc.appendChild(el("h2","title","Live Feed"));
@@ -923,10 +950,12 @@ function playerCell(p,side,armedCfg,cq,leftSide){
   const activeNow = cq>=1 && cq<=4 && sched.some(x=>x.q===cq);
   if(tappable) cell.classList.add("tappable");
   if(activeNow) cell.classList.add("boosted");
-  const tags=sched.map(x=>POWERUPS[x.key].icon+"Q"+x.q).join(" ");
+  const hot = app.sim.hotStart===p.id ? "🔥" : "";
+  const tags=[hot, ...sched.map(x=>POWERUPS[x.key].icon+"Q"+x.q)].filter(Boolean).join(" ");
   const sub = tags || statLine(p);
   const av=avatarHTML(p);
-  const body=`<div class="mc-body"><div class="mc-nm">${leftSide?p.name+" "+statusTag(p):statusTag(p)+p.name}</div>
+  const nm = leftSide ? (hot?hot+" ":"")+p.name+" "+statusTag(p) : statusTag(p)+p.name+(hot?" "+hot:"");
+  const body=`<div class="mc-body"><div class="mc-nm">${nm}</div>
     <div class="mc-stat">${sub}</div><div class="mc-pt">${p.pts.toFixed(1)}</div></div>`;
   cell.innerHTML = leftSide ? body+av : av+body;
   if(tappable) cell.onclick=()=>usePU(app.armed,p);
