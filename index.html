@@ -340,7 +340,7 @@ let app = {
   earnedThisWeek:0, pityCount:0, realData:false, chat:CHAT_SEED.slice(),
   leagueId:null, leagueData:null, sleeperUserId:null,
   sim:null, armed:null, matchupIdx:0,
-  leagueMatchup:null, schedTeam:"Your Team", pFilter:"ALL", pView:"players", drafted:[],
+  leagueMatchup:null, schedTeam:"Your Team", pFilter:"ALL", pSort:"rank", pView:"players", drafted:[],
   pool:null, poolLoading:false, poolError:null, pDetail:null,
   nfl:{ games:null, loading:false, error:null, selected:null, gamecast:null, view:"plays", pollId:null, pollFor:null },
   settings:{
@@ -984,6 +984,14 @@ async function loadPool(){
           injury:(a.injuries&&a.injuries[0]&&a.injuries[0].status)||"", proj:0 });
       }));
     });
+    // ESPN draft-value ranking from lightweight players_wl (percentOwned → rank order)
+    try{
+      const wl=await (await fetch("https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/2025/players?view=players_wl")).json();
+      const arr=Array.isArray(wl)?wl:(wl.players||[]);
+      const owned={}; arr.forEach(x=>{ const pl=x.player||x; owned["e"+pl.id]=(pl.ownership&&pl.ownership.percentOwned)||0; });
+      pool.forEach(p=>{ p.owned=owned[p.id]||0; });
+      pool.filter(p=>p.owned>0).sort((a,b)=>b.owned-a.owned).forEach((p,i)=> p.rank=i+1);
+    }catch(e){}
     if(pool.length) app.pool=pool; else app.poolError="No players returned — tap retry.";
   }catch(err){ app.poolError="Couldn't load ESPN players — tap retry."; }
   app.poolLoading=false;
@@ -993,22 +1001,40 @@ function availablePlayers(){ return app.pool||[]; }
 async function openPlayerDetail(p){
   if(!p.espnId){ toast("No profile for "+p.name); return; }
   app.pDetail={p, loading:true}; showDetailModal();
-  let data=null, bye="";
-  try{ data=await (await fetch("https://site.web.api.espn.com/apis/common/v3/sports/football/nfl/athletes/"+p.espnId+"/overview")).json(); }catch(e){}
+  const base="https://site.web.api.espn.com/apis/common/v3/sports/football/nfl/athletes/"+p.espnId;
+  let data=null, gl=null, sched=[], bye="";
+  try{ data=await (await fetch(base+"/overview")).json(); }catch(e){}
+  try{ gl=await (await fetch(base+"/gamelog")).json(); }catch(e){}
   try{ const sd=await (await fetch(ESPN+"/teams/"+p.teamId+"/schedule")).json();
-    const weeks=new Set((sd.events||[]).map(e=>e.week&&e.week.number).filter(Boolean));
-    for(let w=1;w<=18;w++){ if(!weeks.has(w)){ bye=w; break; } } }catch(e){}
-  app.pDetail = data ? {p, data, bye, loading:false} : {p, error:true, loading:false};
+    const weeks=new Set();
+    (sd.events||[]).forEach(e=>{ const w=e.week&&e.week.number; if(w)weeks.add(w);
+      const c=(e.competitions&&e.competitions[0])||{}; const comps=c.competitors||[];
+      const opp=comps.find(x=>String((x.team||{}).id)!==String(p.teamId));
+      sched.push({ wk:w, opp:((opp&&opp.team&&opp.team.abbreviation))||"", done:!!(c.status&&c.status.type&&c.status.type.completed) });
+    });
+    for(let w=1;w<=18;w++){ if(!weeks.has(w)){ bye=w; break; } }
+  }catch(e){}
+  app.pDetail = data ? {p, data, gl, sched, bye, loading:false} : {p, error:true, loading:false};
   showDetailModal();
+}
+function weeklyFromGamelog(gl){
+  if(!gl) return null; const ev=gl.events||{}, labels=gl.labels||[];
+  let cat=null;
+  (gl.seasonTypes||[]).forEach(st=>{ if(!cat && /Regular/.test(st.displayName||"")){ (st.categories||[]).forEach(c=>{ if(!cat && (c.events||[]).length) cat=c; }); } });
+  if(!cat) (gl.seasonTypes||[]).forEach(st=>{ (st.categories||[]).forEach(c=>{ if(!cat && (c.events||[]).length) cat=c; }); });
+  if(!cat) return null;
+  return { labels, rows:(cat.events||[]).map(e=>{ const m=ev[e.eventId]||{}; return { wk:m.week, opp:(m.atVs||"")+((m.opponent&&m.opponent.abbreviation)||""), stats:e.stats||[] }; }) };
 }
 function showDetailModal(){
   const ov=$("overlay"); const D=app.pDetail; if(!D){ ov.innerHTML=""; return; }
   const p=D.p;
   const pic = p.headshot?`<img src="${p.headshot}" style="width:56px;height:56px;border-radius:50%;object-fit:cover;background:#1b2444">`
     : (p.logo?`<img src="${p.logo}" style="width:48px;height:48px;object-fit:contain">`:avatarHTML(p));
+  const rk = p.rank?` · <span style="color:var(--gold)">ESPN #${p.rank}</span>`:"";
   const head=`<div style="display:flex;align-items:center;gap:12px">${pic}
     <div><div style="font-weight:800;font-size:18px">${p.name}</div>
-      <div class="muted" style="font-size:12px">${p.pos} · ${p.teamAb||""}${p.jersey?" · #"+p.jersey:""}</div></div></div>`;
+      <div class="muted" style="font-size:12px">${p.pos} · ${p.teamAb||""}${p.jersey?" · #"+p.jersey:""}${rk}</div></div></div>`;
+  const sec=(t)=>`<div style="font-size:12px;font-weight:700;color:var(--gold);margin:12px 0 4px">${t}</div>`;
   let body="";
   if(D.loading) body=`<div class="muted" style="text-align:center;padding:16px">🔄 Loading profile…</div>`;
   else if(D.error) body=`<div class="muted" style="margin-top:10px">Couldn't load profile.</div>`;
@@ -1016,19 +1042,23 @@ function showDetailModal(){
     const d=D.data||{}, f=d.fantasy||{}, st=d.statistics||{}, ro=d.rotowire||{};
     const bio=[p.age?("Age "+p.age):"", p.exp!=null?(p.exp+" yr exp"):"", p.college||"", (p.injury&&p.injury!=="ACTIVE")?("⚠ "+p.injury):""].filter(Boolean).join(" · ");
     const sp=(st.splits&&st.splits[0]&&st.splits[0].stats)||null, labels=st.labels||[];
-    let statsHtml="";
-    if(sp){ statsHtml=`<div style="font-size:12px;font-weight:700;color:var(--gold);margin:12px 0 4px">Last Season</div>
-      <div style="overflow-x:auto"><table class="std"><tr>${labels.slice(0,8).map(l=>`<th>${l}</th>`).join("")}</tr>
-      <tr>${sp.slice(0,8).map(v=>`<td>${v}</td>`).join("")}</tr></table></div>`; }
+    let lastHtml="";
+    if(sp) lastHtml=sec("Last Season")+`<div style="overflow-x:auto"><table class="std"><tr>${labels.slice(0,8).map(l=>`<th>${l}</th>`).join("")}</tr><tr>${sp.slice(0,8).map(v=>`<td>${v}</td>`).join("")}</tr></table></div>`;
+    let wkHtml=""; const wk=weeklyFromGamelog(D.gl);
+    if(wk && wk.rows.length){ const cols=wk.labels.slice(0,6);
+      wkHtml=sec("Weekly Production")+`<div style="overflow-x:auto"><table class="std"><tr><th>Wk</th><th>Opp</th>${cols.map(l=>`<th>${l}</th>`).join("")}</tr>`+
+        wk.rows.map(r=>`<tr><td>${r.wk||""}</td><td>${r.opp||""}</td>${cols.map((_,i)=>`<td>${r.stats[i]||""}</td>`).join("")}</tr>`).join("")+`</table></div>`; }
+    let schHtml=""; const up=(D.sched||[]).filter(g=>!g.done && g.wk).slice(0,6);
+    if(up.length) schHtml=sec("Upcoming Schedule")+up.map(g=>`<div class="schrow"><span class="wk">Wk ${g.wk}</span><span style="flex:1">${g.opp?"vs "+g.opp:"—"}</span></div>`).join("");
     body=`${bio?`<div style="font-size:12px;margin-top:10px">${bio}</div>`:""}
       ${D.bye?`<div class="muted" style="font-size:12px;margin-top:4px">Bye: <b style="color:var(--txt)">Week ${D.bye}</b></div>`:""}
-      ${(f.draftRank||f.positionRank)?`<div style="font-size:12px;margin-top:6px">Draft rank <b style="color:var(--gold)">#${f.draftRank||"—"}</b> · ${p.pos}${f.positionRank||"—"} · ${f.percentOwned||0}% rostered</div>`:""}
-      ${statsHtml}
-      ${f.projection?`<div style="font-size:12px;font-weight:700;color:var(--gold);margin:12px 0 4px">Outlook</div><div style="font-size:12px;line-height:1.5">${f.projection}</div>`:""}
-      ${ro.headline?`<div style="font-size:12px;font-weight:700;color:var(--gold);margin:12px 0 4px">Latest</div><div style="font-size:12px;line-height:1.5"><b>${ro.headline}</b><br><span class="muted">${(ro.story||"").slice(0,220)}…</span></div>`:""}`;
+      ${(f.draftRank||f.positionRank)?`<div style="font-size:12px;margin-top:6px">ESPN draft #${f.draftRank||"—"} · ${p.pos}${f.positionRank||"—"} · ${f.percentOwned||0}% rostered</div>`:""}
+      ${lastHtml}${wkHtml}
+      ${f.projection?sec("Outlook")+`<div style="font-size:12px;line-height:1.5">${f.projection}</div>`:""}
+      ${schHtml}
+      ${ro.headline?sec("Latest News")+`<div style="font-size:12px;line-height:1.5"><b>${ro.headline}</b><br><span class="muted">${(ro.story||"").slice(0,220)}…</span></div>`:""}`;
   }
-  ov.innerHTML=`<div class="modal"><div class="box" style="max-width:410px;text-align:left;max-height:86vh;overflow:auto">
-    ${head}${body}<button class="btn sec" id="pdClose" style="width:100%;margin-top:16px">Close</button></div></div>`;
+  ov.innerHTML=`<div class="modal"><div class="box" style="max-width:430px;text-align:left;max-height:88vh;overflow:auto">${head}${body}<button class="btn sec" id="pdClose" style="width:100%;margin-top:16px">Close</button></div></div>`;
   ov.querySelector("#pdClose").onclick=()=>{ app.pDetail=null; ov.innerHTML=""; };
 }
 function posChips(s){
@@ -1039,11 +1069,27 @@ function posChips(s){
   });
   s.appendChild(chips);
 }
+function sortControl(s){
+  const wrap=el("div","chips"); wrap.style.marginBottom="10px";
+  wrap.appendChild(el("span","muted",`<span style="font-size:10px;align-self:center;margin-right:4px">Sort:</span>`));
+  [["rank","ESPN Rank"],["pos","Position"],["name","A–Z"]].forEach(([id,lab])=>{
+    const c=el("div","chip"+(app.pSort===id?" on":"")); c.textContent=lab;
+    c.onclick=()=>{ app.pSort=id; app.tab==="draft"?renderDraft():renderPlayers(); }; wrap.appendChild(c);
+  });
+  s.appendChild(wrap);
+}
+function sortPool(list){
+  const s=app.pSort||"rank";
+  if(s==="pos") return list.slice().sort((a,b)=>(POS_ORDER[a.pos]-POS_ORDER[b.pos])||a.name.localeCompare(b.name));
+  if(s==="name") return list.slice().sort((a,b)=>a.name.localeCompare(b.name));
+  return list.slice().sort((a,b)=>(a.rank||9999)-(b.rank||9999)||a.name.localeCompare(b.name));
+}
 function faRow(p, btnLabel, btnCls, onClick){
   const row=el("div","plr"); row.style.gridTemplateColumns="34px 26px 1fr auto"; row.style.cursor="pointer";
   const inj = (p.injury && p.injury!=="ACTIVE") ? '<span style="color:var(--opp);font-size:9px;font-weight:800">⚠ </span>' : "";
+  const rk = p.rank ? `<span style="color:var(--gold);font-size:10px;font-weight:800">#${p.rank}</span> ` : "";
   row.innerHTML=`${avatarHTML(p)}<div class="pos">${p.pos}</div>
-    <div><div class="nm">${inj}${p.name}</div><div class="meta2">${p.teamAb||p.opp||""}${p.jersey?" · #"+p.jersey:""}</div></div><div></div>`;
+    <div><div class="nm">${rk}${inj}${p.name}</div><div class="meta2">${p.teamAb||p.opp||""}${p.jersey?" · #"+p.jersey:""}</div></div><div></div>`;
   row.onclick=()=>openPlayerDetail(p);
   const b=el("button","btn sm"+(btnCls||"")); b.textContent=btnLabel; b.style.marginLeft="auto";
   b.onclick=(e)=>{ e.stopPropagation(); onClick(b); }; row.lastElementChild.appendChild(b);
@@ -1060,13 +1106,12 @@ function renderPlayers(){
   s.appendChild(el("div","card",`<h2 class='title'>Players · real NFL data</h2>
     <div class='muted' style='font-size:12px'>Real players from ESPN — tap any player for research (stats, projection, bye, news). Add to your bench; roster full → pick a drop.</div>`));
   if(!poolGuard(s,renderPlayers)) return;
-  posChips(s);
+  posChips(s); sortControl(s);
   const rostIds=new Set([...myStarters,...myBench].map(p=>p.id));
   const cap=app.settings.league.rosterSize||16;
   const filled=[...myStarters,...myBench].length;
   s.appendChild(el("div","muted",`<div style='font-size:11px;text-align:center;margin-bottom:8px'>Roster <b style="color:${filled>=cap?'var(--opp)':'var(--gold)'}">${filled}/${cap}</b></div>`));
-  const pool=availablePlayers().filter(p=>!rostIds.has(p.id)).filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter)
-    .sort((a,b)=> (POS_ORDER[a.pos]-POS_ORDER[b.pos]) || a.name.localeCompare(b.name));
+  const pool=sortPool(availablePlayers().filter(p=>!rostIds.has(p.id)).filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter));
   const c=el("div","card");
   if(!pool.length) c.appendChild(el("div","muted","<div style='font-size:13px'>No players at this position.</div>"));
   pool.slice(0,60).forEach(p=> c.appendChild(faRow(p,"+ Add","",()=>addPlayer(p))));
@@ -1147,10 +1192,9 @@ function renderDraft(){
   board.appendChild(grid); s.appendChild(board);
 
   if(!complete){
-    posChips(s);
+    posChips(s); sortControl(s);
     const dset=new Set(app.drafted.map(d=>d.p.id));
-    const avail=availablePlayers().filter(p=>!dset.has(p.id)).filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter)
-      .sort((a,b)=> (POS_ORDER[a.pos]-POS_ORDER[b.pos]) || a.name.localeCompare(b.name));
+    const avail=sortPool(availablePlayers().filter(p=>!dset.has(p.id)).filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter));
     const c=el("div","card"); c.appendChild(el("h2","title","Available · tap for research"));
     avail.slice(0,60).forEach(p=> c.appendChild(faRow(p, isMe?"Draft":"Sim first", "", ()=>{ if(!isMe){ toast("Not your pick — Sim to your turn"); return; } app.drafted.push({p,by:onClock,pick:pickNo}); toast("Drafted "+p.name); renderDraft(); })));
     s.appendChild(c);
