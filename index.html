@@ -386,7 +386,7 @@ let app = {
   sim:null, armed:null, matchupIdx:0,
   leagueMatchup:null, schedTeam:"Your Team", pFilter:"ALL", pSort:"rank", pView:"players", drafted:[], pStatTab:null,
   myTeam:"Your Team", oppTeam:"Burrow Bandits", realLeague:false,
-  draft:null, draftChannel:null, isCommish:false, members:[], queue:[], draftView:"board", commishMode:false, lineup:null, trades:[], tradeBuilder:null,
+  draft:null, draftChannel:null, isCommish:false, members:[], queue:[], draftView:"board", commishMode:false, lineup:null, lineupEdit:false, trades:[], tradeBuilder:null,
   pool:null, poolLoading:false, poolError:null, pDetail:null,
   nfl:{ games:null, loading:false, error:null, selected:null, gamecast:null, view:"plays", pollId:null, pollFor:null },
   settings:{
@@ -1141,16 +1141,23 @@ function renderTeam(){
     lu = lu.map(id => (id && validIds.has(id)) ? id : null);
     if(JSON.stringify(lu)!==JSON.stringify(app.lineup)){ app.lineup=lu; saveLineup(); } else { app.lineup=lu; }
     const pickById=id=>myPicks.find(p=>p.player_id===id);
+    const edit=app.lineupEdit;
+    const metaFor=(p)=>{ const info=poolInfo(p.player_id); const rk=(info&&info.rank)?` · <span style="color:var(--gold);font-weight:800">#${info.rank}</span>`:""; return `${p.team||""}${rk}`; };
 
-    s.appendChild(el("div","card",`<h2 class='title'>${app.myTeam} · Lineup</h2>
-      <div class='muted' style='font-size:12px'>Tap a slot to set your starter. Saves automatically to the league.</div>`));
+    const hd=el("div","card");
+    hd.innerHTML=`<h2 class='title'>${app.myTeam} · Lineup</h2>
+      <div class='muted' style='font-size:12px'>${edit?"Editing — tap a starter slot or a bench player to move them.":"Tap any player for options — info, trade, or drop."}</div>`;
+    const tg=el("button","btn"+(edit?"":" sec")); tg.style.width="100%"; tg.style.marginTop="10px"; tg.textContent=edit?"✓ Done Editing":"✏️ Set Lineup";
+    tg.onclick=()=>{ app.lineupEdit=!app.lineupEdit; renderTeam(); };
+    hd.appendChild(tg); s.appendChild(hd);
+
     const sc=el("div","card"); sc.appendChild(el("h2","title","Starters"));
     SLOTS.forEach((slot,i)=>{
       const p=app.lineup[i]?pickById(app.lineup[i]):null;
-      const row=el("div","plr tappable"); row.style.gridTemplateColumns="42px 34px 1fr auto"; row.style.cursor="pointer";
-      if(p) row.innerHTML=`<div class="pos">${slot.lbl}</div>${avatarHTML({pos:p.pos,name:p.player_name,headshot:p.headshot})}<div><div class="nm">${p.player_name}</div><div class="meta2">${p.pos} · ${p.team||""}</div></div><div class="muted" style="font-size:11px">change</div>`;
-      else row.innerHTML=`<div class="pos">${slot.lbl}</div><div class="avatar" style="background:var(--ink)"></div><div><div class="nm muted">— empty</div><div class="meta2">tap to set a ${slot.pos.join("/")}</div></div><div></div>`;
-      row.onclick=()=>openLineupChooser(i);
+      const row=el("div","plr"+(edit?" tappable":"")); row.style.gridTemplateColumns="42px 34px 1fr auto"; row.style.cursor="pointer";
+      if(p) row.innerHTML=`<div class="pos">${slot.lbl}</div>${avatarHTML({pos:p.pos,name:p.player_name,headshot:p.headshot})}<div><div class="nm">${p.player_name}</div><div class="meta2">${metaFor(p)}</div></div><div class="muted" style="font-size:11px">${edit?"change":"ⓘ"}</div>`;
+      else row.innerHTML=`<div class="pos">${slot.lbl}</div><div class="avatar" style="background:var(--ink)"></div><div><div class="nm muted">— empty</div><div class="meta2">needs a ${slot.pos.join("/")}</div></div><div class="muted" style="font-size:11px">set</div>`;
+      row.onclick=()=>{ if(edit || !p) openLineupChooser(i); else playerActionModal(p); };
       sc.appendChild(row);
     });
     s.appendChild(sc);
@@ -1158,11 +1165,13 @@ function renderTeam(){
     const bench=myPicks.filter(p=>!startedIds.has(p.player_id));
     const bc=el("div","card"); bc.appendChild(el("h2","title","Bench ("+bench.length+")"));
     if(!bench.length) bc.appendChild(el("div","muted","<div style='font-size:13px'>No bench players.</div>"));
-    bench.forEach(p=>{ const row=el("div","plr"); row.style.gridTemplateColumns="34px 26px 1fr auto"; row.style.cursor="pointer";
-      row.innerHTML=`${avatarHTML({pos:p.pos,name:p.player_name,headshot:p.headshot})}<div class="pos">${p.pos}</div><div><div class="nm">${p.player_name}</div><div class="meta2">${p.team||""}</div></div><div></div>`;
-      row.onclick=()=>playerActionModal(p);
+    bench.forEach(p=>{ const row=el("div","plr tappable"); row.style.gridTemplateColumns="34px 26px 1fr auto"; row.style.cursor="pointer";
+      row.innerHTML=`${avatarHTML({pos:p.pos,name:p.player_name,headshot:p.headshot})}<div class="pos">${p.pos}</div><div><div class="nm">${p.player_name}</div><div class="meta2">${metaFor(p)}</div></div><div class="muted" style="font-size:11px">${edit?"move":"ⓘ"}</div>`;
+      row.onclick=()=>{ if(edit) openBenchMove(p); else playerActionModal(p); };
       bc.appendChild(row); });
-    s.appendChild(bc); return;
+    s.appendChild(bc);
+    s.appendChild(el("div","muted","<div style='font-size:11px;text-align:center'>Weekly opponent + defense-vs-position matchup ranks appear once the season starts.</div>"));
+    return;
   }
   s.appendChild(el("div","card",`<h2 class='title'>Set Your Lineup — Week 11</h2>
     <div class='muted' style='font-size:12px'>Tap a bench player, then a starter of the same position to swap. The colored tag shows the opponent's season rank vs that position — <b style="color:var(--you)">green = great matchup</b> (weak defense), <b style="color:var(--opp)">red = tough</b>.</div>`));
@@ -1541,34 +1550,51 @@ function playerNameOf(pid){ const p=(app.draft?app.draft.picks:[]).find(x=>x.pla
 function openTradeBuilder(pick){
   const others=app.members.filter(m=>m.user_id!==app.user.id);
   if(!others.length){ toast("No other managers to trade with yet"); return; }
-  app.tradeBuilder={ to:others[0].user_id, offer:new Set(pick?[pick.player_id]:[]), request:new Set() };
+  app.tradeBuilder={ to:others[0].user_id, offer:new Set(pick?[pick.player_id]:[]), request:new Set(), step:1 };
   renderTradeBuilder();
+}
+function tbRow(p, selected, onToggle){
+  const row=el("div","plr"); row.style.gridTemplateColumns="30px 26px 1fr auto"; row.style.cursor="pointer";
+  if(selected) row.style.borderColor="var(--gold)";
+  row.innerHTML=`<div style="text-align:center;font-weight:800;color:${selected?'var(--gold)':'var(--muted)'}">${selected?'✓':'○'}</div><div class="pos">${p.pos}</div><div><div class="nm">${p.player_name}</div><div class="meta2">${p.team||""}</div></div><div></div>`;
+  row.onclick=onToggle;
+  const info=el("button","btn sm sec"); info.textContent="ⓘ"; info.style.marginLeft="auto";
+  info.onclick=(e)=>{ e.stopPropagation(); openPlayerDetail({espnId:(p.player_id||"").replace(/^e/,""),name:p.player_name,pos:p.pos,teamAb:p.team,headshot:p.headshot}); };
+  row.lastElementChild.appendChild(info);
+  return row;
 }
 function renderTradeBuilder(){
   const tb=app.tradeBuilder; const ov=$("overlay"); if(!tb){ ov.innerHTML=""; return; }
-  const myPicks=myDraftPicks();
-  const theirPicks=(app.draft?app.draft.picks:[]).filter(p=>p.user_id===tb.to);
   const others=app.members.filter(m=>m.user_id!==app.user.id);
-  const rowHtml=(p,side,sel)=>`<button class="btn sec tbP" data-side="${side}" data-id="${p.player_id}" style="width:100%;text-align:left;margin-top:6px;${sel?'border-color:var(--gold);color:var(--gold)':''}">${sel?"✓ ":""}${p.pos} · ${p.player_name} <span class="muted" style="font-size:11px">${p.team||""}</span></button>`;
-  ov.innerHTML=`<div class="modal"><div class="box" style="max-width:400px;text-align:left;max-height:88vh;overflow:auto">
-    <div style="font-weight:800;font-size:16px">Propose a Trade</div>
-    <div class="muted" style="font-size:12px;margin:8px 0 4px">Trade with</div>
-    <select class="input" id="tbTarget">${others.map(m=>`<option value="${m.user_id}" ${m.user_id===tb.to?"selected":""}>${m.team_name||"Team"}</option>`).join("")}</select>
-    <div style="font-size:12px;font-weight:700;color:var(--gold);margin:14px 0 2px">You give — ${teamNameOf(app.user.id)}</div>
-    ${myPicks.map(p=>rowHtml(p,"offer",tb.offer.has(p.player_id))).join("")||'<div class="muted" style="font-size:12px">No players</div>'}
-    <div style="font-size:12px;font-weight:700;color:var(--gold);margin:14px 0 2px">You get — ${teamNameOf(tb.to)}</div>
-    ${theirPicks.map(p=>rowHtml(p,"request",tb.request.has(p.player_id))).join("")||'<div class="muted" style="font-size:12px">No players</div>'}
-    <button class="btn" id="tbPropose" style="width:100%;margin-top:16px">Send Trade Offer</button>
-    <button class="btn sec" id="tbCancel" style="width:100%;margin-top:8px">Cancel</button></div></div>`;
-  ov.querySelector("#tbTarget").onchange=(e)=>{ tb.to=e.target.value; tb.request=new Set(); renderTradeBuilder(); };
-  ov.querySelectorAll(".tbP").forEach(b=> b.onclick=()=>{ const set=b.dataset.side==="offer"?tb.offer:tb.request; const id=b.dataset.id; set.has(id)?set.delete(id):set.add(id); renderTradeBuilder(); });
-  ov.querySelector("#tbCancel").onclick=()=>{ app.tradeBuilder=null; ov.innerHTML=""; };
-  ov.querySelector("#tbPropose").onclick=async ()=>{
-    if(!tb.offer.size||!tb.request.size){ toast("Pick at least one player on each side"); return; }
-    try{ const {error}=await sb.rpc("propose_trade",{ lid:app.sbLeagueId, target:tb.to, offer:[...tb.offer], request:[...tb.request] }); if(error) throw error;
-      app.tradeBuilder=null; ov.innerHTML=""; await loadTrades(); toast("Trade offer sent"); app.tab="league"; app.leagueTab="trades"; render(); }
-    catch(e){ toast(e.message||"Trade failed"); }
-  };
+  ov.innerHTML=`<div class="modal"><div class="box" id="tbBox" style="max-width:420px;text-align:left;max-height:88vh;overflow:auto"></div></div>`;
+  const box=ov.querySelector("#tbBox");
+  box.appendChild(el("div","",`<div style="font-weight:800;font-size:16px">Propose a Trade <span class="muted" style="font-size:12px;font-weight:600">· Step ${tb.step} of 2</span></div>`));
+
+  if(tb.step===1){
+    box.appendChild(el("div","muted","<div style='font-size:12px;margin:8px 0 4px'>Trade with</div>"));
+    const sel=el("select","input"); sel.innerHTML=others.map(m=>`<option value="${m.user_id}" ${m.user_id===tb.to?"selected":""}>${m.team_name||"Team"}</option>`).join("");
+    sel.onchange=()=>{ tb.to=sel.value; tb.request=new Set(); renderTradeBuilder(); }; box.appendChild(sel);
+    box.appendChild(el("div","",`<div style="font-size:12px;font-weight:700;color:var(--gold);margin:14px 0 4px">Your players to give — tap ⓘ for info, tap row to select</div>`));
+    const myPicks=myDraftPicks();
+    if(!myPicks.length) box.appendChild(el("div","muted","<div style='font-size:12px'>No players.</div>"));
+    myPicks.forEach(p=> box.appendChild(tbRow(p, tb.offer.has(p.player_id), ()=>{ tb.offer.has(p.player_id)?tb.offer.delete(p.player_id):tb.offer.add(p.player_id); renderTradeBuilder(); })));
+    const next=el("button","btn"); next.style.width="100%"; next.style.marginTop="14px"; next.textContent="Next: choose their players →";
+    next.onclick=()=>{ if(!tb.offer.size){ toast("Select at least one of your players"); return; } tb.step=2; renderTradeBuilder(); };
+    box.appendChild(next);
+  } else {
+    const theirPicks=(app.draft?app.draft.picks:[]).filter(p=>p.user_id===tb.to);
+    box.appendChild(el("div","",`<div style="font-size:12px;font-weight:700;color:var(--gold);margin:12px 0 4px">Request from ${teamNameOf(tb.to)} — tap ⓘ for info, tap row to select</div>`));
+    if(!theirPicks.length) box.appendChild(el("div","muted","<div style='font-size:12px'>No players.</div>"));
+    theirPicks.forEach(p=> box.appendChild(tbRow(p, tb.request.has(p.player_id), ()=>{ tb.request.has(p.player_id)?tb.request.delete(p.player_id):tb.request.add(p.player_id); renderTradeBuilder(); })));
+    const send=el("button","btn"); send.style.width="100%"; send.style.marginTop="14px"; send.textContent="Send Trade Offer";
+    send.onclick=async ()=>{ if(!tb.request.size){ toast("Select at least one of their players"); return; }
+      try{ const {error}=await sb.rpc("propose_trade",{ lid:app.sbLeagueId, target:tb.to, offer:[...tb.offer], request:[...tb.request] }); if(error) throw error;
+        app.tradeBuilder=null; ov.innerHTML=""; await loadTrades(); toast("Trade offer sent"); app.tab="league"; app.leagueTab="trades"; render(); }
+      catch(e){ toast(e.message||"Trade failed"); } };
+    box.appendChild(send);
+    const back=el("button","btn sec"); back.style.width="100%"; back.style.marginTop="8px"; back.textContent="← Back"; back.onclick=()=>{ tb.step=1; renderTradeBuilder(); }; box.appendChild(back);
+  }
+  const cancel=el("button","btn sec"); cancel.style.width="100%"; cancel.style.marginTop="8px"; cancel.textContent="Cancel"; cancel.onclick=()=>{ app.tradeBuilder=null; ov.innerHTML=""; }; box.appendChild(cancel);
 }
 async function respondTrade(id, accept){
   try{ const {error}=await sb.rpc("respond_trade",{ tid:id, accept }); if(error) throw error;
@@ -1626,6 +1652,20 @@ function openLineupChooser(i){
   });
   const cl=ov.querySelector("#lcClear"); if(cl) cl.onclick=()=>{ app.lineup[i]=null; saveLineup(); ov.innerHTML=""; renderTeam(); };
   ov.querySelector("#lcCancel").onclick=()=>{ ov.innerHTML=""; };
+}
+function poolInfo(pid){ return (app.pool||[]).find(p=>p.id===pid); }
+function openBenchMove(pick){
+  const ov=$("overlay"); const myPicks=myDraftPicks();
+  const items=SLOTS.map((s,i)=>({s,i})).filter(o=>o.s.pos.includes(pick.pos)).map(o=>{
+    const cur=app.lineup[o.i]; const curP=cur?myPicks.find(x=>x.player_id===cur):null;
+    return `<button class="btn sec bm" data-i="${o.i}" style="width:100%;text-align:left;margin-top:6px">${o.s.lbl} <span class="muted" style="font-size:11px">${curP?"(swap out "+curP.player_name+")":"(empty)"}</span></button>`;
+  }).join("");
+  ov.innerHTML=`<div class="modal"><div class="box" style="max-width:340px;text-align:left">
+    <div style="font-weight:800">Move ${pick.player_name} into…</div>
+    <div style="max-height:50vh;overflow:auto">${items}</div>
+    <button class="btn sec" id="bmCancel" style="width:100%;margin-top:10px">Cancel</button></div></div>`;
+  ov.querySelectorAll(".bm").forEach(b=> b.onclick=()=>{ const i=+b.dataset.i; const j=app.lineup.indexOf(pick.player_id); if(j>=0) app.lineup[j]=null; app.lineup[i]=pick.player_id; saveLineup(); ov.innerHTML=""; renderTeam(); });
+  ov.querySelector("#bmCancel").onclick=()=>{ ov.innerHTML=""; };
 }
 function renderDraft(){
   const s=$("screen"); if(!s) return; s.innerHTML="";
