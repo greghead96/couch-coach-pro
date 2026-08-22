@@ -169,7 +169,13 @@
 <div class="app" id="app"></div>
 <div id="overlay"></div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
+// ============================ SUPABASE (Phase 2 backend) ============================
+const SB_URL="https://qonkkpsgjlhinzknpckw.supabase.co";
+const SB_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFvbmtrcHNnamxoaW56a25wY2t3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc0MjUzMTcsImV4cCI6MjEwMzAwMTMxN30.tVaiUFo0BuBQ4jSe5FHBkJ9dxIQ89eU1rmVlrE2mxwI";
+const sb = window.supabase.createClient(SB_URL, SB_KEY);
+
 // ============================ DATA ============================
 const POWERUPS = {
   double:   { name:"Double Pts",    icon:"⚡", rarity:"common", target:"me", mode:"quarter",
@@ -329,7 +335,7 @@ const ACTIVITY=[
 // ============================ STATE ============================
 const QSEC = 15*60, TICK=250, BASE_SPD=20;
 let app = {
-  loggedIn:false, connectedLeague:null, foundLeagues:null,
+  user:null, connectedLeague:null, sbLeagueId:null, myLeagues:[], authMode:"login", authBusy:false, authErr:"",
   tab:"home", leagueTab:"scoreboard",
   inv:{ double:1, freeze:1, sub:1, hotstart:1 },
   realData:false, chat:CHAT_SEED.slice(),
@@ -458,7 +464,7 @@ function statusTag(p){
 
 // ============================ SIM LOOP ============================
 function tick(){
-  if(!app.loggedIn || app.tab!=="matchup" || !app.sim || !app.sim.running) return;
+  if(!app.user || app.tab!=="matchup" || !app.sim || !app.sim.running) return;
   const adv = BASE_SPD*app.sim.speed*(TICK/1000);
   const prev = app.sim.gameSec;
   app.sim.gameSec = Math.min(4*QSEC, app.sim.gameSec+adv);
@@ -599,18 +605,20 @@ function schedulePU(k,p,q){
 
 // ============================ RENDER: SHELL ============================
 function render(){
-  if(!app.loggedIn){ renderLogin(); return; }
-  if(!app.connectedLeague){ renderConnect(); return; }
+  if(!app.user){ renderAuth(); return; }
+  if(!app.connectedLeague){ renderLeaguePicker(); return; }
   $("app").innerHTML="";
   const top=el("header","topbar");
   top.innerHTML=`<div class="brand">🛋️ Couch Coach <span class="pill" style="font-size:9px;padding:2px 7px">LEAGUE</span></div>
     <div style="display:flex;align-items:center;gap:9px">
+      <button id="acctBtn" class="pill" style="background:none;cursor:pointer;color:var(--txt)">👤</button>
       <button id="bellBtn" class="pill" style="background:none;cursor:pointer;color:var(--gold)">🔔</button>
       <button id="commishBtn" class="pill" style="background:none;cursor:pointer;${app.tab==='commish'?'color:#1a1300;background:var(--gold);border-color:var(--gold)':'color:var(--gold)'}">⚙️ Commish</button>
     </div>`;
   $("app").appendChild(top);
   top.querySelector("#commishBtn").onclick=()=>{ app.tab="commish"; app.armed=null; render(); };
   top.querySelector("#bellBtn").onclick=()=>{ app.tab="home"; app.armed=null; render(); };
+  top.querySelector("#acctBtn").onclick=accountModal;
   const scr=el("div"); scr.id="screen"; scr.className="screen"; $("app").appendChild(scr);
   if(app.tab!=="nfl") stopPoll();
   renderTab();
@@ -641,20 +649,110 @@ function renderTab(){
   else if(app.tab==="commish") renderCommish();
 }
 
-// ============================ LOGIN ============================
-function renderLogin(){
+// ============================ AUTH (Supabase) ============================
+function renderAuth(){
   const a=$("app"); a.innerHTML="";
+  const signup = app.authMode==="signup";
   const w=el("div","login");
   w.innerHTML=`
     <div class="logo">🛋️</div>
     <h1>Couch Coach Fantasy</h1>
-    <p class="sub"><b style="color:var(--gold)">League Edition</b> — the standalone app. No Sleeper needed. Power-ups decide who wins.</p>
-    <input class="input" id="u" placeholder="Email" value="greg@couchcoach.app"/>
-    <input class="input" id="pw" type="password" placeholder="Password" value="password"/>
-    <button class="btn" id="loginBtn">Log In</button>
-    <div class="small">New here? <b style="color:var(--gold)">Sign up free</b> · Create or join a league</div>`;
+    <p class="sub"><b style="color:var(--gold)">League Edition</b> — real accounts, real leagues.</p>
+    ${signup?`<input class="input" id="dn" placeholder="Display name"/>`:""}
+    <input class="input" id="em" type="email" placeholder="Email" autocomplete="email"/>
+    <input class="input" id="pw" type="password" placeholder="Password (6+ chars)" autocomplete="${signup?'new-password':'current-password'}"/>
+    ${app.authErr?`<div class="small" style="color:var(--opp);text-align:left">${app.authErr}</div>`:""}
+    <button class="btn" id="authBtn"${app.authBusy?" disabled":""}>${app.authBusy?"…":(signup?"Sign Up":"Log In")}</button>
+    <div class="small">${signup?"Have an account?":"New here?"} <b id="toggleAuth" style="color:var(--gold);cursor:pointer">${signup?"Log in":"Sign up free"}</b></div>`;
   a.appendChild(w);
-  $("loginBtn").onclick=()=>{ app.loggedIn=true; app.connectedLeague="The Couch League"; app.sim=freshSim(); render(); };
+  w.querySelector("#toggleAuth").onclick=()=>{ app.authMode=signup?"login":"signup"; app.authErr=""; render(); };
+  w.querySelector("#authBtn").onclick=async ()=>{
+    const em=(w.querySelector("#em").value||"").trim(), pw=w.querySelector("#pw").value||"";
+    const dn=signup?((w.querySelector("#dn").value||"").trim()):"";
+    if(!em||!pw){ app.authErr="Email and password required."; render(); return; }
+    app.authBusy=true; app.authErr=""; render();
+    try{
+      if(signup){
+        const { data, error } = await sb.auth.signUp({ email:em, password:pw, options:{ data:{ display_name:dn||em.split("@")[0] } } });
+        if(error) throw error;
+        if(!data.session){ app.authBusy=false; app.authMode="login"; app.authErr="Account made — confirm via the email link, then log in. (Or turn off email confirmation in Supabase for quicker testing.)"; render(); return; }
+        app.user=data.user;
+      } else {
+        const { data, error } = await sb.auth.signInWithPassword({ email:em, password:pw });
+        if(error) throw error; app.user=data.user;
+      }
+      await loadMyLeagues(); app.authBusy=false; render();
+    }catch(e){ app.authBusy=false; app.authErr=(e&&e.message)||"Auth failed."; render(); }
+  };
+}
+async function loadMyLeagues(){
+  try{ const { data } = await sb.from("league_members").select("league_id, team_name, role, leagues(name)").eq("user_id", app.user.id);
+    app.myLeagues = data||[];
+  }catch(e){ app.myLeagues=[]; }
+}
+function renderLeaguePicker(){
+  const a=$("app"); a.innerHTML="";
+  const w=el("div","login");
+  const leaguesHtml = app.myLeagues.length
+    ? `<div class="small" style="text-align:left;margin-top:8px">Your leagues:</div>` + app.myLeagues.map((m,i)=>
+        `<button class="card pickLeague" data-i="${i}" style="width:100%;text-align:left;cursor:pointer;margin-top:8px">
+          <div style="font-weight:700">${(m.leagues&&m.leagues.name)||"League"}</div>
+          <div class="muted" style="font-size:12px">${m.team_name||"(no team name)"}${m.role==="commissioner"?" · commissioner":""}</div></button>`).join("")
+    : `<div class="small" style="margin-top:8px">You're not in a league yet — create one or join with a code.</div>`;
+  w.innerHTML=`
+    <div class="logo">🏟️</div>
+    <h1>Your Leagues</h1>
+    <p class="sub">Signed in as ${app.user.email}</p>
+    ${leaguesHtml}
+    <div style="border-top:1px solid var(--line);margin:18px 0 10px"></div>
+    <div class="small" style="text-align:left">➕ Create a league</div>
+    <input class="input" id="cln" placeholder="League name" style="margin-top:8px"/>
+    <input class="input" id="clt" placeholder="Your team name"/>
+    <button class="btn sec" id="createBtn" style="width:100%">Create League</button>
+    <div class="small" style="text-align:left;margin-top:16px">🔑 Join a league</div>
+    <input class="input" id="jc" placeholder="Join code (e.g. A1B2C3)" style="margin-top:8px;text-transform:uppercase"/>
+    <input class="input" id="jt" placeholder="Your team name"/>
+    <button class="btn sec" id="joinBtn" style="width:100%">Join League</button>
+    <div class="small" id="lpErr" style="color:var(--opp);min-height:14px"></div>
+    <div class="small"><b id="signOutLink" style="color:var(--gold);cursor:pointer">Sign out</b></div>`;
+  a.appendChild(w);
+  const err=(m)=>{ w.querySelector("#lpErr").textContent=m; };
+  w.querySelectorAll(".pickLeague").forEach(b=> b.onclick=()=>{
+    const m=app.myLeagues[+b.dataset.i];
+    app.connectedLeague=(m.leagues&&m.leagues.name)||"League"; app.sbLeagueId=m.league_id; app.sim=freshSim(); render();
+  });
+  w.querySelector("#createBtn").onclick=async ()=>{
+    const n=(w.querySelector("#cln").value||"").trim(), t=(w.querySelector("#clt").value||"").trim();
+    if(!n||!t){ err("League name and team name required."); return; }
+    err("Creating…");
+    try{ const { error } = await sb.rpc("create_league",{ league_name:n, team:t }); if(error) throw error; await loadMyLeagues(); render(); }
+    catch(e){ err((e&&e.message)||"Create failed."); }
+  };
+  w.querySelector("#joinBtn").onclick=async ()=>{
+    const c=(w.querySelector("#jc").value||"").trim(), t=(w.querySelector("#jt").value||"").trim();
+    if(!c||!t){ err("Join code and team name required."); return; }
+    err("Joining…");
+    try{ const { error } = await sb.rpc("join_league",{ code:c, team:t }); if(error) throw error; await loadMyLeagues(); render(); }
+    catch(e){ err((e&&e.message)||"Join failed — check the code."); }
+  };
+  w.querySelector("#signOutLink").onclick=signOut;
+}
+function accountModal(){
+  const ov=$("overlay"); const lg=app.myLeagues.find(m=>m.league_id===app.sbLeagueId);
+  ov.innerHTML=`<div class="modal"><div class="box" style="max-width:340px">
+    <div style="font-size:34px">👤</div>
+    <div style="font-weight:800;margin-top:6px">${app.user.email}</div>
+    <div class="muted" style="font-size:12px;margin-top:4px">League: ${app.connectedLeague}${lg?" · "+(lg.team_name||""):""}</div>
+    <button class="btn sec" id="switchLg" style="width:100%;margin-top:16px">Switch / Join League</button>
+    <button class="btn sec" id="signOutBtn" style="width:100%;margin-top:8px">Sign Out</button>
+    <button class="btn sec" id="acctClose" style="width:100%;margin-top:8px">Close</button></div></div>`;
+  ov.querySelector("#switchLg").onclick=()=>{ ov.innerHTML=""; app.connectedLeague=null; app.sbLeagueId=null; render(); };
+  ov.querySelector("#signOutBtn").onclick=()=>{ ov.innerHTML=""; signOut(); };
+  ov.querySelector("#acctClose").onclick=()=>{ ov.innerHTML=""; };
+}
+async function signOut(){
+  try{ await sb.auth.signOut(); }catch(e){}
+  app.user=null; app.connectedLeague=null; app.sbLeagueId=null; app.myLeagues=[]; app.authMode="login"; app.authErr=""; render();
 }
 
 // ============================ CONNECT SLEEPER ============================
@@ -1664,7 +1762,13 @@ function renderBox(s){
 }
 
 // ============================ BOOT ============================
-render();
+async function boot(){
+  try{ const { data } = await sb.auth.getSession();
+    if(data && data.session){ app.user=data.session.user; await loadMyLeagues(); }
+  }catch(e){}
+  render();
+}
+boot();
 setInterval(tick, TICK);
 </script>
 </body>
