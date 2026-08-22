@@ -148,6 +148,44 @@
   .bmatch .bt { padding:3px 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .bmatch .bt.me { color:var(--you); font-weight:700; }
 
+  /* ---- responsive: scale up on tablet / desktop ---- */
+  @media (min-width:700px){
+    .app { max-width:720px; }
+    nav.tabbar .inner { max-width:720px; }
+    .card { padding:16px 18px; }
+    .login { max-width:560px; }
+  }
+  @media (min-width:1000px){
+    .app { max-width:960px; }
+    nav.tabbar .inner { max-width:960px; }
+    nav.tabbar button { font-size:12px; padding:12px 4px 10px; }
+    nav.tabbar button .i { font-size:23px; }
+    .screen { padding:22px; }
+    h1 { font-size:28px; }
+    h2.title { font-size:15px; }
+    .card { padding:18px 22px; border-radius:16px; margin-bottom:16px; }
+    .btn { font-size:15px; padding:12px 16px; }
+    .btn.sm { font-size:14px; padding:8px 14px; }
+    .input { font-size:16px; padding:14px 16px; }
+    .avatar { width:40px; height:40px; min-width:40px; font-size:15px; }
+    .avatar.sm { width:32px; height:32px; min-width:32px; }
+    .plr { padding:11px 13px; }
+    .plr .nm { font-size:15px; } .plr .meta2 { font-size:11px; } .plr .pt { font-size:20px; } .plr .pos { font-size:11px; }
+    .ts .nm { font-size:13px; } .ts .pts { font-size:46px; } .clock .tt { font-size:28px; } .clock .q { font-size:12px; }
+    .mc-nm { font-size:14px; } .mc-stat { font-size:10px; } .mc-pt { font-size:18px; } .mrow-pos { font-size:11px; padding:9px 0; }
+    table.std { font-size:15px; } table.std th { font-size:11px; } table.std td { padding:11px 6px; }
+    .puchip { min-width:118px; padding:12px 14px; } .puchip .nm { font-size:12px; } .puchip .ic { font-size:24px; }
+    .chip { font-size:13px; padding:7px 14px; }
+    .feed { height:160px; font-size:13px; }
+    .schrow { font-size:14px; padding:13px 6px; }
+    .dboard.big .dcell { min-height:66px; } .dboard.big .dcell .pn { font-size:13px; } .dboard.big .dhead { font-size:12px; }
+    .rank { font-size:10px; }
+  }
+  @media (min-width:1400px){
+    .app { max-width:1040px; }
+    nav.tabbar .inner { max-width:1040px; }
+  }
+
   /* sleeper-style draft board */
   .dboard { overflow-x:auto; padding-bottom:8px; margin-bottom:14px; }
   .dgrid { display:grid; gap:4px; }
