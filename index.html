@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Couch Coach Fantasy — League Edition</title>
+<title>Couch Coach Fantasy</title>
 <style>
   :root {
     --bg:#0b1020; --panel:#141b33; --panel2:#1b2444; --line:#2a3566;
@@ -344,7 +344,7 @@ let app = {
   sim:null, armed:null, matchupIdx:0,
   leagueMatchup:null, schedTeam:"Your Team", pFilter:"ALL", pSort:"rank", pView:"players", drafted:[], pStatTab:null,
   myTeam:"Your Team", oppTeam:"Burrow Bandits", realLeague:false,
-  draft:null, draftChannel:null, isCommish:false,
+  draft:null, draftChannel:null, isCommish:false, members:[], queue:[],
   pool:null, poolLoading:false, poolError:null, pDetail:null,
   nfl:{ games:null, loading:false, error:null, selected:null, gamecast:null, view:"plays", pollId:null, pollFor:null },
   settings:{
@@ -614,14 +614,14 @@ function render(){
   if(!app.connectedLeague){ renderLeaguePicker(); return; }
   $("app").innerHTML="";
   const top=el("header","topbar");
-  top.innerHTML=`<div class="brand">🛋️ Couch Coach <span class="pill" style="font-size:9px;padding:2px 7px">LEAGUE</span></div>
+  top.innerHTML=`<div class="brand">🛋️ Couch Coach</div>
     <div style="display:flex;align-items:center;gap:9px">
       <button id="acctBtn" class="pill" style="background:none;cursor:pointer;color:var(--txt)">👤</button>
       <button id="bellBtn" class="pill" style="background:none;cursor:pointer;color:var(--gold)">🔔</button>
-      <button id="commishBtn" class="pill" style="background:none;cursor:pointer;${app.tab==='commish'?'color:#1a1300;background:var(--gold);border-color:var(--gold)':'color:var(--gold)'}">⚙️ Commish</button>
+      ${app.isCommish?`<button id="commishBtn" class="pill" style="background:none;cursor:pointer;${app.tab==='commish'?'color:#1a1300;background:var(--gold);border-color:var(--gold)':'color:var(--gold)'}">⚙️ Commish</button>`:""}
     </div>`;
   $("app").appendChild(top);
-  top.querySelector("#commishBtn").onclick=()=>{ app.tab="commish"; app.armed=null; render(); };
+  const cb=top.querySelector("#commishBtn"); if(cb) cb.onclick=()=>{ app.tab="commish"; app.armed=null; render(); };
   top.querySelector("#bellBtn").onclick=()=>{ app.tab="home"; app.armed=null; render(); };
   top.querySelector("#acctBtn").onclick=accountModal;
   const scr=el("div"); scr.id="screen"; scr.className="screen"; $("app").appendChild(scr);
@@ -651,7 +651,7 @@ function renderTab(){
   else if(app.tab==="draft"){ ensurePool(); renderDraft(); }
   else if(app.tab==="league") renderLeague();
   else if(app.tab==="store") renderStore();
-  else if(app.tab==="commish") renderCommish();
+  else if(app.tab==="commish"){ if(app.isCommish) renderCommish(); else { app.tab="home"; renderHome(); } }
 }
 
 // ============================ AUTH (Supabase) ============================
@@ -662,7 +662,7 @@ function renderAuth(){
   w.innerHTML=`
     <div class="logo">🛋️</div>
     <h1>Couch Coach Fantasy</h1>
-    <p class="sub"><b style="color:var(--gold)">League Edition</b> — real accounts, real leagues.</p>
+    <p class="sub">Fantasy football with power-ups.</p>
     ${signup?`<input class="input" id="dn" placeholder="Display name"/>`:""}
     <input class="input" id="em" type="email" placeholder="Email" autocomplete="email"/>
     <input class="input" id="pw" type="password" placeholder="Password (6+ chars)" autocomplete="${signup?'new-password':'current-password'}"/>
@@ -687,7 +687,8 @@ function renderAuth(){
         const { data, error } = await sb.auth.signInWithPassword({ email:em, password:pw });
         if(error) throw error; app.user=data.user;
       }
-      await loadMyLeagues(); app.authBusy=false; render();
+      await loadMyLeagues(); app.authBusy=false;
+      if(!(await autoEnterIfSingle())) render();
     }catch(e){ app.authBusy=false; app.authErr=(e&&e.message)||"Auth failed."; render(); }
   };
 }
@@ -704,17 +705,35 @@ async function loadLeagueData(){
     const me=members.find(m=>m.user_id===app.user.id);
     app.myTeam=(me&&me.team_name)||"My Team";
     app.isCommish=!!(me && me.role==="commissioner");
+    app.members=members;
     app.schedTeam=app.myTeam;
     const others=members.filter(m=>m.user_id!==app.user.id);
     app.oppTeam=others.length ? (others[0].team_name||"Opponent") : "(waiting for opponents)";
     LEAGUE.length=0;
     members.forEach(m=> LEAGUE.push({ team:m.team_name||"Team", w:0, l:0, pf:0, pa:0, streak:"—", pu:0, me:m.user_id===app.user.id }));
+    // load persisted league settings
+    try{ const { data:lg } = await sb.from("leagues").select("settings").eq("id", app.sbLeagueId).maybeSingle();
+      if(lg && lg.settings){ ["scoring","league","powerups"].forEach(k=>{ if(lg.settings[k]) app.settings[k]={...app.settings[k], ...lg.settings[k]}; }); }
+    }catch(e){}
     app.realLeague=true;
   }catch(e){ app.realLeague=false; }
 }
 function copyCode(code){
   try{ navigator.clipboard.writeText(code); toast("Invite code copied: "+code); }
   catch(e){ toast("Invite code: "+code); }
+}
+async function enterLeague(id, name, code){
+  app.connectedLeague=name; app.sbLeagueId=id; app.leagueCode=code||null;
+  await loadLeagueData(); await loadDraft(); loadQueue(); subscribeDraft();
+  app.sim=freshSim(); app.tab="home"; render();
+}
+async function autoEnterIfSingle(){
+  if(app.myLeagues && app.myLeagues.length===1){
+    const m=app.myLeagues[0];
+    await enterLeague(m.league_id, (m.leagues&&m.leagues.name)||"League", (m.leagues&&m.leagues.join_code)||"");
+    return true;
+  }
+  return false;
 }
 function renderConfirm(){
   const a=$("app"); a.innerHTML="";
@@ -755,7 +774,7 @@ function renderLeaguePicker(){
         <div class="muted" style="font-size:12px">${m.team_name||"(no team)"}${m.role==="commissioner"?" · commissioner":""}</div>
         <div style="font-size:12px;margin-top:8px">Invite code: <b style="color:var(--gold);letter-spacing:2px">${code}</b></div>`;
       const enter=el("button","btn"); enter.style.width="100%"; enter.style.marginTop="10px"; enter.textContent="Enter League →";
-      enter.onclick=async ()=>{ app.connectedLeague=(m.leagues&&m.leagues.name)||"League"; app.sbLeagueId=m.league_id; app.leagueCode=code; await loadLeagueData(); await loadDraft(); subscribeDraft(); app.sim=freshSim(); render(); };
+      enter.onclick=async ()=>{ await enterLeague(m.league_id, (m.leagues&&m.leagues.name)||"League", code); };
       const cp=el("button","btn sec"); cp.style.width="100%"; cp.style.marginTop="6px"; cp.textContent="📋 Copy invite code";
       cp.onclick=()=>copyCode(code);
       card.appendChild(enter); card.appendChild(cp);
@@ -860,20 +879,9 @@ function renderHome(){
   const done=app.sim.gameSec>=4*QSEC;
 
   const banner=el("div","card");
-  banner.style.borderColor="var(--gold)";
-  banner.innerHTML=`<div style="font-weight:800">🏆 League Edition · powered by ESPN</div>
-    <div class="muted" style="font-size:12px;margin-top:4px">No Sleeper — Couch Coach <b style="color:var(--txt)">is</b> the league, running on <b style="color:var(--txt)">free live ESPN data</b>. Your power-up-adjusted <b style="color:var(--gold)">CCF Score</b> decides every matchup, the standings, and the playoffs.</div>`;
-  const nflBtn=el("button","btn sec"); nflBtn.style.width="100%"; nflBtn.style.marginTop="10px"; nflBtn.textContent="🏈 See today's real NFL games";
-  nflBtn.onclick=()=>{ app.tab="nfl"; render(); };
-  banner.appendChild(nflBtn); s.appendChild(banner);
-
-  if(app.leagueCode){
-    const inv=el("div","card");
-    inv.innerHTML=`<div class="row"><div><b>🔗 Invite your league</b><div class="muted" style="font-size:12px">Share this code so friends can join</div></div>
-      <div style="font-size:18px;font-weight:800;color:var(--gold);letter-spacing:2px">${app.leagueCode}</div></div>`;
-    const cp=el("button","btn sec"); cp.style.width="100%"; cp.style.marginTop="10px"; cp.textContent="📋 Copy invite code";
-    cp.onclick=()=>copyCode(app.leagueCode); inv.appendChild(cp); s.appendChild(inv);
-  }
+  banner.innerHTML=`<div style="font-weight:800">🏟️ ${app.connectedLeague||"Your League"}</div>
+    <div class="muted" style="font-size:12px;margin-top:4px">${app.myTeam}</div>`;
+  s.appendChild(banner);
 
   const hero=el("div","card");
   hero.innerHTML=`<h2 class="title">Week 11 · Your Matchup</h2>
@@ -1261,7 +1269,7 @@ function showDetailModal(){
       ${lastHtml}${wkHtml}
       ${f.projection?sec("Outlook")+`<div style="font-size:12px;line-height:1.5">${f.projection}</div>`:""}
       ${schHtml}
-      ${ro.headline?sec("Latest News")+`<div style="font-size:12px;line-height:1.5"><b>${ro.headline}</b><br><span class="muted">${(ro.story||"").slice(0,220)}…</span></div>`:""}`;
+      ${ro.headline?sec("Latest News")+`<div style="font-size:12px;line-height:1.5"><b>${ro.headline}</b>${ro.story?`<br><span class="muted">${ro.story}</span>`:""}</div>`:""}`;
   }
   ov.innerHTML=`<div class="modal"><div class="box" style="max-width:430px;text-align:left;max-height:88vh;overflow:auto">${head}${body}<button class="btn sec" id="pdClose" style="width:100%;margin-top:16px">Close</button></div></div>`;
   ov.querySelector("#pdClose").onclick=()=>{ app.pDetail=null; ov.innerHTML=""; };
@@ -1386,6 +1394,11 @@ function subscribeDraft(){
     .subscribe();
 }
 function unsubscribeDraft(){ if(app.draftChannel){ try{ sb.removeChannel(app.draftChannel); }catch(e){} app.draftChannel=null; } }
+// ---- draft queue (per user, per league; persisted locally) ----
+function queueKey(){ return "ccf_q_"+app.sbLeagueId+"_"+(app.user&&app.user.id); }
+function loadQueue(){ try{ app.queue=JSON.parse(localStorage.getItem(queueKey())||"[]"); }catch(e){ app.queue=[]; } }
+function saveQueue(){ try{ localStorage.setItem(queueKey(), JSON.stringify(app.queue)); }catch(e){} }
+function toggleQueue(id){ const i=app.queue.indexOf(id); if(i>=0)app.queue.splice(i,1); else app.queue.push(id); saveQueue(); renderDraft(); }
 function renderDraft(){
   const s=$("screen"); if(!s) return; s.innerHTML="";
   if(!app.draft){ s.appendChild(el("div","card","<div class='muted' style='text-align:center;padding:12px'>🔄 Loading draft…</div>")); loadDraft().then(()=>{ if(app.tab==="draft") renderDraft(); }); return; }
@@ -1439,20 +1452,42 @@ function renderDraft(){
   }
   board.appendChild(grid); s.appendChild(board);
 
-  if(live && isMe){
-    posChips(s); sortControl(s);
-    const drafted=new Set(D.picks.map(p=>p.player_id));
-    const avail=sortPool(availablePlayers().filter(p=>!drafted.has(p.id)).filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter));
-    const c=el("div","card"); c.appendChild(el("h2","title","Available · tap for research"));
-    avail.slice(0,60).forEach(p=> c.appendChild(faRow(p,"Draft","",async ()=>{
-      try{ const {error}=await sb.rpc("make_pick",{ lid:app.sbLeagueId, pid:p.id, pname:p.name, ppos:p.pos, pteam:p.teamAb||"", phead:p.headshot||p.logo||"" }); if(error) throw error;
-        toast("Drafted "+p.name); await loadDraft(); renderDraft(); }
-      catch(e){ toast(e.message||"Pick failed"); }
-    })));
-    s.appendChild(c);
-  } else if(live){
-    s.appendChild(el("div","muted",`<div style='font-size:12px;text-align:center'>Waiting for <b>${onclockName}</b> to pick… (updates live)</div>`));
+  if(app.isCommish && (live||done)){
+    const rb=el("button","btn sec"); rb.style.width="100%"; rb.style.margin="4px 0 12px"; rb.textContent="↺ Reset Draft (commissioner)";
+    rb.onclick=async ()=>{ if(!confirm("Reset the draft? This clears every pick.")) return;
+      try{ const {error}=await sb.rpc("reset_draft",{lid:app.sbLeagueId}); if(error) throw error; app.queue=[]; saveQueue(); await loadDraft(); renderDraft(); toast("Draft reset"); }
+      catch(e){ toast(e.message||"Reset failed"); } };
+    s.appendChild(rb);
   }
+  if(!live) return;
+
+  const draftedSet=new Set(D.picks.map(p=>p.player_id));
+  if(app.queue.some(id=>draftedSet.has(id))){ app.queue=app.queue.filter(id=>!draftedSet.has(id)); saveQueue(); }
+  const poolAll=availablePlayers(); const byId={}; poolAll.forEach(p=>byId[p.id]=p);
+
+  async function draftPlayer(p){ try{ const {error}=await sb.rpc("make_pick",{lid:app.sbLeagueId,pid:p.id,pname:p.name,ppos:p.pos,pteam:p.teamAb||"",phead:p.headshot||p.logo||""}); if(error) throw error; app.queue=app.queue.filter(x=>x!==p.id); saveQueue(); toast("Drafted "+p.name); await loadDraft(); renderDraft(); }catch(e){ toast(e.message||"Pick failed"); } }
+  async function commishPick(p){ try{ const {error}=await sb.rpc("commish_pick",{lid:app.sbLeagueId,pid:p.id,pname:p.name,ppos:p.pos,pteam:p.teamAb||"",phead:p.headshot||p.logo||""}); if(error) throw error; toast("Picked "+p.name+" for "+onclockName); await loadDraft(); renderDraft(); }catch(e){ toast(e.message||"Pick failed"); } }
+
+  // Your queue
+  if(app.queue.length){
+    const qc=el("div","card"); qc.appendChild(el("h2","title","⭐ Your Queue"));
+    app.queue.forEach(id=>{ const p=byId[id]; if(!p) return;
+      qc.appendChild(faRow(p, isMe?"Draft":"✕ Remove", isMe?"":" sec", ()=>{ if(isMe) draftPlayer(p); else toggleQueue(id); })); });
+    s.appendChild(qc);
+  }
+
+  posChips(s); sortControl(s);
+  const avail=sortPool(poolAll.filter(p=>!draftedSet.has(p.id)).filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter));
+  const c=el("div","card"); c.appendChild(el("h2","title","Available · tap for research"));
+  if(!isMe && !app.isCommish) c.appendChild(el("div","muted",`<div style='font-size:11px;margin-bottom:6px'>Waiting for <b>${onclockName}</b>. Queue players for your next pick.</div>`));
+  avail.slice(0,60).forEach(p=>{
+    let label,cls="",act;
+    if(isMe){ label="Draft"; act=()=>draftPlayer(p); }
+    else if(app.isCommish){ label="Pick for "+onclockName.split(" ")[0]; act=()=>commishPick(p); }
+    else { label=app.queue.includes(p.id)?"✓ Queued":"＋ Queue"; cls=" sec"; act=()=>toggleQueue(p.id); }
+    c.appendChild(faRow(p,label,cls,act));
+  });
+  s.appendChild(c);
 }
 
 // ============================ LEAGUE ============================
@@ -1683,8 +1718,26 @@ function renderCommish(){
 
   const intro=el("div","card");
   intro.innerHTML=`<h2 class="title">⚙️ Commissioner — League Settings</h2>
-    <div class="muted" style="font-size:12px">This is the <b style="color:var(--gold)">League Edition</b> — Couch Coach is the source of truth. Scoring, the power-up rules, and your playoff format all live here and drive every result.</div>`;
+    <div class="muted" style="font-size:12px">Scoring, power-up rules, and playoff format live here and drive every result. Only you (the commissioner) can see and change these.</div>`;
   s.appendChild(intro);
+
+  if(app.realLeague && app.members && app.members.length){
+    const mc=el("div","card"); mc.appendChild(el("h2","title","League Members"));
+    app.members.forEach(m=>{
+      const row=el("div","row"); row.style.padding="9px 0"; row.style.borderTop="1px solid var(--line)";
+      row.innerHTML=`<div style="font-size:14px">${m.team_name||"Team"}${m.role==="commissioner"?' <span class="muted" style="font-size:11px">· commissioner</span>':''}</div>`;
+      if(m.user_id!==app.user.id){
+        const rm=el("button","btn sm sec"); rm.textContent="Remove";
+        rm.onclick=async ()=>{ if(!confirm("Remove "+(m.team_name||"this manager")+" from the league? (If a draft is live, it will reset.)")) return;
+          try{ const { error } = await sb.rpc("remove_member",{ lid:app.sbLeagueId, uid:m.user_id }); if(error) throw error;
+            await loadLeagueData(); await loadDraft(); toast("Removed"); renderCommish(); }
+          catch(e){ toast(e.message||"Remove failed"); } };
+        row.appendChild(rm);
+      }
+      mc.appendChild(row);
+    });
+    s.appendChild(mc);
+  }
 
   // Scoring presets
   const presets=el("div","card");
@@ -1757,7 +1810,13 @@ function renderCommish(){
   s.appendChild(pwr);
 
   const save=el("button","btn"); save.style.width="100%"; save.style.marginBottom="20px"; save.textContent="Save League Settings";
-  save.onclick=()=>toast("League settings saved ✓");
+  save.onclick=async ()=>{
+    if(!app.realLeague){ toast("Demo mode — settings save once you're in a real league"); return; }
+    save.disabled=true; save.textContent="Saving…";
+    try{ const { error } = await sb.from("leagues").update({ settings:app.settings }).eq("id", app.sbLeagueId); if(error) throw error; toast("League settings saved ✓"); }
+    catch(e){ toast(e.message||"Save failed"); }
+    save.disabled=false; save.textContent="Save League Settings";
+  };
   s.appendChild(save);
 }
 
@@ -1897,7 +1956,8 @@ async function boot(){
   try{ const { data } = await sb.auth.getSession();
     if(data && data.session){ app.user=data.session.user; await loadMyLeagues(); }
   }catch(e){}
-  if(AUTH_REDIRECT){ app.showConfirm=true; try{ history.replaceState({}, "", location.pathname); }catch(e){} }
+  if(AUTH_REDIRECT){ app.showConfirm=true; try{ history.replaceState({}, "", location.pathname); }catch(e){} render(); return; }
+  if(app.user && await autoEnterIfSingle()) return;
   render();
 }
 boot();
