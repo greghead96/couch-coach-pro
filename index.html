@@ -308,7 +308,7 @@ function genRoster(team){
   _rosterCache[team]=r; return r;
 }
 function genSchedule(team){
-  if(team==="Your Team") return SCHEDULE;
+  if(team===app.myTeam) return SCHEDULE;
   const others=LEAGUE.map(t=>t.team).filter(t=>t!==team);
   let seed=hashNum(team);
   return Array.from({length:14},(_,i)=>{
@@ -343,6 +343,7 @@ let app = {
   leagueId:null, leagueData:null, sleeperUserId:null,
   sim:null, armed:null, matchupIdx:0,
   leagueMatchup:null, schedTeam:"Your Team", pFilter:"ALL", pSort:"rank", pView:"players", drafted:[], pStatTab:null,
+  myTeam:"Your Team", oppTeam:"Burrow Bandits", realLeague:false,
   pool:null, poolLoading:false, poolError:null, pDetail:null,
   nfl:{ games:null, loading:false, error:null, selected:null, gamecast:null, view:"plays", pollId:null, pollFor:null },
   settings:{
@@ -357,7 +358,8 @@ let app = {
 function freshSim(){
   [...myStarters,...myBench,...oppStarters,...oppBench].forEach(reset);
   return { running:false, speed:1, gameSec:0, cd:{}, feed:[], puLog:[], opNext:75,
-           scheduled:[], curQ:0, hotStart:null, firstTD:null, others: OTHER_MATCHUPS.map(m=>({...m})) };
+           scheduled:[], curQ:0, hotStart:null, firstTD:null,
+           others: app.realLeague ? [] : OTHER_MATCHUPS.map(m=>({...m})) };
 }
 function reset(p){ Object.assign(p,{pts:0,yds:0,td:0,rec:0,frozen:0,boosted:0,mult:1,hailmary:false,shielded:0,robbed:0,floored:0,pendingScore:undefined}); }
 
@@ -395,12 +397,12 @@ function maybeOpponentAI(adv){
     const tgt=myStarters.filter(p=>!playerAssigned(p.id)).reduce((a,b)=> !a||b.pts>=a.pts?b:a, null);
     if(!tgt) return;
     app.sim.scheduled.push({key:"freeze",pid:tgt.id,q,by:"op"});
-    feed(`🧊 Burrow Bandits scheduled a FREEZE on your ${tgt.name} for Q${q}!`,"ev-pu"); logPU("op","freeze",tgt.name,false,q);
+    feed(`🧊 ${app.oppTeam} scheduled a FREEZE on your ${tgt.name} for Q${q}!`,"ev-pu"); logPU("op","freeze",tgt.name,false,q);
   } else {
     const tgt=oppStarters.filter(p=>!playerAssigned(p.id)).reduce((a,b)=> !a||b.pts>=a.pts?b:a, null);
     if(!tgt) return;
     app.sim.scheduled.push({key:"double",pid:tgt.id,q,by:"op"});
-    feed(`⚡ Burrow Bandits scheduled Double Pts on ${tgt.name} for Q${q}.`,"ev-pu"); logPU("op","double",tgt.name,false,q);
+    feed(`⚡ ${app.oppTeam} scheduled Double Pts on ${tgt.name} for Q${q}.`,"ev-pu"); logPU("op","double",tgt.name,false,q);
   }
 }
 function toast(msg){ const t=el("div","toast",msg); document.body.appendChild(t); setTimeout(()=>t.remove(),1800); }
@@ -693,6 +695,21 @@ async function loadMyLeagues(){
     app.myLeagues = data||[];
   }catch(e){ app.myLeagues=[]; }
 }
+// Pull the selected league's real members into the app (real team names replace the mock roster)
+async function loadLeagueData(){
+  try{
+    const { data } = await sb.from("league_members").select("user_id, team_name, role").eq("league_id", app.sbLeagueId);
+    const members=(data||[]);
+    const me=members.find(m=>m.user_id===app.user.id);
+    app.myTeam=(me&&me.team_name)||"My Team";
+    app.schedTeam=app.myTeam;
+    const others=members.filter(m=>m.user_id!==app.user.id);
+    app.oppTeam=others.length ? (others[0].team_name||"Opponent") : "(waiting for opponents)";
+    LEAGUE.length=0;
+    members.forEach(m=> LEAGUE.push({ team:m.team_name||"Team", w:0, l:0, pf:0, pa:0, streak:"—", pu:0, me:m.user_id===app.user.id }));
+    app.realLeague=true;
+  }catch(e){ app.realLeague=false; }
+}
 function copyCode(code){
   try{ navigator.clipboard.writeText(code); toast("Invite code copied: "+code); }
   catch(e){ toast("Invite code: "+code); }
@@ -736,7 +753,7 @@ function renderLeaguePicker(){
         <div class="muted" style="font-size:12px">${m.team_name||"(no team)"}${m.role==="commissioner"?" · commissioner":""}</div>
         <div style="font-size:12px;margin-top:8px">Invite code: <b style="color:var(--gold);letter-spacing:2px">${code}</b></div>`;
       const enter=el("button","btn"); enter.style.width="100%"; enter.style.marginTop="10px"; enter.textContent="Enter League →";
-      enter.onclick=()=>{ app.connectedLeague=(m.leagues&&m.leagues.name)||"League"; app.sbLeagueId=m.league_id; app.leagueCode=code; app.sim=freshSim(); render(); };
+      enter.onclick=async ()=>{ app.connectedLeague=(m.leagues&&m.leagues.name)||"League"; app.sbLeagueId=m.league_id; app.leagueCode=code; await loadLeagueData(); app.sim=freshSim(); render(); };
       const cp=el("button","btn sec"); cp.style.width="100%"; cp.style.marginTop="6px"; cp.textContent="📋 Copy invite code";
       cp.onclick=()=>copyCode(code);
       card.appendChild(enter); card.appendChild(cp);
@@ -860,7 +877,7 @@ function renderHome(){
     <div class="scoreboard">
       <div class="ts me"><div class="nm">You</div><div class="pts">${ms.toFixed(1)}</div></div>
       <div class="clock"><div class="q">${app.sim.running?"LIVE":done?"FINAL":"PREGAME"}</div><div class="tt" style="font-size:16px">vs</div></div>
-      <div class="ts op"><div class="nm">Burrow Bandits</div><div class="pts">${os.toFixed(1)}</div></div>
+      <div class="ts op"><div class="nm">${app.oppTeam}</div><div class="pts">${os.toFixed(1)}</div></div>
     </div>`;
   const go=el("button","btn"); go.style.width="100%"; go.style.marginTop="10px";
   go.textContent = app.sim.running?"▶ Back to Live Matchup":done?"View Final & Recap":"▶ Open Matchup";
@@ -900,7 +917,7 @@ function recapCard(){
     ${ms>os?'🏆 You won '+ms.toFixed(1)+'–'+os.toFixed(1):ms<os?'💀 Lost '+ms.toFixed(1)+'–'+os.toFixed(1):'🤝 Tie '+ms.toFixed(1)}</div>`));
   if(!app.sim.puLog.length){ c.appendChild(el("div","muted","<div style='font-size:13px'>No power-ups used this game.</div>")); return c; }
   app.sim.puLog.forEach(e=>{
-    const cfg=POWERUPS[e.key]; const who=e.side==="me"?"You":"Burrow Bandits";
+    const cfg=POWERUPS[e.key]; const who=e.side==="me"?"You":app.oppTeam;
     c.appendChild(el("div","",`<div style="padding:7px 0;border-top:1px solid var(--line);font-size:13px">
       <span style="margin-right:6px">${cfg.icon}</span>
       <b style="color:${e.side==='me'?'var(--you)':'var(--opp)'}">${who}</b>
@@ -914,7 +931,7 @@ function recapCard(){
 function renderMatchup(){
   const s=$("screen"); if(!s) return; s.innerHTML="";
   const others = app.sim.others||[];
-  const all = [{your:true, a:"Your Team", b:"Burrow Bandits"}, ...others.map(m=>({your:false, ...m}))];
+  const all = [{your:true, a:app.myTeam, b:app.oppTeam}, ...others.map(m=>({your:false, ...m}))];
   if(app.matchupIdx>=all.length) app.matchupIdx=0;
   const idx=app.matchupIdx; const m=all[idx];
   const done=app.sim.gameSec>=4*QSEC;
@@ -1317,7 +1334,7 @@ function draftSlot(pickNo,T){ const r=Math.floor((pickNo-1)/T); const i=(pickNo-
 function simDraft(){
   const teams=LEAGUE.map(t=>t.team), T=teams.length; let guard=0;
   while(guard++<600){ const pn=app.drafted.length+1; const oc=teams[draftSlot(pn,T)];
-    if(oc==="Your Team") break;
+    if(oc===app.myTeam) break;
     const dset=new Set(app.drafted.map(d=>d.p.id));
     const best=availablePlayers().filter(p=>!dset.has(p.id)).sort((a,b)=>b.proj-a.proj)[0];
     if(!best) break; app.drafted.push({p:best,by:oc,pick:pn}); }
@@ -1330,7 +1347,7 @@ function renderDraft(){
   const complete=app.drafted.length>=TOTAL;
   const curRound=Math.floor((pickNo-1)/T);
   const onClock=complete?null:teams[draftSlot(pickNo,T)];
-  const isMe=onClock==="Your Team";
+  const isMe=onClock===app.myTeam;
   s.appendChild(el("div","card",`<h2 class='title'>🐍 Draft Board</h2>
     <div class='muted' style='font-size:12px'>${complete?"✅ Draft complete — kept here for history.":`Snake · Round ${curRound+1}, Pick ${pickNo} · On the clock: <b style="color:${isMe?'var(--you)':'var(--txt)'}">${onClock}</b>${isMe?" — you're up! Tap a player below.":""}`}</div>`));
   if(!poolGuard(s,renderDraft)) return;
@@ -1340,7 +1357,7 @@ function renderDraft(){
   const board=el("div","dboard big"); const grid=el("div","dgrid");
   grid.style.gridTemplateColumns=`30px repeat(${T},minmax(96px,1fr))`;
   grid.appendChild(el("div","dhead",""));
-  teams.forEach(t=> grid.appendChild(el("div","dhead"+(t==="Your Team"?" me":""), t.split(" ")[0])));
+  teams.forEach(t=> grid.appendChild(el("div","dhead"+(t===app.myTeam?" me":""), t.split(" ")[0])));
   for(let r=0;r<rounds;r++){
     grid.appendChild(el("div","dhead","R"+(r+1)));
     for(let col=0;col<T;col++){
@@ -1377,11 +1394,12 @@ function renderLeague(){
   s.appendChild(ts);
 
   if(app.leagueTab==="scoreboard"){
-    const matchups=[{a:"Your Team",b:"Burrow Bandits",as:total(myStarters),bs:total(oppStarters),me:true}, ...OTHER_MATCHUPS];
+    const matchups=[{a:app.myTeam,b:app.oppTeam,as:total(myStarters),bs:total(oppStarters),me:true}, ...(app.realLeague?[]:OTHER_MATCHUPS)];
     if(app.leagueMatchup!=null && matchups[app.leagueMatchup]){
       renderMatchupDetail(s, matchups[app.leagueMatchup]);
     } else {
       s.appendChild(el("div","muted","<div style='font-size:11px;margin-bottom:10px;text-align:center'>Week 11 · CCF Scores (power-up adjusted) — tap a matchup for lineups.</div>"));
+      if(app.realLeague) s.appendChild(el("div","muted","<div style='font-size:11px;margin-bottom:10px;text-align:center'>Weekly matchups + scores populate once your commissioner starts the season.</div>"));
       matchups.forEach((m,i)=>{
         const c=el("div","card"); c.style.cursor="pointer";
         c.innerHTML=`<div class="row"><div><b style="color:${m.me?'var(--you)':'var(--txt)'}">${m.a}</b></div><b>${(+m.as).toFixed(1)}</b></div>
@@ -1395,6 +1413,7 @@ function renderLeague(){
     renderPlayoffs(s);
   } else if(app.leagueTab==="standings"){
     const c=el("div","card");
+    if(app.realLeague) c.appendChild(el("div","muted","<div style='font-size:11px;margin-bottom:8px;color:var(--you)'>✓ Your real league members. Records fill in once games are scored.</div>"));
     c.appendChild(el("div","muted","<div style='font-size:11px;margin-bottom:8px'>💡 <b style='color:var(--gold)'>Coach Eff</b> = net fantasy points swung by power-ups this season (points gained + prevented). Higher = better power-up management.</div>"));
     const wrap=el("div"); wrap.style.overflowX="auto";
     let html=`<table class="std"><tr><th>#</th><th>Team</th><th>W-L</th><th>PF</th><th>PA</th><th>Strk</th><th>Coach&nbsp;Eff</th></tr>`;
@@ -1412,15 +1431,19 @@ function renderLeague(){
     const nx=el("button","btn sec","›"); nx.style.padding="10px 16px";
     pv.onclick=()=>{ app.schedTeam=teams[(ci-1+teams.length)%teams.length]; renderLeague(); };
     nx.onclick=()=>{ app.schedTeam=teams[(ci+1)%teams.length]; renderLeague(); };
-    const lab=el("div","",`<div style="text-align:center;font-weight:700;font-size:14px">${app.schedTeam}${app.schedTeam==='Your Team'?' ⭐':''}</div><div class="muted" style="font-size:11px">Team ${ci+1} of ${teams.length} · 2026</div>`); lab.style.flex="1";
+    const lab=el("div","",`<div style="text-align:center;font-weight:700;font-size:14px">${app.schedTeam}${app.schedTeam===app.myTeam?' ⭐':''}</div><div class="muted" style="font-size:11px">Team ${ci+1} of ${teams.length} · 2026</div>`); lab.style.flex="1";
     nav.append(pv,lab,nx); s.appendChild(nav);
     const c=el("div","card");
-    genSchedule(app.schedTeam).forEach(g=>{
-      const r=el("div","schrow",`<span class="wk">Wk ${g.wk}</span>
-        <span style="flex:1">${g.opp}</span>
-        <span class="res ${g.res==='W'?'w':g.res==='L'?'l':''}">${g.res==='—'?g.s:g.res+' '+g.s}</span>`);
-      c.appendChild(r);
-    });
+    if(app.realLeague){
+      c.appendChild(el("div","muted","<div style='font-size:13px'>🗓️ The full season schedule is generated when your commissioner starts the season.</div>"));
+    } else {
+      genSchedule(app.schedTeam).forEach(g=>{
+        const r=el("div","schrow",`<span class="wk">Wk ${g.wk}</span>
+          <span style="flex:1">${g.opp}</span>
+          <span class="res ${g.res==='W'?'w':g.res==='L'?'l':''}">${g.res==='—'?g.s:g.res+' '+g.s}</span>`);
+        c.appendChild(r);
+      });
+    }
     s.appendChild(c);
   } else {
     const c=el("div","card"); c.appendChild(el("h2","title","League Chat"));
