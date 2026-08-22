@@ -257,6 +257,7 @@ const SCHEDULE = [
 
 // ---- player visuals + stats helpers ----
 function hashNum(str){ let h=0; for(let i=0;i<(str||"").length;i++){ h=(h*31+str.charCodeAt(i))>>>0; } return h; }
+function normName(n){ return (n||"").toLowerCase().replace(/\bd\/st\b/g,"").replace(/[.'’-]/g,"").replace(/\s+(jr|sr|ii|iii|iv|v)\b/g,"").replace(/\s+/g," ").trim(); }
 // assign deterministic jersey numbers
 [myStarters,myBench,oppStarters,oppBench,FREE_AGENTS].forEach(arr=>arr.forEach(p=>{ p.num = p.pos==="DEF"?0:(hashNum(p.name)%89)+1; }));
 function posHue(pos){ return ({QB:"#3b82f6",RB:"#10b981",WR:"#f59e0b",TE:"#a855f7",K:"#94a3b8",DEF:"#64748b"})[pos]||"#334155"; }
@@ -340,7 +341,7 @@ let app = {
   earnedThisWeek:0, pityCount:0, realData:false, chat:CHAT_SEED.slice(),
   leagueId:null, leagueData:null, sleeperUserId:null,
   sim:null, armed:null, matchupIdx:0,
-  leagueMatchup:null, schedTeam:"Your Team", pFilter:"ALL", pSort:"rank", pView:"players", drafted:[],
+  leagueMatchup:null, schedTeam:"Your Team", pFilter:"ALL", pSort:"rank", pView:"players", drafted:[], pStatTab:null,
   pool:null, poolLoading:false, poolError:null, pDetail:null,
   nfl:{ games:null, loading:false, error:null, selected:null, gamecast:null, view:"plays", pollId:null, pollFor:null },
   settings:{
@@ -984,13 +985,13 @@ async function loadPool(){
           injury:(a.injuries&&a.injuries[0]&&a.injuries[0].status)||"", proj:0 });
       }));
     });
-    // ESPN draft-value ranking from lightweight players_wl (percentOwned → rank order)
+    // Reputable ADP (Fantasy Football Calculator), committed in-repo so it loads same-origin
     try{
-      const wl=await (await fetch("https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/2025/players?view=players_wl")).json();
-      const arr=Array.isArray(wl)?wl:(wl.players||[]);
-      const owned={}; arr.forEach(x=>{ const pl=x.player||x; owned["e"+pl.id]=(pl.ownership&&pl.ownership.percentOwned)||0; });
-      pool.forEach(p=>{ p.owned=owned[p.id]||0; });
-      pool.filter(p=>p.owned>0).sort((a,b)=>b.owned-a.owned).forEach((p,i)=> p.rank=i+1);
+      const adp=await (await fetch("adp.json")).json();
+      const list=adp.players||adp||[];
+      const map={}; list.forEach(x=>{ map[normName(x.name)]=x.adp; });
+      pool.forEach(p=>{ const a=map[normName(p.name)]; if(a) p.adp=a; });
+      pool.filter(p=>p.adp).sort((a,b)=>a.adp-b.adp).forEach((p,i)=> p.rank=i+1);
     }catch(e){}
     if(pool.length) app.pool=pool; else app.poolError="No players returned — tap retry.";
   }catch(err){ app.poolError="Couldn't load ESPN players — tap retry."; }
@@ -1017,13 +1018,41 @@ async function openPlayerDetail(p){
   app.pDetail = data ? {p, data, gl, sched, bye, loading:false} : {p, error:true, loading:false};
   showDetailModal();
 }
-function weeklyFromGamelog(gl){
-  if(!gl) return null; const ev=gl.events||{}, labels=gl.labels||[];
+function statGroups(names){
+  const g={passing:[],rushing:[],receiving:[],kicking:[]};
+  (names||[]).forEach((n,i)=>{ const s=n.toLowerCase();
+    if(/pass|completion|interception|sack|qbr/.test(s)) g.passing.push(i);
+    else if(/rush/.test(s)) g.rushing.push(i);
+    else if(/receiv|reception/.test(s)) g.receiving.push(i);
+    else if(/fieldgoal|extrapoint|\bkick|punt/.test(s)) g.kicking.push(i);
+  });
+  return g;
+}
+function weekFP(names, stats){
+  const sc=app.settings.scoring, gi=(n)=>{ const i=names.indexOf(n); return i>=0?(parseFloat(String(stats[i]||"0").replace(/,/g,""))||0):0; };
+  let fp=0;
+  fp += gi("passingYards")/(sc.passYdsPerPt||25);
+  fp += gi("passingTouchdowns")*(sc.passTD||4);
+  fp += gi("interceptions")*(sc.passInt||-2);
+  fp += gi("rushingYards")/(sc.rushYdsPerPt||10);
+  fp += gi("rushingTouchdowns")*(sc.rushTD||6);
+  fp += gi("receptions")*(sc.ppr||0);
+  fp += gi("receivingYards")/(sc.recYdsPerPt||10);
+  fp += gi("receivingTouchdowns")*(sc.recTD||6);
+  fp += gi("fumblesLost")*(sc.fumLost||-2);
+  return Math.round(fp*10)/10;
+}
+function gamelogWeekly(gl){
+  if(!gl) return null; const names=gl.names||[], labels=gl.labels||[], ev=gl.events||{};
   let cat=null;
   (gl.seasonTypes||[]).forEach(st=>{ if(!cat && /Regular/.test(st.displayName||"")){ (st.categories||[]).forEach(c=>{ if(!cat && (c.events||[]).length) cat=c; }); } });
   if(!cat) (gl.seasonTypes||[]).forEach(st=>{ (st.categories||[]).forEach(c=>{ if(!cat && (c.events||[]).length) cat=c; }); });
   if(!cat) return null;
-  return { labels, rows:(cat.events||[]).map(e=>{ const m=ev[e.eventId]||{}; return { wk:m.week, opp:(m.atVs||"")+((m.opponent&&m.opponent.abbreviation)||""), stats:e.stats||[] }; }) };
+  const rows=(cat.events||[]).map(e=>{ const m=ev[e.eventId]||{};
+    return { wk:m.week||0, opp:(m.atVs||"")+((m.opponent&&m.opponent.abbreviation)||""), stats:e.stats||[], fp:weekFP(names,e.stats||[]) }; })
+    .sort((a,b)=>a.wk-b.wk);
+  const cats=(gl.categories||[]).filter(c=>["passing","rushing","receiving","kicking"].includes(c.name)).map(c=>({name:c.name,display:c.displayName||c.name}));
+  return { names, labels, rows, cats };
 }
 function showDetailModal(){
   const ov=$("overlay"); const D=app.pDetail; if(!D){ ov.innerHTML=""; return; }
@@ -1044,10 +1073,17 @@ function showDetailModal(){
     const sp=(st.splits&&st.splits[0]&&st.splits[0].stats)||null, labels=st.labels||[];
     let lastHtml="";
     if(sp) lastHtml=sec("Last Season")+`<div style="overflow-x:auto"><table class="std"><tr>${labels.slice(0,8).map(l=>`<th>${l}</th>`).join("")}</tr><tr>${sp.slice(0,8).map(v=>`<td>${v}</td>`).join("")}</tr></table></div>`;
-    let wkHtml=""; const wk=weeklyFromGamelog(D.gl);
-    if(wk && wk.rows.length){ const cols=wk.labels.slice(0,6);
-      wkHtml=sec("Weekly Production")+`<div style="overflow-x:auto"><table class="std"><tr><th>Wk</th><th>Opp</th>${cols.map(l=>`<th>${l}</th>`).join("")}</tr>`+
-        wk.rows.map(r=>`<tr><td>${r.wk||""}</td><td>${r.opp||""}</td>${cols.map((_,i)=>`<td>${r.stats[i]||""}</td>`).join("")}</tr>`).join("")+`</table></div>`; }
+    let wkHtml=""; const wk=gamelogWeekly(D.gl);
+    if(wk && wk.rows.length){
+      const groups=statGroups(wk.names);
+      const tabs=(wk.cats&&wk.cats.length)?wk.cats:[{name:"passing",display:"Stats"}];
+      let active=app.pStatTab; if(!tabs.find(t=>t.name===active)) active=tabs[0].name;
+      const idxs=(groups[active]||[]).slice(0,6);
+      const tabBtns=tabs.map(t=>`<div class="chip${t.name===active?' on':''}" data-t="${t.name}">${t.display}</div>`).join("");
+      wkHtml=sec("Weekly Production")+`<div class="chips" id="statTabs">${tabBtns}</div>`+
+        `<div style="overflow-x:auto"><table class="std"><tr><th>Wk</th><th>Opp</th><th style="color:var(--gold)">FP</th>${idxs.map(i=>`<th>${wk.labels[i]||""}</th>`).join("")}</tr>`+
+        wk.rows.map(r=>`<tr><td>${r.wk||""}</td><td>${r.opp||""}</td><td style="color:var(--gold);font-weight:700">${r.fp}</td>${idxs.map(i=>`<td>${r.stats[i]||""}</td>`).join("")}</tr>`).join("")+`</table></div>`;
+    }
     let schHtml=""; const up=(D.sched||[]).filter(g=>!g.done && g.wk).slice(0,6);
     if(up.length) schHtml=sec("Upcoming Schedule")+up.map(g=>`<div class="schrow"><span class="wk">Wk ${g.wk}</span><span style="flex:1">${g.opp?"vs "+g.opp:"—"}</span></div>`).join("");
     body=`${bio?`<div style="font-size:12px;margin-top:10px">${bio}</div>`:""}
@@ -1060,6 +1096,7 @@ function showDetailModal(){
   }
   ov.innerHTML=`<div class="modal"><div class="box" style="max-width:430px;text-align:left;max-height:88vh;overflow:auto">${head}${body}<button class="btn sec" id="pdClose" style="width:100%;margin-top:16px">Close</button></div></div>`;
   ov.querySelector("#pdClose").onclick=()=>{ app.pDetail=null; ov.innerHTML=""; };
+  const tw=ov.querySelector("#statTabs"); if(tw) tw.querySelectorAll(".chip").forEach(b=> b.onclick=()=>{ app.pStatTab=b.dataset.t; showDetailModal(); });
 }
 function posChips(s){
   const chips=el("div","chips");
