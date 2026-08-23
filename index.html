@@ -393,7 +393,8 @@ let app = {
   nfl:{ games:null, loading:false, error:null, selected:null, gamecast:null, view:"plays", pollId:null, pollFor:null },
   settings:{
     scoring:{ passYdsPerPt:25, passTD:4, passInt:-2, rushYdsPerPt:10, rushTD:6,
-              ppr:0.5, recYdsPerPt:10, recTD:6, fumLost:-2, twoPt:2 },
+              ppr:0.5, recYdsPerPt:10, recTD:6, fumLost:-2, twoPt:2,
+              sack:1, defInt:2, defTD:6 },
     league:{ teams:10, rosterSize:16, divisions:2, waiver:"FAAB", faab:100,
              tradeDeadline:"Week 11", tradeReview:"Commissioner", regSeasonWeeks:14,
              playoffTeams:6, playoffWeeks:"15-17", keepers:false },
@@ -1831,6 +1832,22 @@ function boxAthleteFP(groupName, labels, stats){
   else if(groupName==="fumbles"){ fp+=gi("LOST")*(sc.fumLost||-2); }
   return {fp,qtd};
 }
+// Team defense bonus plays: sacks + interceptions + defensive/return TDs.
+// (Fumble recoveries are skipped — ESPN's box score doesn't cleanly separate
+// "defense recovered opponent's fumble" from "offense recovered its own".)
+function teamDefenseBonusFP(statGroups){
+  const sc=app.settings.scoring;
+  let sacks=0, defTD=0, ints=0, intTD=0;
+  (statGroups||[]).forEach(g=>{
+    const labels=g.labels||[];
+    const gi=(a,lbl)=>{ const i=labels.indexOf(lbl); return i>=0?(parseFloat(String((a.stats||[])[i]||"0").replace(/,/g,""))||0):0; };
+    if(g.name==="defensive"){ (g.athletes||[]).forEach(a=>{ sacks+=gi(a,"SACKS"); defTD+=gi(a,"TD"); }); }
+    else if(g.name==="interceptions"){ (g.athletes||[]).forEach(a=>{ ints+=gi(a,"INT"); intTD+=gi(a,"TD"); }); }
+  });
+  const td=defTD+intTD;
+  const fp=sacks*(sc.sack||1) + ints*(sc.defInt||2) + td*(sc.defTD||6);
+  return {fp:Math.round(fp*10)/10, td};
+}
 function teamIdForAb(ab){
   if(!app._teamIdMap){ app._teamIdMap={}; (app.pool||[]).forEach(p=>{ if(p.teamAb && p.teamId) app._teamIdMap[p.teamAb]=p.teamId; }); }
   return app._teamIdMap[ab];
@@ -1851,8 +1868,10 @@ async function fetchGameBoxFP(eventId){
   const status=comp.status||{};
   const final=!!(status.type&&status.type.completed);
   const period= final?4:(status.period||1);
-  const byAthlete={};
+  const byAthlete={}, teamStats={};
   ((d.boxscore&&d.boxscore.players)||[]).forEach(tm=>{
+    const tid=String((tm.team&&tm.team.id)||"");
+    if(tid) teamStats[tid]=tm.statistics||[];
     (tm.statistics||[]).forEach(g=>{
       (g.athletes||[]).forEach(a=>{
         const id=String((a.athlete&&a.athlete.id)||""); if(!id) return;
@@ -1867,7 +1886,7 @@ async function fetchGameBoxFP(eventId){
     const tid=String((c.team&&c.team.id)||"");
     linescores[tid]=(c.linescores||[]).map(l=>l.value||0);
   });
-  return {period, final, byAthlete, linescores};
+  return {period, final, byAthlete, linescores, teamStats};
 }
 // Poll ESPN for every real player in the current matchup and persist real
 // per-quarter fantasy points. Any manager's open app contributes a poll —
@@ -1885,18 +1904,20 @@ async function pollRealStats(){
     let box; try{ box=await fetchGameBoxFP(eventId); }catch(e){ continue; }
     app.playerGameState[teamId]={period:box.period, final:box.final};
     for(const p of byTeam[teamId]){
-      let curFp, curQtd=0, defQuarterly=null;
+      let curFp, curQtd=0, defQuarterly=null, curBonus=0, curBonusTd=0;
       if(p.pos==="DEF"){
         const opp=Object.keys(box.linescores).find(t=>t!==teamId);
         const oppLs=opp?box.linescores[opp]:[];
         defQuarterly = oppLs.slice(0, box.period).map(defBracket);
         curFp = defQuarterly.reduce((s,v)=>s+v,0);
+        const bonus=teamDefenseBonusFP(box.teamStats[teamId]);
+        curBonus=bonus.fp; curBonusTd=bonus.td;
       } else {
         const espnId=(p.id||"").replace(/^e/,"");
         const r=box.byAthlete[espnId]; if(!r) continue;
         curFp=r.fp; curQtd=r.qtd;
       }
-      updates.push({athlete_id:p.id, week:wk, period:box.period, curFp, curQtd, defQuarterly, isDef:p.pos==="DEF"});
+      updates.push({athlete_id:p.id, week:wk, period:box.period, curFp, curQtd, curBonus, curBonusTd, defQuarterly, isDef:p.pos==="DEF"});
     }
   }
   if(!updates.length) return;
@@ -1906,10 +1927,18 @@ async function pollRealStats(){
   const rows=updates.map(u=>{
     const prev=byId[u.athlete_id];
     const qpts=(prev&&prev.q_pts)?{...prev.q_pts}:{};
-    let prevQtd=prev?(prev.prev_qtd||0):0;
+    let prevQtd=prev?(prev.prev_qtd||0):0, prevBonus=prev?(prev.prev_bonus||0):0;
     if(u.isDef){
-      // exact per-quarter from the real linescore — safe to overwrite each poll
-      u.defQuarterly.forEach((fp,i)=>{ qpts[i+1]={fp:Math.round(fp*10)/10, qtd:0}; });
+      // points-allowed is exact per-quarter from the real linescore — safe to overwrite.
+      // sacks/INTs/def-TDs are cumulative-to-date, so diff like offense and credit the live quarter.
+      u.defQuarterly.forEach((pa,i)=>{ const q=i+1; const cur=qpts[q]||{bonus:0,qtd:0};
+        qpts[q]={pa:Math.round(pa*10)/10, bonus:cur.bonus||0, qtd:cur.qtd||0, fp:0}; });
+      const bonusDelta=Math.max(0, u.curBonus-prevBonus), tdDelta=Math.max(0, u.curBonusTd-prevQtd);
+      const cp=qpts[u.period]||{pa:0,bonus:0,qtd:0};
+      cp.bonus=Math.round((cp.bonus+bonusDelta)*10)/10; cp.qtd=(cp.qtd||0)+tdDelta;
+      qpts[u.period]=cp;
+      Object.keys(qpts).forEach(q=>{ qpts[q].fp=Math.round(((qpts[q].pa||0)+(qpts[q].bonus||0))*10)/10; });
+      prevBonus=u.curBonus; prevQtd=u.curBonusTd;
     } else {
       const prevTotal=prev?prev.prev_total:0;
       const delta=Math.max(0, u.curFp-prevTotal);
@@ -1918,7 +1947,7 @@ async function pollRealStats(){
       qpts[u.period]={fp:Math.round((cur.fp+delta)*10)/10, qtd:cur.qtd+tdDelta};
       prevQtd=u.curQtd;
     }
-    return { athlete_id:u.athlete_id, week:wk, season:2026, q_pts:qpts, prev_total:u.curFp, prev_qtd:prevQtd };
+    return { athlete_id:u.athlete_id, week:wk, season:2026, q_pts:qpts, prev_total:u.curFp, prev_qtd:prevQtd, prev_bonus:prevBonus };
   });
   try{ await sb.from("player_week_stats").upsert(rows); }catch(e){}
   await loadPlayerWeekStats(wk);
@@ -2458,6 +2487,9 @@ function renderCommish(){
     cRow("Receiving TD","points", cNum(sc.recTD,1,v=>sc.recTD=v)),
     cRow("Fumble lost","points", cNum(sc.fumLost,1,v=>sc.fumLost=v)),
     cRow("2-point conversion","points", cNum(sc.twoPt,1,v=>sc.twoPt=v)),
+    cRow("Defense: sack","points", cNum(sc.sack,1,v=>sc.sack=v)),
+    cRow("Defense: interception","points", cNum(sc.defInt,1,v=>sc.defInt=v)),
+    cRow("Defense/return TD","points", cNum(sc.defTD,1,v=>sc.defTD=v)),
   );
   s.appendChild(scoring);
 

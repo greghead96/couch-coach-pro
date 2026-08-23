@@ -77,13 +77,15 @@ create table if not exists public.player_week_stats (
   athlete_id  text not null,
   week        int not null,
   season      int not null default 2026,
-  q_pts       jsonb not null default '{}'::jsonb,   -- {"1": {"fp":8.2,"qtd":1}, ...} real FP + qualifying TDs per quarter
+  q_pts       jsonb not null default '{}'::jsonb,   -- {"1": {"fp":8.2,"qtd":1,"pa":..,"bonus":..}, ...} real per-quarter data
   prev_total  numeric not null default 0,           -- last-seen cumulative real FP (for delta calc)
   prev_qtd    numeric not null default 0,           -- last-seen cumulative qualifying-TD count (for delta calc)
+  prev_bonus  numeric not null default 0,           -- DEF only: last-seen cumulative sack/INT/TD point value
   is_final    boolean not null default false,
   updated_at  timestamptz default now(),
   primary key (athlete_id, week, season)
 );
+alter table public.player_week_stats add column if not exists prev_bonus numeric not null default 0;
 alter table public.player_week_stats enable row level security;
 drop policy if exists "read player stats" on public.player_week_stats;
 create policy "read player stats" on public.player_week_stats for select to authenticated using (true);
