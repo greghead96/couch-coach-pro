@@ -388,6 +388,7 @@ let app = {
   myTeam:"Your Team", oppTeam:"Burrow Bandits", realLeague:false,
   draft:null, draftChannel:null, isCommish:false, members:[], queue:[], draftView:"board", commishMode:false, lineup:null, lineupEdit:false, trades:[], tradeBuilder:null, transactions:[], teamTab:"lineup", txFilter:"all",
   schedule:[], currentWeek:1, lineupsByUser:{},
+  powerupPicks:[], playerWeekStats:{}, playerGameState:{}, weeklyLineups:{}, statsPollId:null,
   pool:null, poolLoading:false, poolError:null, pDetail:null,
   nfl:{ games:null, loading:false, error:null, selected:null, gamecast:null, view:"plays", pollId:null, pollFor:null },
   settings:{
@@ -412,6 +413,8 @@ const $ = (id)=>document.getElementById(id);
 const el = (tag,cls,html)=>{ const e=document.createElement(tag); if(cls)e.className=cls; if(html!=null)e.innerHTML=html; return e; };
 function fmt(s){ const m=Math.floor(s/60), x=Math.floor(s%60); return m+":"+String(x).padStart(2,"0"); }
 function total(arr){ return Math.round(arr.reduce((a,p)=>a+p.pts,0)*10)/10; }
+function myTeamScore(){ return app.realLeague ? computeRealTeamScore(app.user.id, app.currentWeek) : total(myStarters); }
+function oppTeamScore(){ if(!app.realLeague) return total(oppStarters); const opp=weekOpponent(); return opp?computeRealTeamScore(opp, app.currentWeek):0; }
 function clk(){ const q=Math.min(3,Math.floor(app.sim.gameSec/QSEC)); const into=app.sim.gameSec-q*QSEC;
   return { q:q+1, rem:Math.max(0,QSEC-into) }; }
 function feed(t,c){ const {q,rem}=clk(); app.sim.feed.unshift({t:`Q${q} ${fmt(rem)}`,txt:t,c}); app.sim.feed=app.sim.feed.slice(0,40); }
@@ -421,7 +424,23 @@ function ord(n){ return n===1?"st":n===2?"nd":n===3?"rd":"th"; }
 // Quarter-based power-ups: you schedule an effect on a player for a FUTURE quarter.
 function currentQuarter(){ if(!app.sim.running && app.sim.gameSec===0) return 0; if(app.sim.gameSec>=4*QSEC) return 5; return Math.min(4,Math.floor(app.sim.gameSec/QSEC)+1); }
 function findPlayer(id){ return [...myStarters,...oppStarters,...myBench,...oppBench].find(p=>p.id===id); }
-function playerAssigned(pid){ return app.sim.scheduled.some(x=>x.pid===pid) || app.sim.hotStart===pid; }
+function playerAssigned(pid){
+  if(app.realLeague && app.powerupPicks.some(x=>x.week===app.currentWeek && x.player_id===pid)) return true;
+  return app.sim.scheduled.some(x=>x.pid===pid) || app.sim.hotStart===pid;
+}
+function realGameStatusSummary(){
+  const teams=new Set();
+  [...myStarters,...oppStarters].forEach(p=>{ const tid=teamIdForAb(p.teamAb); if(tid!=null) teams.add(tid); });
+  let live=0, final=0, upcoming=0;
+  teams.forEach(tid=>{ const st=app.playerGameState[tid]; if(!st) upcoming++; else if(st.final) final++; else live++; });
+  return {live, final, upcoming, total:teams.size};
+}
+// Real leagues: a player's OWN real NFL game quarter (0 = pregame/unknown, 5 = final), not the shared demo clock.
+function realCurrentQuarterFor(p){
+  const tid=teamIdForAb(p.teamAb); const st=tid!=null && app.playerGameState[tid];
+  if(!st) return 0;
+  return st.final ? 5 : (st.period||0);
+}
 function effectsFor(p,q){
   const list=app.sim.scheduled.filter(x=>x.pid===p.id && x.q===q);
   const e={double:false,frozen:false};
@@ -498,6 +517,7 @@ async function fetchLeagueData(id){
   return { standings };
 }
 function getStandings(){
+  if(app.realLeague) return getRealStandings();
   return (app.leagueData && app.leagueData.standings)
     ? app.leagueData.standings
     : LEAGUE.slice().sort((a,b)=>b.w-a.w||b.pf-a.pf);
@@ -511,6 +531,7 @@ function statusTag(p){
 
 // ============================ SIM LOOP ============================
 function tick(){
+  if(app.realLeague) return; // real leagues are driven by polled ESPN data, not a local clock
   if(!app.user || app.tab!=="matchup" || !app.sim || !app.sim.running) return;
   const adv = BASE_SPD*app.sim.speed*(TICK/1000);
   const prev = app.sim.gameSec;
@@ -567,7 +588,7 @@ function tick(){
   });
 
   if(app.sim.gameSec>=4*QSEC){ app.sim.running=false;
-    const ms=total(myStarters), os=total(oppStarters);
+    const ms=myTeamScore(), os=oppTeamScore();
     feed(`FINAL — ${ms>os?"🏆 You WIN!":ms<os?"💀 You lose.":"🤝 Tie."}`,"ev-pu"); }
   if(app.tab==="matchup") renderMatchup();
 }
@@ -587,16 +608,17 @@ function usePU(k,p){
     app.inv.hotstart--; app.sim.hotStart=p.id; app.armed=null;
     logPU("me","hotstart",p.name,false,1);
     feed(`🔥 Hot Start set on ${p.name} — 3× on your lineup's fastest TD.`,"ev-pu");
+    if(app.realLeague) persistPowerup("hotstart",p.id,p.name,1);
     toast("Hot Start: "+p.name); renderMatchup(); return;
   }
   if(k==="sub"){
-    const cq=currentQuarter();
-    if(!app.sim.running || cq>2){ toast("Emergency Sub: first half of a live game only"); return; }
+    const cq=app.realLeague ? realCurrentQuarterFor(p) : currentQuarter();
+    if(cq<1 || cq>2){ toast(app.realLeague?"Emergency Sub: only while that player's real game is in Q1-Q2":"Emergency Sub: first half of a live game only"); return; }
     openSubModal(p); return;
   }
   // Double / Freeze — one power-up per player per week
   if(playerAssigned(p.id)){ toast(p.name+" already has a power-up this week"); app.armed=null; renderMatchup(); return; }
-  const cq=currentQuarter();
+  const cq=app.realLeague ? realCurrentQuarterFor(p) : currentQuarter();
   const allowed=[]; for(let q=1;q<=4;q++) if(q>cq) allowed.push(q);
   if(!allowed.length){ toast("No upcoming quarters left"); app.armed=null; renderMatchup(); return; }
   showQuarterPicker(k,p,allowed);
@@ -616,7 +638,9 @@ function openSubModal(starter){
     myStarters[si]=bp; myBench[bi]=starter;
     app.inv.sub--; app.armed=null; $("overlay").innerHTML="";
     feed(`🔁 Emergency Sub — ${bp.name} in for ${starter.name} (fresh game)!`,"ev-pu");
-    logPU("me","sub",bp.name,false,currentQuarter());
+    const subQ=currentQuarter();
+    logPU("me","sub",bp.name,false,subQ);
+    if(app.realLeague) persistPowerup("sub",bp.id,bp.name,subQ,starter.id);
     toast("Subbed in "+bp.name); renderMatchup();
   });
   ov.querySelector("#subCancel").onclick=()=>{ $("overlay").innerHTML=""; app.armed=null; renderMatchup(); };
@@ -688,7 +712,14 @@ function renderNav(){
 function renderTab(){
   if(app.tab==="home") renderHome();
   else if(app.tab==="nfl"){ ensureNFL(); renderNFL(); }
-  else if(app.tab==="matchup"){ if(app.realLeague && app.sim && !app.sim.running && app.sim.gameSec===0){ setupRealMatchup(); app.sim=freshSim(); } renderMatchup(); }
+  else if(app.tab==="matchup"){
+    if(app.realLeague){
+      const key=(app.currentWeek||1)+":"+(weekOpponent()||"");
+      if(app._matchupSetupKey!==key){ app._matchupSetupKey=key; setupRealMatchup(); app.sim=freshSim(); }
+      refreshRealInv(); startStatsPoll();
+    }
+    renderMatchup();
+  }
   else if(app.tab==="team") renderTeam();
   else if(app.tab==="players"){ ensurePool(); renderPlayers(); }
   else if(app.tab==="draft"){ ensurePool(); renderDraft(); }
@@ -768,7 +799,7 @@ function copyCode(code){
 async function enterLeague(id, name, code){
   app.connectedLeague=name; app.sbLeagueId=id; app.leagueCode=code||null;
   await loadLeagueData(); await loadDraft(); await loadLineup(); await loadAllLineups(); await loadSchedule(); await loadTrades(); await loadTransactions(); loadQueue(); subscribeDraft();
-  if(app.realLeague) setupRealMatchup();
+  if(app.realLeague){ await loadAllRealScoringData(); setupRealMatchup(); refreshRealInv(); }
   app.sim=freshSim(); app.tab="home"; render();
 }
 async function autoEnterIfSingle(){
@@ -919,7 +950,7 @@ function renderConnect(){
 // ============================ HOME DASHBOARD ============================
 function renderHome(){
   const s=$("screen"); if(!s) return; s.innerHTML="";
-  const ms=total(myStarters), os=total(oppStarters);
+  const ms=myTeamScore(), os=oppTeamScore();
   const done=app.sim.gameSec>=4*QSEC;
 
   const banner=el("div","card");
@@ -974,7 +1005,7 @@ function renderHome(){
 }
 function recapCard(){
   const c=el("div","card"); c.appendChild(el("h2","title","📜 Power-Up Recap"));
-  const ms=total(myStarters), os=total(oppStarters);
+  const ms=myTeamScore(), os=oppTeamScore();
   c.appendChild(el("div","",`<div style="font-weight:800;font-size:15px;margin-bottom:4px">
     ${ms>os?'🏆 You won '+ms.toFixed(1)+'–'+os.toFixed(1):ms<os?'💀 Lost '+ms.toFixed(1)+'–'+os.toFixed(1):'🤝 Tie '+ms.toFixed(1)}</div>`));
   if(!app.sim.puLog.length){ c.appendChild(el("div","muted","<div style='font-size:13px'>No power-ups used this game.</div>")); return c; }
@@ -1012,14 +1043,20 @@ function renderMatchup(){
   nav.append(prev,label,next); s.appendChild(nav);
 
   // scoreboard (works for your game or a spectated one)
-  const lp = m.your ? total(myStarters) : m.as;
-  const rp = m.your ? total(oppStarters) : m.bs;
+  const lp = m.your ? myTeamScore() : m.as;
+  const rp = m.your ? oppTeamScore() : m.bs;
   const sb=el("div","card");
+  const rgs = (app.realLeague && m.your) ? realGameStatusSummary() : null;
+  const clockHtml = rgs
+    ? `<div class="q">${rgs.total===0?"NO GAMES":rgs.final===rgs.total?"FINAL":rgs.live>0?"🔴 LIVE":"UPCOMING"}</div>
+       <div class="tt" style="font-size:12px">${rgs.live} live · ${rgs.final} final</div>
+       <div class="st">${m.your&&app.armed?"⚠ pick target":(rgs.upcoming)+" upcoming"}</div>`
+    : `<div class="q">${app.sim.gameSec===0&&!app.sim.running?"PREGAME":done?"FINAL":"Q"+q}</div>
+       <div class="tt">${done?"0:00":fmt(rem)}</div>
+       <div class="st">${done?"Final":app.sim.running?(m.your&&app.armed?"⚠ pick target":"LIVE"):"Paused"}</div>`;
   sb.innerHTML=`<div class="scoreboard">
     <div class="ts me"><div class="nm">${m.a}</div><div class="pts">${lp.toFixed(1)}</div></div>
-    <div class="clock"><div class="q">${app.sim.gameSec===0&&!app.sim.running?"PREGAME":done?"FINAL":"Q"+q}</div>
-      <div class="tt">${done?"0:00":fmt(rem)}</div>
-      <div class="st">${done?"Final":app.sim.running?(m.your&&app.armed?"⚠ pick target":"LIVE"):"Paused"}</div></div>
+    <div class="clock">${clockHtml}</div>
     <div class="ts op"><div class="nm">${m.b}</div><div class="pts">${rp.toFixed(1)}</div></div>
   </div>`;
   s.appendChild(sb);
@@ -1038,14 +1075,21 @@ function renderMatchup(){
   s.appendChild(el("div","muted",`<div style='font-size:11px;margin:-2px 0 12px;text-align:center'>${app.realLeague?("🗓️ <b>Week "+(app.currentWeek||1)+"</b> · your lineup vs "+app.oppTeam+" — "):""}🏆 <b style='color:var(--gold)'>CCF Score</b> = points + power-ups. ⏱️ Power-ups scheduled <b style='color:var(--gold)'>by quarter</b>. <span style='opacity:.7'>Simulated preview until live scoring.</span></div>`));
 
   const ctl=el("div","row"); ctl.style.marginBottom="14px";
-  const start=el("button","btn", app.sim.running?"⏸ Pause":(app.sim.gameSec>0?"▶ Resume":"▶ Kick Off"));
-  start.onclick=()=>{ if(app.sim.gameSec>=4*QSEC)return; app.sim.running=!app.sim.running;
-    if(app.sim.running&&app.sim.gameSec===0)feed("Kickoff! Live.","ev-pu"); renderMatchup(); };
-  const spd=el("button","btn sec","⏩ "+app.sim.speed+"x");
-  spd.onclick=()=>{ const a=[1,2,4]; app.sim.speed=a[(a.indexOf(app.sim.speed)+1)%3]; renderMatchup(); };
-  const rs=el("button","btn sec","↺ Reset");
-  rs.onclick=()=>{ app.sim=freshSim(); app.armed=null; renderMatchup(); };
-  ctl.append(start,spd,rs); s.appendChild(ctl);
+  if(app.realLeague){
+    const rf=el("button","btn","↻ Refresh live scores");
+    rf.onclick=async ()=>{ rf.textContent="🔄 Checking ESPN…"; rf.disabled=true; await pollRealStats(); renderMatchup(); };
+    ctl.append(rf);
+  } else {
+    const start=el("button","btn", app.sim.running?"⏸ Pause":(app.sim.gameSec>0?"▶ Resume":"▶ Kick Off"));
+    start.onclick=()=>{ if(app.sim.gameSec>=4*QSEC)return; app.sim.running=!app.sim.running;
+      if(app.sim.running&&app.sim.gameSec===0)feed("Kickoff! Live.","ev-pu"); renderMatchup(); };
+    const spd=el("button","btn sec","⏩ "+app.sim.speed+"x");
+    spd.onclick=()=>{ const a=[1,2,4]; app.sim.speed=a[(a.indexOf(app.sim.speed)+1)%3]; renderMatchup(); };
+    const rs=el("button","btn sec","↺ Reset");
+    rs.onclick=()=>{ app.sim=freshSim(); app.armed=null; renderMatchup(); };
+    ctl.append(start,spd,rs);
+  }
+  s.appendChild(ctl);
 
   if(done && app.sim.puLog.length) s.appendChild(recapCard());
 
@@ -1118,11 +1162,17 @@ function playerCell(p,side,armedCfg,cq,leftSide){
   const cell=el("div","mcell "+(leftSide?"l":"r"));
   if(!p){ cell.innerHTML="<span class='muted'>—</span>"; return cell; }
   const tappable=armedCfg && armedCfg.target===side;
-  const sched=app.sim.scheduled.filter(x=>x.pid===p.id);
+  let sched=app.sim.scheduled.filter(x=>x.pid===p.id);
+  let hotOn = app.sim.hotStart===p.id;
+  if(app.realLeague && !sched.length){
+    const persisted=app.powerupPicks.filter(x=>x.week===app.currentWeek && x.player_id===p.id && x.powerup_key!=="hotstart");
+    sched=persisted.map(x=>({key:x.powerup_key,pid:p.id,q:x.quarter}));
+    if(!hotOn) hotOn=app.powerupPicks.some(x=>x.week===app.currentWeek && x.player_id===p.id && x.powerup_key==="hotstart");
+  }
   const activeNow = cq>=1 && cq<=4 && sched.some(x=>x.q===cq);
   if(tappable) cell.classList.add("tappable");
   if(activeNow) cell.classList.add("boosted");
-  const hot = app.sim.hotStart===p.id ? "🔥" : "";
+  const hot = hotOn ? "🔥" : "";
   const tags=[hot, ...sched.map(x=>POWERUPS[x.key].icon+"Q"+x.q)].filter(Boolean).join(" ");
   const sub = tags || statLine(p);
   const av=avatarHTML(p);
@@ -1482,6 +1532,8 @@ function subscribeDraft(){
   const refreshTx=async ()=>{ await loadTransactions(); if(!app.showConfirm && app.user && app.connectedLeague) render(); };
   const refreshSchedule=async ()=>{ await loadSchedule(); if(app.realLeague) setupRealMatchup();
     if(!app.showConfirm && app.user && app.connectedLeague) render(); };
+  const refreshScoring=async ()=>{ if(!app.realLeague) return; await loadAllRealScoringData(); refreshRealInv();
+    if(!app.showConfirm && app.user && app.connectedLeague) render(); };
   app.draftChannel=sb.channel("draft-"+lid)
     .on("postgres_changes",{event:"*",schema:"public",table:"draft_picks",filter:"league_id=eq."+lid}, refresh)
     .on("postgres_changes",{event:"*",schema:"public",table:"drafts",filter:"league_id=eq."+lid}, refresh)
@@ -1489,6 +1541,9 @@ function subscribeDraft(){
     .on("postgres_changes",{event:"*",schema:"public",table:"transactions",filter:"league_id=eq."+lid}, refreshTx)
     .on("postgres_changes",{event:"*",schema:"public",table:"schedule",filter:"league_id=eq."+lid}, refreshSchedule)
     .on("postgres_changes",{event:"UPDATE",schema:"public",table:"leagues",filter:"id=eq."+lid}, refreshSchedule)
+    .on("postgres_changes",{event:"*",schema:"public",table:"powerup_picks",filter:"league_id=eq."+lid}, refreshScoring)
+    .on("postgres_changes",{event:"*",schema:"public",table:"weekly_lineups",filter:"league_id=eq."+lid}, refreshScoring)
+    .on("postgres_changes",{event:"*",schema:"public",table:"player_week_stats"}, refreshScoring)
     .subscribe();
 }
 function unsubscribeDraft(){ if(app.draftChannel){ try{ sb.removeChannel(app.draftChannel); }catch(e){} app.draftChannel=null; } }
@@ -1755,6 +1810,210 @@ function setupRealMatchup(){
   oppStarters.length=0; op.startersOut.forEach(p=>oppStarters.push(p));
   oppBench.length=0; op.bench.forEach(p=>oppBench.push(p));
 }
+
+// ============================ REAL SCORING ENGINE (Milestone 4c) ============================
+// Real leagues: power-up choices persist to Supabase, and real per-quarter
+// fantasy points are reconstructed by polling ESPN's live box score while a
+// game is in progress (diffing cumulative totals against the last poll and
+// attributing the gain to whichever quarter is live right now). Defense
+// "points allowed" is exact (from the real linescore), not diffed.
+function defBracket(pa){
+  if(pa<=0) return 10; if(pa<=6) return 7; if(pa<=13) return 4;
+  if(pa<=20) return 1; if(pa<=27) return 0; if(pa<=34) return -1; return -4;
+}
+function boxAthleteFP(groupName, labels, stats){
+  const sc=app.settings.scoring;
+  const gi=(lbl)=>{ const i=labels.indexOf(lbl); return i>=0?(parseFloat(String(stats[i]||"0").replace(/,/g,""))||0):0; };
+  let fp=0, qtd=0;
+  if(groupName==="passing"){ fp+=gi("YDS")/(sc.passYdsPerPt||25); fp+=gi("TD")*(sc.passTD||4); fp+=gi("INT")*(sc.passInt||-2); }
+  else if(groupName==="rushing"){ fp+=gi("YDS")/(sc.rushYdsPerPt||10); const td=gi("TD"); fp+=td*(sc.rushTD||6); qtd+=td; }
+  else if(groupName==="receiving"){ fp+=gi("REC")*(sc.ppr||0); fp+=gi("YDS")/(sc.recYdsPerPt||10); const td=gi("TD"); fp+=td*(sc.recTD||6); qtd+=td; }
+  else if(groupName==="fumbles"){ fp+=gi("LOST")*(sc.fumLost||-2); }
+  return {fp,qtd};
+}
+function teamIdForAb(ab){
+  if(!app._teamIdMap){ app._teamIdMap={}; (app.pool||[]).forEach(p=>{ if(p.teamAb && p.teamId) app._teamIdMap[p.teamAb]=p.teamId; }); }
+  return app._teamIdMap[ab];
+}
+async function findGameId(teamId, wk){
+  app._gameIdCache = app._gameIdCache || {};
+  const ck=teamId+"_"+wk; if(app._gameIdCache[ck]!==undefined) return app._gameIdCache[ck];
+  try{
+    const sd=await (await fetch(ESPN+"/teams/"+teamId+"/schedule")).json();
+    const ev=(sd.events||[]).find(e=>e.week && e.week.number===wk);
+    app._gameIdCache[ck]=ev?ev.id:null;
+  }catch(e){ app._gameIdCache[ck]=null; }
+  return app._gameIdCache[ck];
+}
+async function fetchGameBoxFP(eventId){
+  const d=await (await fetch(ESPN+"/summary?event="+eventId)).json();
+  const comp=(d.header&&d.header.competitions&&d.header.competitions[0])||{};
+  const status=comp.status||{};
+  const final=!!(status.type&&status.type.completed);
+  const period= final?4:(status.period||1);
+  const byAthlete={};
+  ((d.boxscore&&d.boxscore.players)||[]).forEach(tm=>{
+    (tm.statistics||[]).forEach(g=>{
+      (g.athletes||[]).forEach(a=>{
+        const id=String((a.athlete&&a.athlete.id)||""); if(!id) return;
+        const r=boxAthleteFP(g.name, g.labels||[], a.stats||[]);
+        if(!byAthlete[id]) byAthlete[id]={fp:0,qtd:0};
+        byAthlete[id].fp+=r.fp; byAthlete[id].qtd+=r.qtd;
+      });
+    });
+  });
+  const linescores={};
+  (comp.competitors||[]).forEach(c=>{
+    const tid=String((c.team&&c.team.id)||"");
+    linescores[tid]=(c.linescores||[]).map(l=>l.value||0);
+  });
+  return {period, final, byAthlete, linescores};
+}
+// Poll ESPN for every real player in the current matchup and persist real
+// per-quarter fantasy points. Any manager's open app contributes a poll —
+// all clients observe the same real-world truth, so last write wins fine.
+async function pollRealStats(){
+  if(!app.realLeague || !app.sbLeagueId) return;
+  ensurePool();
+  const wk=app.currentWeek||1;
+  const all=[...myStarters,...myBench,...oppStarters,...oppBench].filter(p=>p.id && !p.id.startsWith("e_"));
+  const byTeam={};
+  all.forEach(p=>{ const tid=teamIdForAb(p.teamAb); if(!tid) return; (byTeam[tid]=byTeam[tid]||[]).push(p); });
+  const updates=[];
+  for(const teamId of Object.keys(byTeam)){
+    const eventId=await findGameId(teamId, wk); if(!eventId) continue;
+    let box; try{ box=await fetchGameBoxFP(eventId); }catch(e){ continue; }
+    app.playerGameState[teamId]={period:box.period, final:box.final};
+    for(const p of byTeam[teamId]){
+      let curFp, curQtd=0, defQuarterly=null;
+      if(p.pos==="DEF"){
+        const opp=Object.keys(box.linescores).find(t=>t!==teamId);
+        const oppLs=opp?box.linescores[opp]:[];
+        defQuarterly = oppLs.slice(0, box.period).map(defBracket);
+        curFp = defQuarterly.reduce((s,v)=>s+v,0);
+      } else {
+        const espnId=(p.id||"").replace(/^e/,"");
+        const r=box.byAthlete[espnId]; if(!r) continue;
+        curFp=r.fp; curQtd=r.qtd;
+      }
+      updates.push({athlete_id:p.id, week:wk, period:box.period, curFp, curQtd, defQuarterly, isDef:p.pos==="DEF"});
+    }
+  }
+  if(!updates.length) return;
+  const {data:existing}=await sb.from("player_week_stats").select("*")
+    .in("athlete_id", updates.map(u=>u.athlete_id)).eq("week",wk);
+  const byId={}; (existing||[]).forEach(r=>byId[r.athlete_id]=r);
+  const rows=updates.map(u=>{
+    const prev=byId[u.athlete_id];
+    const qpts=(prev&&prev.q_pts)?{...prev.q_pts}:{};
+    let prevQtd=prev?(prev.prev_qtd||0):0;
+    if(u.isDef){
+      // exact per-quarter from the real linescore — safe to overwrite each poll
+      u.defQuarterly.forEach((fp,i)=>{ qpts[i+1]={fp:Math.round(fp*10)/10, qtd:0}; });
+    } else {
+      const prevTotal=prev?prev.prev_total:0;
+      const delta=Math.max(0, u.curFp-prevTotal);
+      const tdDelta=Math.max(0, u.curQtd-prevQtd);
+      const cur=qpts[u.period]||{fp:0,qtd:0};
+      qpts[u.period]={fp:Math.round((cur.fp+delta)*10)/10, qtd:cur.qtd+tdDelta};
+      prevQtd=u.curQtd;
+    }
+    return { athlete_id:u.athlete_id, week:wk, season:2026, q_pts:qpts, prev_total:u.curFp, prev_qtd:prevQtd };
+  });
+  try{ await sb.from("player_week_stats").upsert(rows); }catch(e){}
+  await loadPlayerWeekStats(wk);
+}
+function startStatsPoll(){
+  if(app.statsPollId || !app.realLeague) return;
+  pollRealStats();
+  app.statsPollId=setInterval(()=>{ if(app.tab==="matchup") pollRealStats(); else stopStatsPoll(); }, 30000);
+}
+function stopStatsPoll(){ if(app.statsPollId){ clearInterval(app.statsPollId); app.statsPollId=null; } }
+async function loadPlayerWeekStats(wk){
+  const ids=[...new Set((app.draft?app.draft.picks:[]).map(p=>p.player_id))]; if(!ids.length) return;
+  try{ const {data}=await sb.from("player_week_stats").select("*").in("athlete_id",ids).eq("week",wk);
+    app.playerWeekStats[wk]={}; (data||[]).forEach(r=>{ app.playerWeekStats[wk][r.athlete_id]=r; });
+    if(app.tab==="matchup") renderMatchup(); }catch(e){}
+}
+async function loadAllRealScoringData(){
+  if(!app.sbLeagueId || !app.realLeague) return;
+  const ids=[...new Set((app.draft?app.draft.picks:[]).map(p=>p.player_id))];
+  try{
+    const [pu,wl,pws]=await Promise.all([
+      sb.from("powerup_picks").select("*").eq("league_id",app.sbLeagueId),
+      sb.from("weekly_lineups").select("*").eq("league_id",app.sbLeagueId),
+      ids.length ? sb.from("player_week_stats").select("*").in("athlete_id",ids) : Promise.resolve({data:[]}),
+    ]);
+    app.powerupPicks=pu.data||[];
+    app.weeklyLineups={}; (wl.data||[]).forEach(r=>{ (app.weeklyLineups[r.week]=app.weeklyLineups[r.week]||{})[r.user_id]=r.starters; });
+    app.playerWeekStats={}; (pws.data||[]).forEach(r=>{ (app.playerWeekStats[r.week]=app.playerWeekStats[r.week]||{})[r.athlete_id]=r; });
+  }catch(e){}
+}
+async function persistPowerup(key,pid,pname,q,targetId){
+  if(!app.realLeague) return;
+  try{ const {error}=await sb.rpc("log_powerup",{lid:app.sbLeagueId, wk:app.currentWeek, pid, pname, key, q, target:targetId||null});
+    if(error) throw error; await loadAllRealScoringData(); refreshRealInv(); }
+  catch(e){ toast(e.message||"Couldn't save power-up"); }
+}
+// For real leagues, weekly inventory is derived from persisted picks (so it
+// survives refreshes/devices and naturally refills when the week advances).
+function refreshRealInv(){
+  if(!app.realLeague || !app.user) return;
+  const mine=app.powerupPicks.filter(p=>p.week===app.currentWeek && p.user_id===app.user.id);
+  ["double","freeze","sub","hotstart"].forEach(k=>{ app.inv[k]= mine.some(p=>p.powerup_key===k) ? 0 : 1; });
+}
+function realQuarterly(pid, wk){
+  const row=app.playerWeekStats[wk] && app.playerWeekStats[wk][pid];
+  const q={1:0,2:0,3:0,4:0}, qtd={1:0,2:0,3:0,4:0};
+  if(row && row.q_pts) for(let i=1;i<=4;i++){ const v=row.q_pts[i]||row.q_pts[String(i)]; if(v){ q[i]=v.fp||0; qtd[i]=v.qtd||0; } }
+  return {q, qtd};
+}
+function slotPlayerIds(uid, wk){
+  const picks=(app.draft?app.draft.picks:[]).filter(p=>p.user_id===uid);
+  const snap=app.weeklyLineups[wk] && app.weeklyLineups[wk][uid];
+  const cur= uid===(app.user&&app.user.id) ? app.lineup : app.lineupsByUser[uid];
+  if(Array.isArray(snap) && snap.length===SLOTS.length) return snap;
+  if(Array.isArray(cur) && cur.length===SLOTS.length) return cur;
+  return defaultStarters(picks);
+}
+// Reconstructs a manager's real weekly score from real per-quarter stats +
+// whatever power-ups were actually spent on those specific players/quarters.
+function computeRealTeamScore(uid, wk){
+  const picksWk=app.powerupPicks.filter(p=>p.week===wk);
+  const byPlayerPU={}; picksWk.forEach(p=>{ byPlayerPU[p.player_id]=p; });
+  const subOut={}; picksWk.filter(p=>p.powerup_key==="sub" && p.target_player_id).forEach(p=>{ subOut[p.target_player_id]={inId:p.player_id, q:p.quarter}; });
+  const hotStartPick=picksWk.find(p=>p.powerup_key==="hotstart" && p.user_id===uid);
+  const starterIds=slotPlayerIds(uid, wk).filter(Boolean);
+  let total=0, bestTD=null;
+  starterIds.forEach(pid=>{
+    const swap=subOut[pid];
+    for(let q=1;q<=4;q++){
+      const contributor=(swap && q>=swap.q) ? swap.inId : pid;
+      const rq=realQuarterly(contributor, wk);
+      let fp=rq.q[q];
+      const pu=byPlayerPU[contributor];
+      if(pu && pu.quarter===q){ if(pu.powerup_key==="double") fp*=2; else if(pu.powerup_key==="freeze") fp=0; }
+      total+=fp;
+      if(rq.qtd[q]>0 && (!bestTD || q<bestTD.q)) bestTD={q,pid:contributor};
+    }
+  });
+  if(hotStartPick && bestTD && bestTD.pid===hotStartPick.player_id) total+=2*(app.settings.scoring.rushTD||6);
+  return Math.round(total*10)/10;
+}
+function getRealStandings(){
+  const rows=(app.members||[]).map(m=>({team:m.team_name||"Team", w:0,l:0,t:0, pf:0, pa:0, me:m.user_id===(app.user&&app.user.id), uid:m.user_id}));
+  const byUid={}; rows.forEach(r=>byUid[r.uid]=r);
+  for(let wk=1; wk<(app.currentWeek||1); wk++){
+    app.schedule.filter(g=>g.week===wk).forEach(g=>{
+      const H=byUid[g.home_user], A=byUid[g.away_user]; if(!H||!A) return;
+      const hs=computeRealTeamScore(g.home_user,wk), as=computeRealTeamScore(g.away_user,wk);
+      H.pf+=hs; H.pa+=as; A.pf+=as; A.pa+=hs;
+      if(hs>as){ H.w++; A.l++; } else if(as>hs){ A.w++; H.l++; } else { H.t++; A.t++; }
+    });
+  }
+  rows.forEach(r=>{ r.pf=Math.round(r.pf*10)/10; r.pa=Math.round(r.pa*10)/10; });
+  return rows.sort((a,b)=>b.w-a.w||b.pf-a.pf);
+}
 function openBenchMove(pick){
   const ov=$("overlay"); const myPicks=myDraftPicks();
   const items=SLOTS.map((s,i)=>({s,i})).filter(o=>o.s.pos.includes(pick.pos)).map(o=>{
@@ -1907,12 +2166,12 @@ function renderLeague(){
   s.appendChild(ts);
 
   if(app.leagueTab==="scoreboard"){
-    const matchups=[{a:app.myTeam,b:app.oppTeam,as:total(myStarters),bs:total(oppStarters),me:true}, ...(app.realLeague?[]:OTHER_MATCHUPS)];
+    const matchups=[{a:app.myTeam,b:app.oppTeam,as:myTeamScore(),bs:oppTeamScore(),me:true}, ...(app.realLeague?[]:OTHER_MATCHUPS)];
     if(app.leagueMatchup!=null && matchups[app.leagueMatchup]){
       renderMatchupDetail(s, matchups[app.leagueMatchup]);
     } else {
-      s.appendChild(el("div","muted","<div style='font-size:11px;margin-bottom:10px;text-align:center'>Week 11 · CCF Scores (power-up adjusted) — tap a matchup for lineups.</div>"));
-      if(app.realLeague) s.appendChild(el("div","muted","<div style='font-size:11px;margin-bottom:10px;text-align:center'>Weekly matchups + scores populate once your commissioner starts the season.</div>"));
+      s.appendChild(el("div","muted",`<div style='font-size:11px;margin-bottom:10px;text-align:center'>Week ${app.currentWeek||1} · CCF Scores (power-up adjusted) — tap a matchup for lineups.</div>`));
+      if(app.realLeague && !app.schedule.length) s.appendChild(el("div","muted","<div style='font-size:11px;margin-bottom:10px;text-align:center'>Weekly matchups + scores populate once your commissioner generates the schedule.</div>"));
       matchups.forEach((m,i)=>{
         const c=el("div","card"); c.style.cursor="pointer";
         c.innerHTML=`<div class="row"><div><b style="color:${m.me?'var(--you)':'var(--txt)'}">${m.a}</b></div><b>${(+m.as).toFixed(1)}</b></div>
@@ -2045,7 +2304,7 @@ function renderMatchupDetail(s,m){
   const back=el("button","btn sec"); back.style.width="100%"; back.style.marginBottom="12px"; back.textContent="← All matchups";
   back.onclick=()=>{ app.leagueMatchup=null; renderLeague(); }; s.appendChild(back);
   const aRost=m.me?myStarters:genRoster(m.a), bRost=m.me?oppStarters:genRoster(m.b);
-  const aScore=m.me?total(myStarters):(+m.as), bScore=m.me?total(oppStarters):(+m.bs);
+  const aScore=m.me?myTeamScore():(+m.as), bScore=m.me?oppTeamScore():(+m.bs);
   s.appendChild(el("div","card",`<div class="scoreboard">
     <div class="ts me"><div class="nm">${m.a}</div><div class="pts">${aScore.toFixed(1)}</div></div>
     <div class="clock"><div class="q">WK 11</div><div class="st">${m.me?'your game':'league game'}</div></div>
