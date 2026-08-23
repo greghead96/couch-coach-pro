@@ -189,11 +189,35 @@ async function pollLeague(league) {
   console.log(`league ${league.id}: polled ${rows.length} players for week ${wk}`);
 }
 
-async function main() {
+async function pollOnce() {
   const leagues = await sb("leagues?select=id,settings,current_week&current_week=not.is.null");
-  console.log(`polling ${leagues.length} league(s)`);
   for (const league of leagues) {
     try { await pollLeague(league); } catch (e) { console.error(`league ${league.id} failed:`, e.message); }
+  }
+  return leagues.length;
+}
+
+// The GitHub Actions trigger only fires every 5 minutes (its own minimum), but
+// each run loops internally every ~20s for its own ~4.5-minute window before
+// exiting — so the next scheduled run picks up right as this one finishes,
+// giving near-continuous ~20s-cadence polling instead of one-shot-every-5-min.
+// Public repos get unlimited free Actions minutes, so this costs nothing extra.
+const LOOP_BUDGET_MS = 270_000; // 4.5 min — leaves headroom before the next 5-min trigger
+const POLL_INTERVAL_MS = 20_000;
+
+async function main() {
+  const start = Date.now();
+  let cycle = 0;
+  while (true) {
+    cycle++;
+    try {
+      const n = await pollOnce();
+      console.log(`cycle ${cycle}: polled ${n} league(s), ${((Date.now() - start) / 1000).toFixed(0)}s elapsed`);
+    } catch (e) {
+      console.error(`cycle ${cycle} failed:`, e.message);
+    }
+    if (Date.now() - start >= LOOP_BUDGET_MS) break;
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
   }
 }
 

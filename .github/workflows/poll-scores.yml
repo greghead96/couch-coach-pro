@@ -5,9 +5,18 @@ on:
     - cron: "*/5 * * * *"
   workflow_dispatch: {}
 
+# Each run loops internally for ~4.5 minutes (see scripts/poll-scores.js), so
+# runs shouldn't overlap in practice — this just guarantees it: if one ever
+# runs long, the next scheduled trigger queues instead of running concurrently
+# (concurrent runs could double-count the same delta against the same stale
+# "previous" snapshot).
+concurrency:
+  group: poll-scores
+
 jobs:
   poll:
     runs-on: ubuntu-latest
+    timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
