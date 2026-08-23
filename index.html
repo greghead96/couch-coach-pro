@@ -715,7 +715,7 @@ function renderTab(){
   else if(app.tab==="nfl"){ ensureNFL(); renderNFL(); }
   else if(app.tab==="matchup"){
     if(app.realLeague){
-      const key=(app.currentWeek||1)+":"+(weekOpponent()||"");
+      const key=matchupSetupKey();
       if(app._matchupSetupKey!==key){ app._matchupSetupKey=key; setupRealMatchup(); app.sim=freshSim(); }
       refreshRealInv(); startStatsPoll();
     }
@@ -1535,6 +1535,8 @@ function subscribeDraft(){
     if(!app.showConfirm && app.user && app.connectedLeague) render(); };
   const refreshScoring=async ()=>{ if(!app.realLeague) return; await loadAllRealScoringData(); refreshRealInv();
     if(!app.showConfirm && app.user && app.connectedLeague) render(); };
+  const refreshLineups=async ()=>{ if(!app.realLeague) return; await loadLineup(); await loadAllLineups();
+    if(!app.showConfirm && app.user && app.connectedLeague) render(); };
   app.draftChannel=sb.channel("draft-"+lid)
     .on("postgres_changes",{event:"*",schema:"public",table:"draft_picks",filter:"league_id=eq."+lid}, refresh)
     .on("postgres_changes",{event:"*",schema:"public",table:"drafts",filter:"league_id=eq."+lid}, refresh)
@@ -1542,6 +1544,7 @@ function subscribeDraft(){
     .on("postgres_changes",{event:"*",schema:"public",table:"transactions",filter:"league_id=eq."+lid}, refreshTx)
     .on("postgres_changes",{event:"*",schema:"public",table:"schedule",filter:"league_id=eq."+lid}, refreshSchedule)
     .on("postgres_changes",{event:"UPDATE",schema:"public",table:"leagues",filter:"id=eq."+lid}, refreshSchedule)
+    .on("postgres_changes",{event:"*",schema:"public",table:"lineups",filter:"league_id=eq."+lid}, refreshLineups)
     .on("postgres_changes",{event:"*",schema:"public",table:"powerup_picks",filter:"league_id=eq."+lid}, refreshScoring)
     .on("postgres_changes",{event:"*",schema:"public",table:"weekly_lineups",filter:"league_id=eq."+lid}, refreshScoring)
     .on("postgres_changes",{event:"*",schema:"public",table:"player_week_stats"}, refreshScoring)
@@ -1801,6 +1804,17 @@ function weekOpponent(){
   const g=(app.schedule||[]).find(x=>x.week===wk && (x.home_user===app.user.id||x.away_user===app.user.id));
   return g ? (g.home_user===app.user.id?g.away_user:g.home_user) : null;
 }
+// Rebuild the matchup roster whenever the underlying data actually changes
+// (new draft picks, a newly-saved lineup, a new week/opponent) — but not on
+// every incidental re-render, which would also wipe an in-progress Emergency
+// Sub swap (it only mutates the local arrays, not app.lineup/app.draft).
+function matchupSetupKey(){
+  const oppId=weekOpponent();
+  const picksOf=uid=>(app.draft&&app.draft.picks||[]).filter(p=>p.user_id===uid).map(p=>p.player_id).sort().join(",");
+  const myLineup=(app.lineup||[]).join(",");
+  const oppLineup=(oppId&&app.lineupsByUser[oppId]||[]).join(",");
+  return [app.currentWeek||1, oppId||"", picksOf(app.user&&app.user.id), picksOf(oppId), myLineup, oppLineup].join("|");
+}
 function setupRealMatchup(){
   const oppId=weekOpponent();
   app.oppTeam = oppId ? teamNameOf(oppId) : "(no game scheduled)";
@@ -1849,7 +1863,13 @@ function teamDefenseBonusFP(statGroups){
   return {fp:Math.round(fp*10)/10, td};
 }
 function teamIdForAb(ab){
-  if(!app._teamIdMap){ app._teamIdMap={}; (app.pool||[]).forEach(p=>{ if(p.teamAb && p.teamId) app._teamIdMap[p.teamAb]=p.teamId; }); }
+  ensurePool();
+  // rebuild whenever app.pool itself changes (was previously cached even
+  // when pool hadn't loaded yet, so it got stuck empty forever)
+  if(app._teamIdMapPool!==app.pool){
+    app._teamIdMapPool=app.pool; app._teamIdMap={};
+    (app.pool||[]).forEach(p=>{ if(p.teamAb && p.teamId) app._teamIdMap[p.teamAb]=p.teamId; });
+  }
   return app._teamIdMap[ab];
 }
 async function findGameId(teamId, wk){
