@@ -218,7 +218,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260823f";
+const BUILD_ID = "20260823g";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -408,7 +408,7 @@ let app = {
   realData:false, chat:CHAT_SEED.slice(),
   leagueId:null, leagueData:null, sleeperUserId:null,
   sim:null, armed:null, matchupIdx:0,
-  leagueMatchup:null, schedTeam:"Your Team", pFilter:"ALL", pSearch:"", pSort:"rank", pView:"players", drafted:[], pStatTab:null,
+  leagueMatchup:null, schedTeam:"Your Team", pFilter:"ALL", pTeam:"ALL", pShowAll:false, pSearch:"", pSort:"rank", pView:"players", drafted:[], pStatTab:null,
   myTeam:"Your Team", oppTeam:"Burrow Bandits", realLeague:false,
   draft:null, draftChannel:null, isCommish:false, members:[], queue:[], draftView:"board", commishMode:false, lineup:null, lineupEdit:false, trades:[], tradeBuilder:null, transactions:[], teamTab:"lineup", txFilter:"all",
   schedule:[], currentWeek:1, lineupsByUser:{},
@@ -790,8 +790,16 @@ function renderAuth(){
       }
       await loadMyLeagues(); app.authBusy=false;
       if(!(await autoEnterIfSingle())) render();
-    }catch(e){ app.authBusy=false; app.authErr=(e&&e.message)||"Auth failed."; render(); }
+    }catch(e){ app.authBusy=false; app.authErr=friendlyAuthError(e); render(); }
   };
+}
+function friendlyAuthError(e){
+  const m=((e&&e.message)||"").toLowerCase();
+  if(m.includes("invalid login") || m.includes("invalid credentials") || m.includes("invalid email or password")) return "Incorrect username or password.";
+  if(m.includes("already registered") || m.includes("already exists")) return "An account with that email already exists — try logging in instead.";
+  if(m.includes("email not confirmed")) return "Check your email for the confirmation link before logging in.";
+  if(m.includes("load failed") || m.includes("failed to fetch") || m.includes("network")) return "Couldn't reach the server — check your connection and try again.";
+  return "Incorrect username or password.";
 }
 async function loadMyLeagues(){
   try{ const { data } = await sb.from("league_members").select("league_id, team_name, role, leagues(name, join_code)").eq("user_id", app.user.id);
@@ -1516,6 +1524,15 @@ function sortControl(s){
   const c=el("div","chip on"); c.textContent="Rankings"; wrap.appendChild(c);
   s.appendChild(wrap);
 }
+function playersSortControl(s){
+  const wrap=el("div","chips"); wrap.style.marginBottom="10px";
+  wrap.appendChild(el("span","muted",`<span style="font-size:10px;align-self:center;margin-right:4px">Sort:</span>`));
+  [["rank","Rank"],["pos","Position"],["name","Name"]].forEach(([id,lab])=>{
+    const c=el("div","chip"+(( app.pSort||"rank")===id?" on":"")); c.textContent=lab;
+    c.onclick=()=>{ app.pSort=id; renderPlayersList(); }; wrap.appendChild(c);
+  });
+  s.appendChild(wrap);
+}
 function sortPool(list){
   const s=app.pSort||"rank";
   if(s==="pos") return list.slice().sort((a,b)=>(POS_ORDER[a.pos]-POS_ORDER[b.pos])||a.name.localeCompare(b.name));
@@ -1550,7 +1567,17 @@ function renderPlayers(){
   search.style.marginBottom="10px";
   search.oninput=()=>{ app.pSearch=search.value; renderPlayersList(); };
   s.appendChild(search);
-  posChips(s); sortControl(s);
+  const filterRow=el("div","row"); filterRow.style.marginBottom="10px"; filterRow.style.gap="8px";
+  const teamSel=el("select","input"); teamSel.style.marginBottom="0"; teamSel.style.flex="1";
+  const teams=[...new Set((app.pool||[]).map(p=>p.teamAb).filter(Boolean))].sort();
+  teamSel.innerHTML=`<option value="ALL">All Teams</option>`+teams.map(t=>`<option value="${t}"${app.pTeam===t?" selected":""}>${t}</option>`).join("");
+  teamSel.onchange=()=>{ app.pTeam=teamSel.value; renderPlayersList(); };
+  filterRow.appendChild(teamSel);
+  const allBtn=el("button","btn sec"+(app.pShowAll?" on":"")); allBtn.style.whiteSpace="nowrap"; allBtn.textContent=app.pShowAll?"✓ All Players":"Show All Players";
+  allBtn.onclick=()=>{ app.pShowAll=!app.pShowAll; renderPlayers(); };
+  filterRow.appendChild(allBtn);
+  s.appendChild(filterRow);
+  posChips(s); playersSortControl(s);
   const listAnchor=el("div"); listAnchor.id="playersList"; s.appendChild(listAnchor);
   renderPlayersList();
   setTimeout(()=>search.focus(), 0);
@@ -1559,13 +1586,28 @@ function renderPlayersList(){
   const s=$("playersList"); if(!s) return; s.innerHTML="";
   // In a real league, "taken" players = everyone's draft picks; otherwise the mock roster
   const draftPicks = (app.realLeague && app.draft) ? app.draft.picks : [];
+  const memMap = (app.draft && app.draft.memMap) || {};
+  const ownerOf = {}; draftPicks.forEach(p=>{ ownerOf[p.player_id]=memMap[p.user_id]||"Someone"; });
   const takenIds = new Set( app.realLeague ? draftPicks.map(p=>p.player_id) : [...myStarters,...myBench].map(p=>p.id) );
   const q=(app.pSearch||"").trim().toLowerCase();
   const matchesSearch=p=> !q || (p.name||"").toLowerCase().includes(q) || (p.teamAb||"").toLowerCase().includes(q);
-  const pool=sortPool(availablePlayers().filter(p=>!takenIds.has(p.id)).filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter).filter(matchesSearch));
+  const matchesTeam=p=> app.pTeam==="ALL" || p.teamAb===app.pTeam;
+  let base=availablePlayers().filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter).filter(matchesSearch).filter(matchesTeam);
+  if(!app.pShowAll) base=base.filter(p=>!takenIds.has(p.id));
+  const pool=sortPool(base);
   const c=el("div","card");
-  if(!pool.length) c.appendChild(el("div","muted","<div style='font-size:13px'>No available players at this position.</div>"));
-  pool.slice(0,60).forEach(p=> c.appendChild(faRow(p, app.realLeague?"＋":"+ Add", app.realLeague?" sec":"", ()=>{ if(app.realLeague){ toast("Add/drop (waivers) is coming in a future update"); } else addPlayer(p); })));
+  c.appendChild(el("h2","title", app.pShowAll?"All Players":"Available"));
+  if(!pool.length) c.appendChild(el("div","muted","<div style='font-size:13px'>No players match these filters.</div>"));
+  pool.slice(0,60).forEach(p=>{
+    const owner=app.realLeague && ownerOf[p.id];
+    if(owner){
+      const row=faRow(p,"","",()=>{});
+      const btnSlot=row.lastElementChild; btnSlot.innerHTML=`<span class="muted" style="font-size:11px;margin-left:auto">🔒 ${owner}</span>`;
+      c.appendChild(row);
+    } else {
+      c.appendChild(faRow(p, app.realLeague?"＋":"+ Add", app.realLeague?" sec":"", ()=>{ if(app.realLeague){ toast("Add/drop (waivers) is coming in a future update"); } else addPlayer(p); }));
+    }
+  });
   s.appendChild(c);
   const rc=el("div","card"); rc.appendChild(el("h2","title","Your Roster"));
   if(app.realLeague){
