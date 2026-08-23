@@ -218,7 +218,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260823a";
+const BUILD_ID = "20260823b";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -1209,7 +1209,61 @@ function playerCell(p,side,armedCfg,cq,leftSide){
     <div class="mc-stat">${sub}</div><div class="mc-pt">${p.pts.toFixed(1)}</div></div>`;
   cell.innerHTML = leftSide ? body+av : av+body;
   if(tappable) cell.onclick=()=>usePU(app.armed,p);
+  if(app.realLeague){
+    const ptEl=cell.querySelector(".mc-pt");
+    if(ptEl){ ptEl.style.cursor="pointer"; ptEl.style.textDecoration="underline dotted";
+      ptEl.onclick=(e)=>{ e.stopPropagation(); openPlayerBoxScore(p); }; }
+  }
   return cell;
+}
+// Per-quarter stat + power-up breakdown, tap a player's FP to open — like
+// ESPN's box score, but also shows exactly which quarter a power-up hit.
+function statLineForQuarter(pos, stats){
+  if(!stats) return "—";
+  const parts=[];
+  if(pos==="DEF"){
+    if(stats.pointsAllowed!=null) parts.push(stats.pointsAllowed+" pts allowed");
+    if(stats.sacks) parts.push(stats.sacks+" sack"+(stats.sacks!==1?"s":""));
+    if(stats.ints) parts.push(stats.ints+" INT"+(stats.ints!==1?"s":""));
+    if(stats.defTD) parts.push(stats.defTD+" TD");
+  } else {
+    if(stats.passYds) parts.push(stats.passYds+" pass yd"+(stats.passYds!==1?"s":""));
+    if(stats.passTD) parts.push(stats.passTD+" pass TD");
+    if(stats.passInt) parts.push(stats.passInt+" INT");
+    if(stats.rushYds) parts.push(stats.rushYds+" rush yd"+(stats.rushYds!==1?"s":""));
+    if(stats.rushTD) parts.push(stats.rushTD+" rush TD");
+    if(stats.rec) parts.push(stats.rec+" rec");
+    if(stats.recYds) parts.push(stats.recYds+" rec yd"+(stats.recYds!==1?"s":""));
+    if(stats.recTD) parts.push(stats.recTD+" rec TD");
+    if(stats.fumLost) parts.push(stats.fumLost+" fum lost");
+  }
+  return parts.length?parts.join(", "):"—";
+}
+function openPlayerBoxScore(p){
+  const wk=app.currentWeek||1;
+  const row=app.playerWeekStats[wk] && app.playerWeekStats[wk][p.id];
+  const pu=app.powerupPicks.find(x=>x.week===wk && x.player_id===p.id);
+  const ov=$("overlay");
+  const pic=p.headshot?`<img src="${p.headshot}" style="width:48px;height:48px;border-radius:50%;object-fit:cover;background:#1b2444">`:avatarHTML(p);
+  let rows="", total=0;
+  for(let q=1;q<=4;q++){
+    const qd=row && row.q_pts && (row.q_pts[q]||row.q_pts[String(q)]);
+    const fp=qd?(qd.fp||0):0; total+=fp;
+    const isPuQ=pu && pu.quarter===q;
+    const cfg=isPuQ?POWERUPS[pu.powerup_key]:null;
+    const puTag=cfg?`<div style="color:var(--gold);font-weight:800;font-size:11px;margin-top:2px">${cfg.icon} ${cfg.name} applied</div>`:"";
+    rows+=`<tr><td style="vertical-align:top">Q${q}</td><td style="font-size:12px">${statLineForQuarter(p.pos, qd&&qd.stats)}${puTag}</td><td style="text-align:right;font-weight:700;vertical-align:top">${fp.toFixed(1)}</td></tr>`;
+  }
+  const noData = !row ? `<div class="muted" style="font-size:12px;margin-top:10px">No live data yet — this player's game may not have started, or their team hasn't been polled yet. It updates automatically once it's live.</div>` : "";
+  ov.innerHTML=`<div class="modal"><div class="box" style="max-width:420px;text-align:left">
+    <div style="display:flex;align-items:center;gap:10px">${pic}<div><div style="font-weight:800">${p.name}</div><div class="muted" style="font-size:12px">${p.pos} · ${p.teamAb||""}</div></div></div>
+    <div style="overflow-x:auto;margin-top:12px"><table class="std"><tr><th>Qtr</th><th>Stats</th><th style="text-align:right">FP</th></tr>${rows}
+      <tr style="border-top:2px solid var(--line)"><td colspan="2" style="font-weight:800">Total</td><td style="text-align:right;font-weight:800;color:var(--gold)">${total.toFixed(1)}</td></tr>
+    </table></div>
+    ${noData}
+    <button class="btn sec" id="pbClose" style="width:100%;margin-top:14px">Close</button>
+  </div></div>`;
+  ov.querySelector("#pbClose").onclick=()=>{ ov.innerHTML=""; };
 }
 
 // ============================ MY TEAM (managed in-app — no Sleeper) ============================
@@ -1866,12 +1920,18 @@ function defBracket(pa){
 function boxAthleteFP(groupName, labels, stats){
   const sc=app.settings.scoring;
   const gi=(lbl)=>{ const i=labels.indexOf(lbl); return i>=0?(parseFloat(String(stats[i]||"0").replace(/,/g,""))||0):0; };
-  let fp=0, qtd=0;
-  if(groupName==="passing"){ fp+=gi("YDS")/(sc.passYdsPerPt||25); fp+=gi("TD")*(sc.passTD||4); fp+=gi("INT")*(sc.passInt||-2); }
-  else if(groupName==="rushing"){ fp+=gi("YDS")/(sc.rushYdsPerPt||10); const td=gi("TD"); fp+=td*(sc.rushTD||6); qtd+=td; }
-  else if(groupName==="receiving"){ fp+=gi("REC")*(sc.ppr||0); fp+=gi("YDS")/(sc.recYdsPerPt||10); const td=gi("TD"); fp+=td*(sc.recTD||6); qtd+=td; }
-  else if(groupName==="fumbles"){ fp+=gi("LOST")*(sc.fumLost||-2); }
-  return {fp,qtd};
+  let fp=0, qtd=0; const raw={};
+  if(groupName==="passing"){ const yds=gi("YDS"),td=gi("TD"),ints=gi("INT");
+    fp+=yds/(sc.passYdsPerPt||25); fp+=td*(sc.passTD||4); fp+=ints*(sc.passInt||-2);
+    raw.passYds=yds; raw.passTD=td; raw.passInt=ints; }
+  else if(groupName==="rushing"){ const yds=gi("YDS"),td=gi("TD");
+    fp+=yds/(sc.rushYdsPerPt||10); fp+=td*(sc.rushTD||6); qtd+=td;
+    raw.rushYds=yds; raw.rushTD=td; }
+  else if(groupName==="receiving"){ const rec=gi("REC"),yds=gi("YDS"),td=gi("TD");
+    fp+=rec*(sc.ppr||0); fp+=yds/(sc.recYdsPerPt||10); fp+=td*(sc.recTD||6); qtd+=td;
+    raw.rec=rec; raw.recYds=yds; raw.recTD=td; }
+  else if(groupName==="fumbles"){ const lost=gi("LOST"); fp+=lost*(sc.fumLost||-2); raw.fumLost=lost; }
+  return {fp,qtd,raw};
 }
 // Team defense bonus plays: sacks + interceptions + defensive/return TDs.
 // (Fumble recoveries are skipped — ESPN's box score doesn't cleanly separate
@@ -1887,7 +1947,7 @@ function teamDefenseBonusFP(statGroups){
   });
   const td=defTD+intTD;
   const fp=sacks*(sc.sack||1) + ints*(sc.defInt||2) + td*(sc.defTD||6);
-  return {fp:Math.round(fp*10)/10, td};
+  return {fp:Math.round(fp*10)/10, td, sacks, ints};
 }
 function teamIdForAb(ab){
   ensurePool();
@@ -1927,8 +1987,9 @@ async function fetchGameBoxFP(eventId){
       (g.athletes||[]).forEach(a=>{
         const id=String((a.athlete&&a.athlete.id)||""); if(!id) return;
         const r=boxAthleteFP(g.name, g.labels||[], a.stats||[]);
-        if(!byAthlete[id]) byAthlete[id]={fp:0,qtd:0};
+        if(!byAthlete[id]) byAthlete[id]={fp:0,qtd:0,raw:{}};
         byAthlete[id].fp+=r.fp; byAthlete[id].qtd+=r.qtd;
+        Object.keys(r.raw).forEach(k=>{ byAthlete[id].raw[k]=(byAthlete[id].raw[k]||0)+r.raw[k]; });
       });
     });
   });
@@ -1955,20 +2016,20 @@ async function pollRealStats(){
     let box; try{ box=await fetchGameBoxFP(eventId); }catch(e){ continue; }
     app.playerGameState[teamId]={period:box.period, final:box.final};
     for(const p of byTeam[teamId]){
-      let curFp, curQtd=0, defQuarterly=null, curBonus=0, curBonusTd=0;
+      let curFp, curQtd=0, defQuarterly=null, curBonus=0, curBonusTd=0, curRaw=null, curSacks=0, curInts=0, oppLs=null;
       if(p.pos==="DEF"){
         const opp=Object.keys(box.linescores).find(t=>t!==teamId);
-        const oppLs=opp?box.linescores[opp]:[];
+        oppLs=opp?box.linescores[opp]:[];
         defQuarterly = oppLs.slice(0, box.period).map(defBracket);
         curFp = defQuarterly.reduce((s,v)=>s+v,0);
         const bonus=teamDefenseBonusFP(box.teamStats[teamId]);
-        curBonus=bonus.fp; curBonusTd=bonus.td;
+        curBonus=bonus.fp; curBonusTd=bonus.td; curSacks=bonus.sacks; curInts=bonus.ints;
       } else {
         const espnId=(p.id||"").replace(/^e/,"");
         const r=box.byAthlete[espnId]; if(!r) continue;
-        curFp=r.fp; curQtd=r.qtd;
+        curFp=r.fp; curQtd=r.qtd; curRaw=r.raw;
       }
-      updates.push({athlete_id:p.id, week:wk, period:box.period, curFp, curQtd, curBonus, curBonusTd, defQuarterly, isDef:p.pos==="DEF"});
+      updates.push({athlete_id:p.id, week:wk, period:box.period, curFp, curQtd, curBonus, curBonusTd, curSacks, curInts, curRaw, defQuarterly, oppLs, isDef:p.pos==="DEF"});
     }
   }
   if(!updates.length) return;
@@ -1978,27 +2039,38 @@ async function pollRealStats(){
   const rows=updates.map(u=>{
     const prev=byId[u.athlete_id];
     const qpts=(prev&&prev.q_pts)?{...prev.q_pts}:{};
+    const prevStats=(prev&&prev.prev_stats)?prev.prev_stats:{};
     let prevQtd=prev?(prev.prev_qtd||0):0, prevBonus=prev?(prev.prev_bonus||0):0;
+    let newPrevStats=prevStats;
     if(u.isDef){
       // points-allowed is exact per-quarter from the real linescore — safe to overwrite.
       // sacks/INTs/def-TDs are cumulative-to-date, so diff like offense and credit the live quarter.
-      u.defQuarterly.forEach((pa,i)=>{ const q=i+1; const cur=qpts[q]||{bonus:0,qtd:0};
-        qpts[q]={pa:Math.round(pa*10)/10, bonus:cur.bonus||0, qtd:cur.qtd||0, fp:0}; });
+      u.defQuarterly.forEach((pa,i)=>{ const q=i+1; const cur=qpts[q]||{bonus:0,qtd:0,stats:{}};
+        qpts[q]={pa:Math.round(pa*10)/10, bonus:cur.bonus||0, qtd:cur.qtd||0, fp:0,
+          stats:{...(cur.stats||{}), pointsAllowed:(u.oppLs&&u.oppLs[i])||0}}; });
       const bonusDelta=Math.max(0, u.curBonus-prevBonus), tdDelta=Math.max(0, u.curBonusTd-prevQtd);
-      const cp=qpts[u.period]||{pa:0,bonus:0,qtd:0};
+      const sackDelta=Math.max(0, u.curSacks-(prevStats.sacks||0)), intDelta=Math.max(0, u.curInts-(prevStats.ints||0));
+      const cp=qpts[u.period]||{pa:0,bonus:0,qtd:0,stats:{}};
       cp.bonus=Math.round((cp.bonus+bonusDelta)*10)/10; cp.qtd=(cp.qtd||0)+tdDelta;
+      cp.stats={...(cp.stats||{}), sacks:(cp.stats&&cp.stats.sacks||0)+sackDelta, ints:(cp.stats&&cp.stats.ints||0)+intDelta, defTD:(cp.stats&&cp.stats.defTD||0)+tdDelta};
       qpts[u.period]=cp;
       Object.keys(qpts).forEach(q=>{ qpts[q].fp=Math.round(((qpts[q].pa||0)+(qpts[q].bonus||0))*10)/10; });
       prevBonus=u.curBonus; prevQtd=u.curBonusTd;
+      newPrevStats={sacks:u.curSacks, ints:u.curInts};
     } else {
       const prevTotal=prev?prev.prev_total:0;
       const delta=Math.max(0, u.curFp-prevTotal);
       const tdDelta=Math.max(0, u.curQtd-prevQtd);
-      const cur=qpts[u.period]||{fp:0,qtd:0};
-      qpts[u.period]={fp:Math.round((cur.fp+delta)*10)/10, qtd:cur.qtd+tdDelta};
+      const cur=qpts[u.period]||{fp:0,qtd:0,stats:{}};
+      const statsDelta={};
+      Object.keys(u.curRaw||{}).forEach(k=>{ statsDelta[k]=Math.max(0,(u.curRaw[k]||0)-(prevStats[k]||0)); });
+      const mergedStats={...(cur.stats||{})};
+      Object.keys(statsDelta).forEach(k=>{ mergedStats[k]=(mergedStats[k]||0)+statsDelta[k]; });
+      qpts[u.period]={fp:Math.round((cur.fp+delta)*10)/10, qtd:cur.qtd+tdDelta, stats:mergedStats};
       prevQtd=u.curQtd;
+      newPrevStats=u.curRaw||{};
     }
-    return { athlete_id:u.athlete_id, week:wk, season:2026, q_pts:qpts, prev_total:u.curFp, prev_qtd:prevQtd, prev_bonus:prevBonus };
+    return { athlete_id:u.athlete_id, week:wk, season:2026, q_pts:qpts, prev_total:u.curFp, prev_qtd:prevQtd, prev_bonus:prevBonus, prev_stats:newPrevStats };
   });
   try{ await sb.from("player_week_stats").upsert(rows); }catch(e){}
   await loadPlayerWeekStats(wk);
