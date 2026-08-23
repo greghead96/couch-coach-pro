@@ -213,6 +213,30 @@
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
+// ============================ AUTO-UPDATE ============================
+// GitHub Pages caches this file for ~10 min, so a plain refresh right after
+// a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
+// instead of expecting everyone to know to hard-refresh. Bump this string
+// on every deploy.
+const BUILD_ID = "20260823a";
+function showUpdateBanner(){
+  if(document.getElementById("updateBanner")) return;
+  const b=document.createElement("div"); b.id="updateBanner";
+  b.style.cssText="position:fixed;left:0;right:0;bottom:0;z-index:9999;background:var(--gold,#f5b942);color:#1a1300;padding:13px 16px;text-align:center;font-weight:800;cursor:pointer;box-shadow:0 -2px 12px rgba(0,0,0,.35)";
+  b.textContent="🔄 A new version of Couch Coach is ready — tap to update";
+  b.onclick=()=>location.reload();
+  document.body.appendChild(b);
+}
+async function checkForUpdate(){
+  try{
+    const r=await fetch(location.pathname+"?_cb="+Date.now(), {cache:"no-store"});
+    const txt=await r.text();
+    const m=txt.match(/const BUILD_ID\s*=\s*"([^"]+)"/);
+    if(m && m[1]!==BUILD_ID) showUpdateBanner();
+  }catch(e){}
+}
+setInterval(checkForUpdate, 90000);
+
 // ============================ SUPABASE (Phase 2 backend) ============================
 const SB_URL="https://qonkkpsgjlhinzknpckw.supabase.co";
 const SB_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFvbmtrcHNnamxoaW56a25wY2t3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc0MjUzMTcsImV4cCI6MjEwMzAwMTMxN30.tVaiUFo0BuBQ4jSe5FHBkJ9dxIQ89eU1rmVlrE2mxwI";
@@ -711,16 +735,18 @@ function renderNav(){
   nav.appendChild(inner); document.body.appendChild(nav);
 }
 function renderTab(){
+  // keep the shared roster/score globals fresh regardless of which tab is
+  // showing them (Home, League > Scoreboard, and Matchup all read the same
+  // myStarters/oppStarters — so this can't be gated to the Matchup tab alone)
+  if(app.realLeague && app.user){
+    const key=matchupSetupKey();
+    if(app._matchupSetupKey!==key){ app._matchupSetupKey=key; setupRealMatchup(); app.sim=freshSim(); }
+    syncRealPointsToPlayers(); refreshRealInv();
+    if(app.tab==="matchup") startStatsPoll();
+  }
   if(app.tab==="home") renderHome();
   else if(app.tab==="nfl"){ ensureNFL(); renderNFL(); }
-  else if(app.tab==="matchup"){
-    if(app.realLeague){
-      const key=matchupSetupKey();
-      if(app._matchupSetupKey!==key){ app._matchupSetupKey=key; setupRealMatchup(); app.sim=freshSim(); }
-      refreshRealInv(); startStatsPoll();
-    }
-    renderMatchup();
-  }
+  else if(app.tab==="matchup") renderMatchup();
   else if(app.tab==="team") renderTeam();
   else if(app.tab==="players"){ ensurePool(); renderPlayers(); }
   else if(app.tab==="draft"){ ensurePool(); renderDraft(); }
@@ -1023,6 +1049,7 @@ function recapCard(){
 
 // ============================ MATCHUP ============================
 function renderMatchup(){
+  syncRealPointsToPlayers();
   const s=$("screen"); if(!s) return; s.innerHTML="";
   const others = app.sim.others||[];
   const all = [{your:true, a:app.myTeam, b:app.oppTeam}, ...others.map(m=>({your:false, ...m}))];
@@ -2052,6 +2079,22 @@ function computeRealTeamScore(uid, wk){
   });
   if(hotStartPick && bestTD && bestTD.pid===hotStartPick.player_id) total+=2*(app.settings.scoring.rushTD||6);
   return Math.round(total*10)/10;
+}
+// Per-player real total (power-up adjusted) for display on the roster rows.
+// The team TOTAL (computeRealTeamScore) is the source of truth and also
+// handles Emergency Sub's split-at-the-swap-quarter case exactly; this is
+// the simpler per-row version so individual player cards aren't stuck at 0.
+function realPlayerAdjustedTotal(pid, wk){
+  const pu=app.powerupPicks.find(p=>p.week===wk && p.player_id===pid);
+  const rq=realQuarterly(pid, wk);
+  let total=0;
+  for(let q=1;q<=4;q++){ let fp=rq.q[q]; if(pu && pu.quarter===q){ if(pu.powerup_key==="double") fp*=2; else if(pu.powerup_key==="freeze") fp=0; } total+=fp; }
+  return Math.round(total*10)/10;
+}
+function syncRealPointsToPlayers(){
+  if(!app.realLeague) return;
+  const wk=app.currentWeek||1;
+  [...myStarters,...myBench,...oppStarters,...oppBench].forEach(p=>{ if(p.id && !p.id.startsWith("e_")) p.pts=realPlayerAdjustedTotal(p.id, wk); });
 }
 function getRealStandings(){
   const rows=(app.members||[]).map(m=>({team:m.team_name||"Team", w:0,l:0,t:0, pf:0, pa:0, me:m.user_id===(app.user&&app.user.id), uid:m.user_id}));
