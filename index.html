@@ -218,7 +218,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260823b";
+const BUILD_ID = "20260823c";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -2072,7 +2072,12 @@ async function pollRealStats(){
     }
     return { athlete_id:u.athlete_id, week:wk, season:2026, q_pts:qpts, prev_total:u.curFp, prev_qtd:prevQtd, prev_bonus:prevBonus, prev_stats:newPrevStats };
   });
-  try{ await sb.from("player_week_stats").upsert(rows); }catch(e){}
+  const {error:upsertErr}=await sb.from("player_week_stats").upsert(rows);
+  if(upsertErr){
+    console.error("player_week_stats upsert failed", upsertErr);
+    if(!app._statsUpsertWarned){ app._statsUpsertWarned=true;
+      toast("⚠ Live stats couldn't save — commissioner needs to rerun the latest SQL migration"); }
+  }
   await loadPlayerWeekStats(wk);
 }
 function startStatsPoll(){
