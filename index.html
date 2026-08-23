@@ -7,14 +7,14 @@
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&family=Nunito:wght@600;700;800&display=swap');
   :root {
-    --bg:#0a1633; --panel:#16295a; --panel2:#20387a; --line:#33539f;
-    --ink:#050b1e; --txt:#f3f7ff; --muted:#a2b4dd; --you:#2fd07a; --opp:#ff5b5b;
-    --gold:#ffd23f; --red:#e63b2e; --ice:#57b6ff; --boost:#c58bff; --rare:#ffb020;
+    --bg:#1d1811; --panel:#2c2419; --panel2:#3c3120; --line:#5a4a32;
+    --ink:#100c08; --txt:#f2e9d8; --muted:#b9a888; --you:#2fd07a; --opp:#ff5b5b;
+    --gold:#ffd23f; --red:#b8552e; --ice:#57b6ff; --boost:#c58bff; --rare:#ffb020;
   }
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   body {
     margin:0; font-family:'Nunito',-apple-system,"Segoe UI",Roboto,sans-serif; font-weight:600;
-    background:radial-gradient(1100px 640px at 50% -12%, #22409a 0%, var(--bg) 62%);
+    background:radial-gradient(1100px 640px at 50% -12%, #55432a 0%, var(--bg) 62%);
     color:var(--txt); padding-bottom:76px;
   }
   h1, h2.title, .brand { font-family:'Fredoka',sans-serif; }
@@ -22,13 +22,13 @@
   header.topbar {
     display:flex; align-items:center; justify-content:space-between;
     padding:12px 16px; border-bottom:3px solid var(--ink); position:sticky; top:0;
-    background:linear-gradient(180deg,#1a327a,#122559); z-index:20;
+    background:linear-gradient(180deg,#3c3120,#241d13); z-index:20;
   }
   header.topbar .brand { font-weight:700; font-size:17px; display:flex; gap:8px; align-items:center; }
   header.topbar .pill { font-size:11px; font-weight:800; color:var(--txt); border:2px solid var(--ink); background:var(--panel2); padding:4px 10px; border-radius:20px; box-shadow:0 2px 0 var(--ink); }
   .screen { padding:16px; }
   h2.title { font-size:14px; text-transform:uppercase; letter-spacing:.5px; color:var(--gold); margin:0 0 12px; font-weight:700; }
-  .card { background:var(--panel); border:3px solid var(--ink); border-radius:16px; padding:14px; margin-bottom:14px; box-shadow:0 4px 0 rgba(5,11,30,.55); }
+  .card { background:var(--panel); border:3px solid var(--ink); border-radius:16px; padding:14px; margin-bottom:14px; box-shadow:0 4px 0 rgba(16,12,8,.55); }
   .muted { color:var(--muted); }
   .row { display:flex; align-items:center; justify-content:space-between; gap:10px; }
   button { font-family:inherit; cursor:pointer; }
@@ -40,7 +40,7 @@
 
   nav.tabbar {
     position:fixed; bottom:0; left:0; right:0; display:flex; justify-content:center;
-    background:linear-gradient(180deg,#16295a,#0e1f4a); border-top:3px solid var(--ink); z-index:30;
+    background:linear-gradient(180deg,#2c2419,#1a140d); border-top:3px solid var(--ink); z-index:30;
   }
   nav.tabbar .inner { display:flex; max-width:520px; width:100%; overflow-x:auto; }
   nav.tabbar button {
@@ -55,7 +55,7 @@
   .login .logo { font-size:40px; text-align:center; }
   .login h1 { text-align:center; font-size:26px; margin:6px 0 2px; }
   .login p.sub { text-align:center; color:var(--muted); margin:0 0 26px; font-size:13px; }
-  .input { width:100%; background:#0e1f4a; border:2px solid var(--ink); color:var(--txt);
+  .input { width:100%; background:var(--panel2); border:2px solid var(--ink); color:var(--txt);
            border-radius:10px; padding:13px 14px; font-size:15px; margin-bottom:12px; }
   .login .small { text-align:center; font-size:12px; color:var(--muted); margin-top:16px; }
 
@@ -87,7 +87,7 @@
   .puchip .cdbar { position:absolute; left:0; bottom:0; height:3px; background:var(--ice); }
 
   .feed { height:120px; overflow-y:auto; font-size:12px; }
-  .feed .ln { padding:3px 0; border-bottom:1px solid #1a2244; }
+  .feed .ln { padding:3px 0; border-bottom:1px solid var(--line); }
   .feed .t { color:var(--muted); margin-right:7px; }
   .ev-pu { color:var(--gold); font-weight:600; } .ev-score{color:var(--txt);}
 
@@ -120,7 +120,7 @@
             font-weight:800; font-size:13px; color:#0b1020; }
   .avatar.def { background:#334155; color:var(--txt); font-size:9px; }
   .avatar.sm { width:28px; height:28px; min-width:28px; font-size:11px; }
-  .avatar.img { object-fit:cover; background:#1b2444; }
+  .avatar.img { object-fit:cover; background:#2c2419; }
 
   /* side-by-side matchup rows */
   .mrow { display:grid; grid-template-columns:1fr 30px 1fr; align-items:center; gap:6px; padding:9px 0; border-top:1px solid var(--line); }
@@ -218,7 +218,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260823c";
+const BUILD_ID = "20260823d";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -330,7 +330,7 @@ function posHue(pos){ return ({QB:"#3b82f6",RB:"#10b981",WR:"#f59e0b",TE:"#a855f
 function avatarHTML(p,cls){
   cls=cls||"";
   if(p.headshot) return `<img class="avatar img ${cls}" src="${p.headshot}" onerror="this.style.visibility='hidden'">`;
-  if(p.logo) return `<img class="avatar img ${cls}" src="${p.logo}" style="object-fit:contain;background:#0d142b" onerror="this.style.visibility='hidden'">`;
+  if(p.logo) return `<img class="avatar img ${cls}" src="${p.logo}" style="object-fit:contain;background:#241d13" onerror="this.style.visibility='hidden'">`;
   if(p.pos==="DEF"){ const ab=(p.name.split(" ")[0]||"").slice(0,3).toUpperCase(); return `<div class="avatar def ${cls}">${ab}</div>`; }
   return `<div class="avatar ${cls}" style="background:${posHue(p.pos)}">${p.num||""}</div>`;
 }
@@ -353,8 +353,8 @@ function oppAbbr(p){ return (p.opp||"").replace(/^(vs|@)\s*/,"").trim(); }
 function rankTag(p){
   if(!p.oppRank) return "";
   const r=p.oppRank;
-  const bg = r>=23?"#123524":r<=10?"#3a1414":"#2a2f45";
-  const fg = r>=23?"#34d399":r<=10?"#f87171":"#8b97c4";
+  const bg = r>=23?"#123524":r<=10?"#3a1414":"#332a1c";
+  const fg = r>=23?"#34d399":r<=10?"#f87171":"#b9a888";
   return `<span class="rank" style="background:${bg};color:${fg}">${oppAbbr(p)} ${r}${ord(r)} vs ${p.pos}</span>`;
 }
 // deterministic fake rosters / schedules for OTHER teams (real app pulls these from ESPN + your DB)
@@ -408,7 +408,7 @@ let app = {
   realData:false, chat:CHAT_SEED.slice(),
   leagueId:null, leagueData:null, sleeperUserId:null,
   sim:null, armed:null, matchupIdx:0,
-  leagueMatchup:null, schedTeam:"Your Team", pFilter:"ALL", pSort:"rank", pView:"players", drafted:[], pStatTab:null,
+  leagueMatchup:null, schedTeam:"Your Team", pFilter:"ALL", pSearch:"", pSort:"rank", pView:"players", drafted:[], pStatTab:null,
   myTeam:"Your Team", oppTeam:"Burrow Bandits", realLeague:false,
   draft:null, draftChannel:null, isCommish:false, members:[], queue:[], draftView:"board", commishMode:false, lineup:null, lineupEdit:false, trades:[], tradeBuilder:null, transactions:[], teamTab:"lineup", txFilter:"all",
   schedule:[], currentWeek:1, lineupsByUser:{},
@@ -986,7 +986,7 @@ function renderHome(){
   s.appendChild(banner);
 
   const hero=el("div","card");
-  hero.innerHTML=`<h2 class="title">Week 11 · Your Matchup</h2>
+  hero.innerHTML=`<h2 class="title">Week ${app.realLeague?(app.currentWeek||1):11} · Your Matchup</h2>
     <div class="scoreboard">
       <div class="ts me"><div class="nm">You</div><div class="pts">${ms.toFixed(1)}</div></div>
       <div class="clock"><div class="q">${app.sim.running?"LIVE":done?"FINAL":"PREGAME"}</div><div class="tt" style="font-size:16px">vs</div></div>
@@ -997,20 +997,11 @@ function renderHome(){
   go.onclick=()=>{ app.tab="matchup"; render(); };
   hero.appendChild(go); s.appendChild(hero);
 
-  const invCount=Object.values(app.inv).reduce((a,b)=>a+b,0);
-  const puc=el("div","card");
-  puc.innerHTML=`<div class="row"><div><b>⚡ Power-Ups Ready</b>
-    <div class="muted" style="font-size:12px">${invCount} available this week · one per player</div></div>
-    <div style="font-size:24px;font-weight:800;color:var(--gold)">${invCount}</div></div>`;
-  const earn=el("button","btn sec"); earn.style.width="100%"; earn.style.marginTop="10px"; earn.textContent="View Power-Ups";
-  earn.onclick=()=>{ app.tab="store"; render(); };
-  puc.appendChild(earn); s.appendChild(puc);
-
   const st=getStandings(); const meRow=st.find(t=>t.me); const rank=st.findIndex(t=>t.me)+1;
   const rec=meRow?` · ${meRow.w}-${meRow.l}`:"";
   const rankTxt=rank>0?`${rank}${ord(rank)} of ${st.length}`:`${st.length} teams`;
   const stc=el("div","card");
-  stc.innerHTML=`<div class="row"><div><b>🏆 League Standing</b>
+  stc.innerHTML=`<div class="row"><div><b>🏆 League Standings</b>
     <div class="muted" style="font-size:12px">${rankTxt}${rec}${app.leagueData?' · live':''}</div></div></div>`;
   const stb=el("button","btn sec"); stb.style.width="100%"; stb.style.marginTop="10px"; stb.textContent="View Standings";
   stb.onclick=()=>{ app.tab="league"; app.leagueTab="standings"; render(); };
@@ -1202,7 +1193,7 @@ function playerCell(p,side,armedCfg,cq,leftSide){
   if(activeNow) cell.classList.add("boosted");
   const hot = hotOn ? "🔥" : "";
   const tags=[hot, ...sched.map(x=>POWERUPS[x.key].icon+"Q"+x.q)].filter(Boolean).join(" ");
-  const sub = tags || statLine(p);
+  const sub = app.realLeague ? [tags, teamOppLine(p)].filter(Boolean).join(" · ") : (tags || statLine(p));
   const av=avatarHTML(p);
   const nm = leftSide ? (hot?hot+" ":"")+p.name+" "+statusTag(p) : statusTag(p)+p.name+(hot?" "+hot:"");
   const body=`<div class="mc-body"><div class="mc-nm">${nm}</div>
@@ -1218,46 +1209,60 @@ function playerCell(p,side,armedCfg,cq,leftSide){
 }
 // Per-quarter stat + power-up breakdown, tap a player's FP to open — like
 // ESPN's box score, but also shows exactly which quarter a power-up hit.
-function statLineForQuarter(pos, stats){
-  if(!stats) return "—";
-  const parts=[];
+// Line-item stat breakdown for one quarter, e.g. "2 sacks (1pt each)" → 2.0.
+// Points allowed is NOT included here — it's a whole-game stat, shown separately.
+function quarterStatLines(pos, stats){
+  const sc=app.settings.scoring; const lines=[]; if(!stats) return lines;
+  const push=(n,label,per,pts)=>{ if(n) lines.push({label:`${n} ${label}${n!==1?"s":""} (${per})`, pts}); };
   if(pos==="DEF"){
-    if(stats.pointsAllowed!=null) parts.push(stats.pointsAllowed+" pts allowed");
-    if(stats.sacks) parts.push(stats.sacks+" sack"+(stats.sacks!==1?"s":""));
-    if(stats.ints) parts.push(stats.ints+" INT"+(stats.ints!==1?"s":""));
-    if(stats.defTD) parts.push(stats.defTD+" TD");
+    push(stats.sacks,"sack",`${sc.sack||1}pt each`, stats.sacks*(sc.sack||1));
+    push(stats.ints,"INT",`${sc.defInt||2}pts each`, stats.ints*(sc.defInt||2));
+    push(stats.defTD,"TD",`${sc.defTD||6}pts each`, stats.defTD*(sc.defTD||6));
   } else {
-    if(stats.passYds) parts.push(stats.passYds+" pass yd"+(stats.passYds!==1?"s":""));
-    if(stats.passTD) parts.push(stats.passTD+" pass TD");
-    if(stats.passInt) parts.push(stats.passInt+" INT");
-    if(stats.rushYds) parts.push(stats.rushYds+" rush yd"+(stats.rushYds!==1?"s":""));
-    if(stats.rushTD) parts.push(stats.rushTD+" rush TD");
-    if(stats.rec) parts.push(stats.rec+" rec");
-    if(stats.recYds) parts.push(stats.recYds+" rec yd"+(stats.recYds!==1?"s":""));
-    if(stats.recTD) parts.push(stats.recTD+" rec TD");
-    if(stats.fumLost) parts.push(stats.fumLost+" fum lost");
+    push(stats.passYds,"pass yd",`1pt/${sc.passYdsPerPt||25}`, stats.passYds/(sc.passYdsPerPt||25));
+    push(stats.passTD,"pass TD",`${sc.passTD||4}pts each`, stats.passTD*(sc.passTD||4));
+    push(stats.passInt,"INT thrown",`${sc.passInt||-2}pts each`, stats.passInt*(sc.passInt||-2));
+    push(stats.rushYds,"rush yd",`1pt/${sc.rushYdsPerPt||10}`, stats.rushYds/(sc.rushYdsPerPt||10));
+    push(stats.rushTD,"rush TD",`${sc.rushTD||6}pts each`, stats.rushTD*(sc.rushTD||6));
+    if(stats.rec && sc.ppr) push(stats.rec,"rec",`${sc.ppr}pt each`, stats.rec*sc.ppr);
+    push(stats.recYds,"rec yd",`1pt/${sc.recYdsPerPt||10}`, stats.recYds/(sc.recYdsPerPt||10));
+    push(stats.recTD,"rec TD",`${sc.recTD||6}pts each`, stats.recTD*(sc.recTD||6));
+    push(stats.fumLost,"fum lost",`${sc.fumLost||-2}pts each`, stats.fumLost*(sc.fumLost||-2));
   }
-  return parts.length?parts.join(", "):"—";
+  return lines;
 }
 function openPlayerBoxScore(p){
   const wk=app.currentWeek||1;
   const row=app.playerWeekStats[wk] && app.playerWeekStats[wk][p.id];
   const pu=app.powerupPicks.find(x=>x.week===wk && x.player_id===p.id);
   const ov=$("overlay");
-  const pic=p.headshot?`<img src="${p.headshot}" style="width:48px;height:48px;border-radius:50%;object-fit:cover;background:#1b2444">`:avatarHTML(p);
+  const pic=p.headshot?`<img src="${p.headshot}" style="width:48px;height:48px;border-radius:50%;object-fit:cover;background:#2c2419">`:avatarHTML(p);
+  const gi=weekGameInfo(p, wk);
   let rows="", total=0;
   for(let q=1;q<=4;q++){
     const qd=row && row.q_pts && (row.q_pts[q]||row.q_pts[String(q)]);
-    const fp=qd?(qd.fp||0):0; total+=fp;
-    const isPuQ=pu && pu.quarter===q;
-    const cfg=isPuQ?POWERUPS[pu.powerup_key]:null;
-    const puTag=cfg?`<div style="color:var(--gold);font-weight:800;font-size:11px;margin-top:2px">${cfg.icon} ${cfg.name} applied</div>`:"";
-    rows+=`<tr><td style="vertical-align:top">Q${q}</td><td style="font-size:12px">${statLineForQuarter(p.pos, qd&&qd.stats)}${puTag}</td><td style="text-align:right;font-weight:700;vertical-align:top">${fp.toFixed(1)}</td></tr>`;
+    const lines=quarterStatLines(p.pos, qd&&qd.stats);
+    const isPuQ=pu && pu.quarter===q; const cfg=isPuQ?POWERUPS[pu.powerup_key]:null;
+    const mult = cfg&&pu.powerup_key==="double" ? 2 : (cfg&&pu.powerup_key==="freeze" ? 0 : 1);
+    let qTotal=0;
+    const lineHtml = lines.length ? lines.map(l=>{
+      const adj=Math.round(l.pts*mult*10)/10; qTotal+=adj;
+      const tag = mult!==1 ? ` <b style="color:var(--gold)">× ${mult===0?"0":mult} ${cfg.icon}</b>` : "";
+      return `<div>${l.label}${tag} <span style="float:right">${adj.toFixed(1)}pts</span></div>`;
+    }).join("") : `<span class="muted">—</span>`;
+    rows+=`<tr><td style="vertical-align:top">Q${q}</td><td style="font-size:12px">${lineHtml}</td><td style="text-align:right;font-weight:700;vertical-align:top">${qTotal.toFixed(1)}</td></tr>`;
+    total+=qTotal;
   }
+  let paRow="";
+  if(row && row.q_pts && row.q_pts.pa){
+    const pa=row.q_pts.pa; total+=pa.fp;
+    paRow=`<tr style="border-top:1px solid var(--line)"><td>—</td><td style="font-size:12px">${pa.allowed} total points allowed (whole game)</td><td style="text-align:right;font-weight:700">${pa.fp.toFixed(1)}</td></tr>`;
+  }
+  const teamLine = p.pos+" · "+(p.teamAb||"")+(gi?(" · "+(gi.home?"vs ":"@ ")+gi.opp):"");
   const noData = !row ? `<div class="muted" style="font-size:12px;margin-top:10px">No live data yet — this player's game may not have started, or their team hasn't been polled yet. It updates automatically once it's live.</div>` : "";
-  ov.innerHTML=`<div class="modal"><div class="box" style="max-width:420px;text-align:left">
-    <div style="display:flex;align-items:center;gap:10px">${pic}<div><div style="font-weight:800">${p.name}</div><div class="muted" style="font-size:12px">${p.pos} · ${p.teamAb||""}</div></div></div>
-    <div style="overflow-x:auto;margin-top:12px"><table class="std"><tr><th>Qtr</th><th>Stats</th><th style="text-align:right">FP</th></tr>${rows}
+  ov.innerHTML=`<div class="modal"><div class="box" style="max-width:440px;text-align:left">
+    <div style="display:flex;align-items:center;gap:10px">${pic}<div><div style="font-weight:800">${p.name}</div><div class="muted" style="font-size:12px">${teamLine}</div></div></div>
+    <div style="overflow-x:auto;margin-top:12px"><table class="std"><tr><th>Qtr</th><th>Stats</th><th style="text-align:right">FP</th></tr>${rows}${paRow}
       <tr style="border-top:2px solid var(--line)"><td colspan="2" style="font-weight:800">Total</td><td style="text-align:right;font-weight:800;color:var(--gold)">${total.toFixed(1)}</td></tr>
     </table></div>
     ${noData}
@@ -1288,7 +1293,16 @@ function renderTeam(){
     if(JSON.stringify(lu)!==JSON.stringify(app.lineup)){ app.lineup=lu; saveLineup(); } else { app.lineup=lu; }
     const pickById=id=>myPicks.find(p=>p.player_id===id);
     const edit=app.lineupEdit;
-    const metaFor=(p)=>{ const info=poolInfo(p.player_id); const rk=(info&&info.rank)?` · <span style="color:var(--gold);font-weight:800">#${info.rank}</span>`:""; return `${p.team||""}${rk}`; };
+    ensureDvP(); ensureCurrentWeekInfo();
+    const metaFor=(p)=>{
+      if(app.realLeague){
+        const gi=weekGameInfo({teamAb:p.team}, app.currentWeek||1);
+        const oppTxt = gi ? " "+(gi.home?"vs ":"@ ")+gi.opp : "";
+        return `${p.team||""}${oppTxt}${dvpBadge(p.pos, gi&&gi.opp)}`;
+      }
+      const info=poolInfo(p.player_id); const rk=(info&&info.rank)?` · <span style="color:var(--gold);font-weight:800">#${info.rank}</span>`:"";
+      return `${p.team||""}${rk}`;
+    };
 
     const hd=el("div","card");
     hd.innerHTML=`<h2 class='title'>${app.myTeam} · Lineup</h2>
@@ -1447,7 +1461,7 @@ function gamelogWeekly(gl){
 function showDetailModal(){
   const ov=$("overlay"); const D=app.pDetail; if(!D){ ov.innerHTML=""; return; }
   const p=D.p;
-  const pic = p.headshot?`<img src="${p.headshot}" style="width:56px;height:56px;border-radius:50%;object-fit:cover;background:#1b2444">`
+  const pic = p.headshot?`<img src="${p.headshot}" style="width:56px;height:56px;border-radius:50%;object-fit:cover;background:#2c2419">`
     : (p.logo?`<img src="${p.logo}" style="width:48px;height:48px;object-fit:contain">`:avatarHTML(p));
   const rk = p.rank?` · <span style="color:var(--gold)">ESPN #${p.rank}</span>`:"";
   const head=`<div style="display:flex;align-items:center;gap:12px">${pic}
@@ -1532,11 +1546,23 @@ function renderPlayers(){
   s.appendChild(el("div","card",`<h2 class='title'>Players · real NFL data</h2>
     <div class='muted' style='font-size:12px'>Real players from ESPN — tap any player for research (stats, projection, bye, news). Add to your bench; roster full → pick a drop.</div>`));
   if(!poolGuard(s,renderPlayers)) return;
+  const search=el("input","input"); search.placeholder="Search by player or team…"; search.value=app.pSearch||"";
+  search.style.marginBottom="10px";
+  search.oninput=()=>{ app.pSearch=search.value; renderPlayersList(); };
+  s.appendChild(search);
   posChips(s); sortControl(s);
+  const listAnchor=el("div"); listAnchor.id="playersList"; s.appendChild(listAnchor);
+  renderPlayersList();
+  setTimeout(()=>search.focus(), 0);
+}
+function renderPlayersList(){
+  const s=$("playersList"); if(!s) return; s.innerHTML="";
   // In a real league, "taken" players = everyone's draft picks; otherwise the mock roster
   const draftPicks = (app.realLeague && app.draft) ? app.draft.picks : [];
   const takenIds = new Set( app.realLeague ? draftPicks.map(p=>p.player_id) : [...myStarters,...myBench].map(p=>p.id) );
-  const pool=sortPool(availablePlayers().filter(p=>!takenIds.has(p.id)).filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter));
+  const q=(app.pSearch||"").trim().toLowerCase();
+  const matchesSearch=p=> !q || (p.name||"").toLowerCase().includes(q) || (p.teamAb||"").toLowerCase().includes(q);
+  const pool=sortPool(availablePlayers().filter(p=>!takenIds.has(p.id)).filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter).filter(matchesSearch));
   const c=el("div","card");
   if(!pool.length) c.appendChild(el("div","muted","<div style='font-size:13px'>No available players at this position.</div>"));
   pool.slice(0,60).forEach(p=> c.appendChild(faRow(p, app.realLeague?"＋":"+ Add", app.realLeague?" sec":"", ()=>{ if(app.realLeague){ toast("Add/drop (waivers) is coming in a future update"); } else addPlayer(p); })));
@@ -1965,13 +1991,89 @@ async function findGameId(teamId, wk){
   // whichever one the schedule endpoint happens to list first.
   const stype = (app.settings.league && app.settings.league.testPreseason) ? 1 : 2;
   app._gameIdCache = app._gameIdCache || {};
+  app._teamGameInfo = app._teamGameInfo || {};
   const ck=teamId+"_"+wk+"_"+stype; if(app._gameIdCache[ck]!==undefined) return app._gameIdCache[ck];
   try{
     const sd=await (await fetch(ESPN+"/teams/"+teamId+"/schedule")).json();
     const ev=(sd.events||[]).find(e=>e.week && e.week.number===wk && e.seasonType && e.seasonType.type===stype);
     app._gameIdCache[ck]=ev?ev.id:null;
+    if(ev && ev.shortName){
+      const parts=ev.shortName.split(" @ "); const myAb=(sd.team&&sd.team.abbreviation)||"";
+      if(parts.length===2 && myAb){ const home=parts[1]===myAb; app._teamGameInfo[teamId+"_"+wk]={opp:home?parts[0]:parts[1], home}; }
+    }
   }catch(e){ app._gameIdCache[ck]=null; }
   return app._gameIdCache[ck];
+}
+function weekGameInfo(p, wk){
+  const tid=teamIdForAb(p.teamAb); if(tid==null) return null;
+  return (app._teamGameInfo && app._teamGameInfo[tid+"_"+wk]) || null;
+}
+// Defense-vs-position: real fantasy points allowed to each offensive position
+// by each team, ranked 1 (toughest matchup) to N (easiest). Built from the
+// same real per-quarter stats we already collect for rostered players in
+// this league — not the full NFL player pool, so it's a reasonable read on
+// matchup difficulty, not an official league-wide stat.
+async function computeDvP(wkMax){
+  const picks=(app.draft&&app.draft.picks)||[];
+  const offPicks=picks.filter(p=>p.pos!=="DEF" && p.team);
+  const teamAbs=[...new Set(offPicks.map(p=>p.team))];
+  for(const ab of teamAbs){
+    const tid=teamIdForAb(ab); if(tid==null) continue;
+    for(let wk=1; wk<=wkMax; wk++) await findGameId(tid, wk);
+  }
+  const agg={};
+  for(let wk=1; wk<=wkMax; wk++){
+    const wkStats=app.playerWeekStats[wk]||{};
+    offPicks.forEach(p=>{
+      const row=wkStats[p.player_id]; if(!row||!row.q_pts) return;
+      const gi=weekGameInfo({teamAb:p.team}, wk); if(!gi||!gi.opp) return;
+      let fp=0; for(let q=1;q<=4;q++){ const v=row.q_pts[q]||row.q_pts[String(q)]; if(v) fp+=v.fp||0; }
+      const o=agg[gi.opp]=agg[gi.opp]||{}; const pp=o[p.pos]=o[p.pos]||{sum:0,games:0};
+      pp.sum+=fp; pp.games+=1;
+    });
+  }
+  const ranks={};
+  ["QB","RB","WR","TE"].forEach(pos=>{
+    const rows=Object.keys(agg).filter(ab=>agg[ab][pos]).map(ab=>({ab, avg:agg[ab][pos].sum/agg[ab][pos].games}));
+    rows.sort((a,b)=>a.avg-b.avg); // fewest allowed first = toughest = rank 1
+    ranks[pos]={};
+    rows.forEach((r,i)=>{ ranks[pos][r.ab]={rank:i+1, of:rows.length, avg:Math.round(r.avg*10)/10}; });
+  });
+  return ranks;
+}
+async function ensureCurrentWeekInfo(){
+  if(!app.realLeague) return;
+  const wk=app.currentWeek||1;
+  const teams=[...new Set(((app.draft&&app.draft.picks)||[]).filter(p=>p.team).map(p=>p.team))];
+  let changed=false;
+  for(const ab of teams){
+    const tid=teamIdForAb(ab); if(tid==null) continue;
+    const had=app._teamGameInfo && app._teamGameInfo[tid+"_"+wk];
+    await findGameId(tid, wk);
+    if(!had && app._teamGameInfo && app._teamGameInfo[tid+"_"+wk]) changed=true;
+  }
+  if(changed && app.tab==="team") renderTeam();
+}
+async function ensureDvP(){
+  if(!app.realLeague || app._dvpLoading) return;
+  const wkMax=(app.currentWeek||1)-1;
+  if(app._dvpForWk===wkMax) return;
+  if(wkMax<1){ app._dvpRanks={}; app._dvpForWk=wkMax; return; }
+  app._dvpLoading=true;
+  try{ app._dvpRanks=await computeDvP(wkMax); app._dvpForWk=wkMax; }catch(e){ app._dvpRanks={}; }
+  app._dvpLoading=false;
+  if(app.tab==="team") renderTeam();
+}
+function dvpBadge(pos, opp){
+  const d=app._dvpRanks && app._dvpRanks[pos] && app._dvpRanks[pos][opp]; if(!d) return "";
+  const frac=d.rank/d.of;
+  const color = frac<=0.34 ? "#f87171" : frac>=0.66 ? "#4ade80" : "var(--muted)";
+  return ` · <span style="color:${color};font-weight:800">${pos} ${d.rank}/${d.of}</span>`;
+}
+function teamOppLine(p){
+  if(!p.teamAb) return "";
+  const gi=weekGameInfo(p, app.currentWeek||1);
+  return p.teamAb+(gi?(" "+(gi.home?"vs ":"@ ")+gi.opp):"");
 }
 async function fetchGameBoxFP(eventId){
   const d=await (await fetch(ESPN+"/summary?event="+eventId)).json();
@@ -2016,20 +2118,20 @@ async function pollRealStats(){
     let box; try{ box=await fetchGameBoxFP(eventId); }catch(e){ continue; }
     app.playerGameState[teamId]={period:box.period, final:box.final};
     for(const p of byTeam[teamId]){
-      let curFp, curQtd=0, defQuarterly=null, curBonus=0, curBonusTd=0, curRaw=null, curSacks=0, curInts=0, oppLs=null;
+      let curFp, curQtd=0, curBonus=0, curBonusTd=0, curRaw=null, curSacks=0, curInts=0, totalAllowed=null;
       if(p.pos==="DEF"){
         const opp=Object.keys(box.linescores).find(t=>t!==teamId);
-        oppLs=opp?box.linescores[opp]:[];
-        defQuarterly = oppLs.slice(0, box.period).map(defBracket);
-        curFp = defQuarterly.reduce((s,v)=>s+v,0);
+        const oppLs=opp?box.linescores[opp]:[];
+        totalAllowed = oppLs.slice(0, box.period).reduce((s,v)=>s+v,0);
         const bonus=teamDefenseBonusFP(box.teamStats[teamId]);
         curBonus=bonus.fp; curBonusTd=bonus.td; curSacks=bonus.sacks; curInts=bonus.ints;
+        curFp = defBracket(totalAllowed) + curBonus;
       } else {
         const espnId=(p.id||"").replace(/^e/,"");
         const r=box.byAthlete[espnId]; if(!r) continue;
         curFp=r.fp; curQtd=r.qtd; curRaw=r.raw;
       }
-      updates.push({athlete_id:p.id, week:wk, period:box.period, curFp, curQtd, curBonus, curBonusTd, curSacks, curInts, curRaw, defQuarterly, oppLs, isDef:p.pos==="DEF"});
+      updates.push({athlete_id:p.id, week:wk, period:box.period, curFp, curQtd, curBonus, curBonusTd, curSacks, curInts, curRaw, totalAllowed, isDef:p.pos==="DEF"});
     }
   }
   if(!updates.length) return;
@@ -2043,18 +2145,17 @@ async function pollRealStats(){
     let prevQtd=prev?(prev.prev_qtd||0):0, prevBonus=prev?(prev.prev_bonus||0):0;
     let newPrevStats=prevStats;
     if(u.isDef){
-      // points-allowed is exact per-quarter from the real linescore — safe to overwrite.
-      // sacks/INTs/def-TDs are cumulative-to-date, so diff like offense and credit the live quarter.
-      u.defQuarterly.forEach((pa,i)=>{ const q=i+1; const cur=qpts[q]||{bonus:0,qtd:0,stats:{}};
-        qpts[q]={pa:Math.round(pa*10)/10, bonus:cur.bonus||0, qtd:cur.qtd||0, fp:0,
-          stats:{...(cur.stats||{}), pointsAllowed:(u.oppLs&&u.oppLs[i])||0}}; });
+      // Points allowed is a WHOLE-GAME stat in standard fantasy scoring (evaluated
+      // once off the final/current total, never per-quarter) — stored separately
+      // from the quarter buckets and just overwritten fresh each poll (exact, no diff needed).
+      qpts.pa={allowed:u.totalAllowed, fp:defBracket(u.totalAllowed)};
+      // Sacks/INTs/def-TDs are discrete plays, cumulative-to-date — diff like offense
+      // and credit whichever quarter is live right now.
       const bonusDelta=Math.max(0, u.curBonus-prevBonus), tdDelta=Math.max(0, u.curBonusTd-prevQtd);
       const sackDelta=Math.max(0, u.curSacks-(prevStats.sacks||0)), intDelta=Math.max(0, u.curInts-(prevStats.ints||0));
-      const cp=qpts[u.period]||{pa:0,bonus:0,qtd:0,stats:{}};
-      cp.bonus=Math.round((cp.bonus+bonusDelta)*10)/10; cp.qtd=(cp.qtd||0)+tdDelta;
-      cp.stats={...(cp.stats||{}), sacks:(cp.stats&&cp.stats.sacks||0)+sackDelta, ints:(cp.stats&&cp.stats.ints||0)+intDelta, defTD:(cp.stats&&cp.stats.defTD||0)+tdDelta};
-      qpts[u.period]=cp;
-      Object.keys(qpts).forEach(q=>{ qpts[q].fp=Math.round(((qpts[q].pa||0)+(qpts[q].bonus||0))*10)/10; });
+      const cur=qpts[u.period]||{fp:0,qtd:0,stats:{}};
+      qpts[u.period]={fp:Math.round((cur.fp+bonusDelta)*10)/10, qtd:(cur.qtd||0)+tdDelta,
+        stats:{sacks:(cur.stats&&cur.stats.sacks||0)+sackDelta, ints:(cur.stats&&cur.stats.ints||0)+intDelta, defTD:(cur.stats&&cur.stats.defTD||0)+tdDelta}};
       prevBonus=u.curBonus; prevQtd=u.curBonusTd;
       newPrevStats={sacks:u.curSacks, ints:u.curInts};
     } else {
@@ -2122,8 +2223,12 @@ function refreshRealInv(){
 function realQuarterly(pid, wk){
   const row=app.playerWeekStats[wk] && app.playerWeekStats[wk][pid];
   const q={1:0,2:0,3:0,4:0}, qtd={1:0,2:0,3:0,4:0};
-  if(row && row.q_pts) for(let i=1;i<=4;i++){ const v=row.q_pts[i]||row.q_pts[String(i)]; if(v){ q[i]=v.fp||0; qtd[i]=v.qtd||0; } }
-  return {q, qtd};
+  let pa=null; // DEF only: whole-game points-allowed component, not quarter-scoped
+  if(row && row.q_pts){
+    for(let i=1;i<=4;i++){ const v=row.q_pts[i]||row.q_pts[String(i)]; if(v){ q[i]=v.fp||0; qtd[i]=v.qtd||0; } }
+    if(row.q_pts.pa) pa={allowed:row.q_pts.pa.allowed||0, fp:row.q_pts.pa.fp||0};
+  }
+  return {q, qtd, pa};
 }
 function slotPlayerIds(uid, wk){
   const picks=(app.draft?app.draft.picks:[]).filter(p=>p.user_id===uid);
@@ -2151,6 +2256,7 @@ function computeRealTeamScore(uid, wk){
       const pu=byPlayerPU[contributor];
       if(pu && pu.quarter===q){ if(pu.powerup_key==="double") fp*=2; else if(pu.powerup_key==="freeze") fp=0; }
       total+=fp;
+      if(q===1 && rq.pa) total+=rq.pa.fp; // whole-game DEF component, added once (not per-quarter, not power-up eligible)
       if(rq.qtd[q]>0 && (!bestTD || q<bestTD.q)) bestTD={q,pid:contributor};
     }
   });
@@ -2164,7 +2270,7 @@ function computeRealTeamScore(uid, wk){
 function realPlayerAdjustedTotal(pid, wk){
   const pu=app.powerupPicks.find(p=>p.week===wk && p.player_id===pid);
   const rq=realQuarterly(pid, wk);
-  let total=0;
+  let total=rq.pa?rq.pa.fp:0;
   for(let q=1;q<=4;q++){ let fp=rq.q[q]; if(pu && pu.quarter===q){ if(pu.powerup_key==="double") fp*=2; else if(pu.powerup_key==="freeze") fp=0; } total+=fp; }
   return Math.round(total*10)/10;
 }
@@ -2512,7 +2618,7 @@ function detailCell(p,leftSide,live){
 // ============================ POWER-UPS (weekly allotment) ============================
 function renderStore(){
   const s=$("screen"); if(!s) return; s.innerHTML="";
-  s.appendChild(el("div","card",`<h2 class="title">Your Power-Ups · Week 11</h2>
+  s.appendChild(el("div","card",`<h2 class="title">Your Power-Ups · Week ${app.realLeague?(app.currentWeek||1):11}</h2>
     <div class="muted" style="font-size:13px">Everyone gets <b style="color:var(--gold)">one of each</b> power-up every week. Each player can only be assigned <b style="color:var(--txt)">one power-up per week</b> — so if you Double a guy, you can't also Hot Start him.</div>`));
 
   const inv=el("div","card"); inv.appendChild(el("h2","title","This Week's Power-Ups"));
@@ -2526,10 +2632,7 @@ function renderStore(){
     inv.appendChild(item);
   });
   s.appendChild(inv);
-
-  const rst=el("button","btn sec"); rst.style.width="100%"; rst.textContent="↺ Reset weekly power-ups (demo)";
-  rst.onclick=()=>{ app.inv={double:1,freeze:1,sub:1,hotstart:1}; toast("Weekly power-ups refilled"); renderStore(); };
-  s.appendChild(rst);
+  s.appendChild(el("div","muted","<div style='font-size:11px;text-align:center;margin-top:6px'>Refills automatically to one of each — starting the moment your commissioner opens the new week.</div>"));
 }
 
 // ============================ COMMISSIONER ============================
