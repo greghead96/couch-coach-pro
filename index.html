@@ -218,7 +218,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260823d";
+const BUILD_ID = "20260823e";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -2220,13 +2220,23 @@ function refreshRealInv(){
   const mine=app.powerupPicks.filter(p=>p.week===app.currentWeek && p.user_id===app.user.id);
   ["double","freeze","sub","hotstart"].forEach(k=>{ app.inv[k]= mine.some(p=>p.powerup_key===k) ? 0 : 1; });
 }
+// Fantasy points are ALWAYS derived fresh from the raw stat counts + current
+// scoring settings — never trusted from a stored fp value. That's what keeps
+// the roster row, team total, and the tap-to-see-breakdown modal in
+// permanent agreement, and makes a scoring-rule change or a stat-persistence
+// hiccup self-heal instead of leaving stale numbers on screen.
+function quarterFpFromStats(pos, stats){
+  return Math.round(quarterStatLines(pos, stats).reduce((s,l)=>s+l.pts,0)*10)/10;
+}
 function realQuarterly(pid, wk){
   const row=app.playerWeekStats[wk] && app.playerWeekStats[wk][pid];
   const q={1:0,2:0,3:0,4:0}, qtd={1:0,2:0,3:0,4:0};
   let pa=null; // DEF only: whole-game points-allowed component, not quarter-scoped
   if(row && row.q_pts){
-    for(let i=1;i<=4;i++){ const v=row.q_pts[i]||row.q_pts[String(i)]; if(v){ q[i]=v.fp||0; qtd[i]=v.qtd||0; } }
-    if(row.q_pts.pa) pa={allowed:row.q_pts.pa.allowed||0, fp:row.q_pts.pa.fp||0};
+    const pick=(app.draft&&app.draft.picks||[]).find(x=>x.player_id===pid);
+    const pos=pick&&pick.pos;
+    for(let i=1;i<=4;i++){ const v=row.q_pts[i]||row.q_pts[String(i)]; if(v){ q[i]=quarterFpFromStats(pos, v.stats); qtd[i]=v.qtd||0; } }
+    if(row.q_pts.pa) pa={allowed:row.q_pts.pa.allowed||0, fp:defBracket(row.q_pts.pa.allowed||0)};
   }
   return {q, qtd, pa};
 }
