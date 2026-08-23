@@ -397,7 +397,7 @@ let app = {
               sack:1, defInt:2, defTD:6 },
     league:{ teams:10, rosterSize:16, divisions:2, waiver:"FAAB", faab:100,
              tradeDeadline:"Week 11", tradeReview:"Commissioner", regSeasonWeeks:14,
-             playoffTeams:6, playoffWeeks:"15-17", keepers:false },
+             playoffTeams:6, playoffWeeks:"15-17", keepers:false, testPreseason:false },
     powerups:{ enabled:true, weeklyCap:4, rareOdds:25, rankedMode:false },
   },
 };
@@ -1853,11 +1853,15 @@ function teamIdForAb(ab){
   return app._teamIdMap[ab];
 }
 async function findGameId(teamId, wk){
+  // ESPN reuses week numbers across season types (preseason wk 3 and regular
+  // wk 3 are both "week: 3") — always filter by season type or you'll grab
+  // whichever one the schedule endpoint happens to list first.
+  const stype = (app.settings.league && app.settings.league.testPreseason) ? 1 : 2;
   app._gameIdCache = app._gameIdCache || {};
-  const ck=teamId+"_"+wk; if(app._gameIdCache[ck]!==undefined) return app._gameIdCache[ck];
+  const ck=teamId+"_"+wk+"_"+stype; if(app._gameIdCache[ck]!==undefined) return app._gameIdCache[ck];
   try{
     const sd=await (await fetch(ESPN+"/teams/"+teamId+"/schedule")).json();
-    const ev=(sd.events||[]).find(e=>e.week && e.week.number===wk);
+    const ev=(sd.events||[]).find(e=>e.week && e.week.number===wk && e.seasonType && e.seasonType.type===stype);
     app._gameIdCache[ck]=ev?ev.id:null;
   }catch(e){ app._gameIdCache[ck]=null; }
   return app._gameIdCache[ck];
@@ -2459,6 +2463,14 @@ function renderCommish(){
     const nx=el("button","btn sec","›"); nx.style.padding="10px 16px"; nx.onclick=()=>setWeek((app.currentWeek||1)+1);
     const wl=el("div","",`<div style="text-align:center;font-weight:800">Week ${app.currentWeek||1}</div>`); wl.style.flex="1";
     wr.append(pv,wl,nx); scw.appendChild(wr);
+    const lg=app.settings.league;
+    scw.appendChild(el("div","muted","<div style='font-size:11px;margin-top:12px'>🧪 Preseason and regular season both number weeks 1, 2, 3… — turn this on so the live-scoring engine looks up preseason games instead (for testing before the real season). Saves immediately so every manager's browser polls the same games.</div>"));
+    scw.appendChild(cRow("Test with preseason games","", cToggle(lg.testPreseason, async v=>{
+      lg.testPreseason=v; app._gameIdCache={};
+      try{ await sb.from("leagues").update({settings:app.settings}).eq("id",app.sbLeagueId); }catch(e){}
+      if(app.realLeague) pollRealStats();
+      renderCommish();
+    })));
     s.appendChild(scw);
   }
 
