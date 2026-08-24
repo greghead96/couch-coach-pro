@@ -4,6 +4,11 @@
 -- ============================================================
 
 -- Reset the draft back to "not started" (clears all picks). Commissioner only.
+-- Also clears powerup_picks: those rows reference player_ids from the picks
+-- just deleted, and inventory (refreshRealInv in index.html) is derived
+-- entirely from powerup_picks for the current week — leaving them behind
+-- after a reset permanently "uses up" that week's Double/Freeze/etc. for
+-- players that no longer exist on anyone's roster.
 create or replace function public.reset_draft(lid uuid)
 returns void language plpgsql security definer set search_path = public as $$
 begin
@@ -11,6 +16,7 @@ begin
     raise exception 'Only the commissioner can reset the draft';
   end if;
   delete from public.draft_picks where league_id = lid;
+  delete from public.powerup_picks where league_id = lid;
   update public.drafts set status='pre', updated_at=now() where league_id = lid;
 end; $$;
 
