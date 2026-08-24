@@ -269,6 +269,139 @@ async function autoAdvanceWeeks() {
   }
 }
 
+// ============================ WAIVERS ============================
+// Weekly waiver processing — piggybacks on this same job (see main()) rather
+// than a separate schedule. Runs unconditionally (not gated on a live game),
+// same as autoAdvanceWeeks. FORCE_WAIVERS=true (set via workflow_dispatch
+// input) bypasses the once-a-week timing check for on-demand testing.
+const FORCE_WAIVERS = process.env.FORCE_WAIVERS === "true";
+const MIN_WAIVER_GAP_MS = 5 * 24 * 60 * 60 * 1000; // don't reprocess the same week twice
+
+// Fires once we're at least 5 days past the last run AND into the "Tuesday
+// night / rest of week" window (Tue 09:00 UTC ~= Tue ~4-5am ET, after MNF).
+function isWaiverDue(lastIso) {
+  const last = lastIso ? new Date(lastIso).getTime() : 0;
+  if (Date.now() - last < MIN_WAIVER_GAP_MS) return false;
+  const now = new Date();
+  const day = now.getUTCDay(); // 0=Sun ... 2=Tue ... 6=Sat
+  const hour = now.getUTCHours();
+  if (day === 2) return hour >= 9;
+  return day === 3 || day === 4 || day === 5 || day === 6 || day === 0 || day === 1;
+}
+
+// One attempt at one claim against the league's current in-memory roster
+// state (claimedThisRun / rosterCounts) — mutates both on success so later
+// claims in the same run see an up-to-date picture without re-querying.
+async function tryClaim(claim, league, cap, rosterCounts, claimedThisRun, ownedIds) {
+  if (ownedIds.has(claim.add_player_id) || claimedThisRun.has(claim.add_player_id)) {
+    return { status: "failed", fail_reason: "Player was claimed by another manager first" };
+  }
+  const cnt = rosterCounts[claim.user_id] || 0;
+  if (cnt >= cap && !claim.drop_player_id) {
+    return { status: "failed", fail_reason: "Roster full and no drop selected" };
+  }
+  if (claim.drop_player_id) {
+    await sb(`draft_picks?league_id=eq.${league.id}&user_id=eq.${claim.user_id}&player_id=eq.${claim.drop_player_id}`, { method: "DELETE" });
+    await sb("waiver_wire", {
+      method: "POST", headers: { Prefer: "resolution=merge-duplicates" },
+      body: JSON.stringify([{ league_id: league.id, player_id: claim.drop_player_id, player_name: claim.drop_player_name, dropped_at: new Date().toISOString() }]),
+    });
+    rosterCounts[claim.user_id] = cnt - 1;
+  }
+  const nextPick = await sb(`draft_picks?select=pick_no&league_id=eq.${league.id}&order=pick_no.desc&limit=1`);
+  const pickNo = (nextPick[0] ? nextPick[0].pick_no : 0) + 1;
+  await sb("draft_picks", {
+    method: "POST",
+    body: JSON.stringify([{ league_id: league.id, pick_no: pickNo, round: 0, user_id: claim.user_id,
+      player_id: claim.add_player_id, player_name: claim.add_player_name, pos: claim.add_pos, team: claim.add_team, headshot: claim.add_headshot }]),
+  });
+  rosterCounts[claim.user_id] = (rosterCounts[claim.user_id] || 0) + 1;
+  claimedThisRun.add(claim.add_player_id);
+  const teamName = (league.memberNames && league.memberNames[claim.user_id]) || "A team";
+  await sb("transactions", {
+    method: "POST",
+    body: JSON.stringify([{ league_id: league.id, kind: "add",
+      detail: `${teamName} won a waiver claim on ${claim.add_player_name}${claim.drop_player_id ? ` (dropped ${claim.drop_player_name})` : ""}`,
+      actor: claim.user_id }]),
+  });
+  return { status: "successful", fail_reason: null };
+}
+
+// Reverse Standings: worst record (then worst point differential) picks
+// first — recomputed fresh from standings_cache every run, never persisted.
+// Rolling: a persistent list; only successful claims move a team to the
+// back, standings never factor in. Either way, within a SINGLE run, winning
+// a claim sends that manager to the back of the order for their remaining
+// claims (so one favorable position can't sweep every top target) — the
+// next week's Reverse Standings run still starts over from fresh standings.
+function buildPriorityOrder(league, memberIds) {
+  const method = (league.settings && league.settings.league && league.settings.league.waiver) || "Reverse standings";
+  if (method === "Rolling priority") {
+    const saved = Array.isArray(league.waiver_priority) ? league.waiver_priority.filter((u) => memberIds.includes(u)) : [];
+    const missing = memberIds.filter((u) => !saved.includes(u));
+    return { method, order: [...saved, ...missing] };
+  }
+  const cache = Array.isArray(league.standings_cache) ? league.standings_cache : [];
+  const byUid = {}; cache.forEach((r) => { byUid[r.uid] = r; });
+  const order = memberIds.slice().sort((a, b) => {
+    const ra = byUid[a] || { w: 0, pf: 0, pa: 0 }, rb = byUid[b] || { w: 0, pf: 0, pa: 0 };
+    return (ra.w - rb.w) || ((ra.pf - ra.pa) - (rb.pf - rb.pa)); // fewest wins / worst diff picks first
+  });
+  return { method, order };
+}
+
+async function processLeagueWaivers(league) {
+  const claims = await sb(`waiver_claims?select=*&league_id=eq.${league.id}&status=eq.pending&order=priority.asc`);
+  const members = await sb(`league_members?select=user_id,team_name&league_id=eq.${league.id}`);
+  const memberIds = members.map((m) => m.user_id);
+  league.memberNames = {}; members.forEach((m) => { league.memberNames[m.user_id] = m.team_name || "A team"; });
+  const { method, order } = buildPriorityOrder(league, memberIds);
+
+  if (claims.length) {
+    const cap = (league.settings && league.settings.league && league.settings.league.rosterSize) || 16;
+    const picks = await sb(`draft_picks?select=user_id,player_id&league_id=eq.${league.id}`);
+    const rosterCounts = {}; const ownedIds = new Set();
+    picks.forEach((p) => { rosterCounts[p.user_id] = (rosterCounts[p.user_id] || 0) + 1; ownedIds.add(p.player_id); });
+    const claimedThisRun = new Set();
+    const queues = {}; claims.forEach((c) => { (queues[c.user_id] = queues[c.user_id] || []).push(c); });
+
+    let currentOrder = order.slice();
+    let progressed = true;
+    while (progressed) {
+      progressed = false;
+      for (let i = 0; i < currentOrder.length; i++) {
+        const uid = currentOrder[i];
+        const queue = queues[uid];
+        if (!queue || !queue.length) continue;
+        const claim = queue.shift();
+        const outcome = await tryClaim(claim, league, cap, rosterCounts, claimedThisRun, ownedIds);
+        await sb(`waiver_claims?id=eq.${claim.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ status: outcome.status, fail_reason: outcome.fail_reason, processed_at: new Date().toISOString() }),
+        });
+        progressed = true;
+        if (outcome.status === "successful") { currentOrder.splice(i, 1); currentOrder.push(uid); }
+        break; // order changed (or a claim was consumed) — restart the scan
+      }
+    }
+    if (method === "Rolling priority") {
+      await sb(`leagues?id=eq.${league.id}`, { method: "PATCH", body: JSON.stringify({ waiver_priority: currentOrder }) });
+    }
+  }
+
+  await sb(`leagues?id=eq.${league.id}`, { method: "PATCH", body: JSON.stringify({ last_waiver_process: new Date().toISOString() }) });
+  console.log(`waivers: league ${league.id} processed (${method}), ${claims.length} claim(s)`);
+}
+
+async function processWaivers() {
+  const leagues = await sb("leagues?select=id,settings,waiver_priority,standings_cache,last_waiver_process");
+  for (const league of leagues) {
+    if (!FORCE_WAIVERS && !isWaiverDue(league.last_waiver_process)) continue;
+    try { await processLeagueWaivers(league); }
+    catch (e) { console.error(`waivers: league ${league.id} failed:`, e.message); }
+  }
+}
+
 // The GitHub Actions trigger only fires every 5 minutes (its own minimum), but
 // each run loops internally every ~20s for its own ~4.5-minute window before
 // exiting — so the next scheduled run picks up right as this one finishes,
@@ -282,6 +415,7 @@ const POLL_INTERVAL_MS = 20_000;
 
 async function main() {
   await autoAdvanceWeeks();
+  await processWaivers();
 
   let live;
   try { live = await anyGameLiveOrStartingSoon(); }

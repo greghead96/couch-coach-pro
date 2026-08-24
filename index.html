@@ -219,7 +219,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260824w";
+const BUILD_ID = "20260824x";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -417,7 +417,7 @@ let app = {
   leagueMatchup:null, schedTeam:"Your Team", pFilter:"ALL", pTeam:"ALL", pShowAll:false, pSearch:"", pSort:"rank", pView:"players", drafted:[], pStatTab:null,
   myTeam:"Your Team", oppTeam:"Burrow Bandits", realLeague:false,
   draft:null, draftChannel:null, isCommish:false, members:[], queue:[], draftView:"board", commishMode:false, lineup:null, lineupEdit:false, trades:[], tradeBuilder:null, transactions:[], teamTab:"lineup", txFilter:"all",
-  schedule:[], currentWeek:1, lineupsByUser:{},
+  schedule:[], currentWeek:1, lineupsByUser:{}, waiverWire:[], waiverClaims:[],
   powerupPicks:[], playerWeekStats:{}, playerGameState:{}, weeklyLineups:{}, statsPollId:null,
   pool:null, poolLoading:false, poolError:null, pDetail:null,
   nfl:{ games:null, loading:false, error:null, selected:null, gamecast:null, view:"plays", pollId:null, pollFor:null },
@@ -425,7 +425,7 @@ let app = {
     scoring:{ passYdsPerPt:25, passTD:4, passInt:-2, rushYdsPerPt:10, rushTD:6,
               ppr:0.5, recYdsPerPt:10, recTD:6, fumLost:-2, twoPt:2,
               sack:1, defInt:2, defTD:6 },
-    league:{ teams:10, rosterSize:16, divisions:2, waiver:"FAAB", faab:100,
+    league:{ teams:10, rosterSize:16, divisions:2, waiver:"Reverse standings",
              tradeDeadline:"Week 11", tradeReview:"Commissioner", regSeasonWeeks:14,
              playoffTeams:6, playoffWeeks:"15-17", keepers:false, testPreseason:false },
     powerups:{ enabled:true, weeklyCap:4, rareOdds:25, rankedMode:false },
@@ -881,8 +881,11 @@ async function loadLeagueData(){
     LEAGUE.length=0;
     members.forEach(m=> LEAGUE.push({ team:m.team_name||"Team", w:0, l:0, pf:0, pa:0, streak:"—", pu:0, me:m.user_id===app.user.id }));
     // load persisted league settings
-    try{ const { data:lg } = await sb.from("leagues").select("settings").eq("id", app.sbLeagueId).maybeSingle();
+    try{ const { data:lg } = await sb.from("leagues").select("settings, last_waiver_process, waiver_priority, standings_cache").eq("id", app.sbLeagueId).maybeSingle();
       if(lg && lg.settings){ ["scoring","league","powerups"].forEach(k=>{ if(lg.settings[k]) app.settings[k]={...app.settings[k], ...lg.settings[k]}; }); }
+      if(app.settings.league.waiver==="FAAB") app.settings.league.waiver="Reverse standings"; // FAAB retired
+      if(lg){ app.leagueLastWaiverProcess=lg.last_waiver_process?new Date(lg.last_waiver_process).getTime():0;
+        app.leagueWaiverPriority=lg.waiver_priority||[]; app.leagueStandingsCache=lg.standings_cache||[]; }
     }catch(e){}
     app.realLeague=true;
   }catch(e){ app.realLeague=false; }
@@ -893,7 +896,7 @@ function copyCode(code){
 }
 async function enterLeague(id, name, code){
   app.connectedLeague=name; app.sbLeagueId=id; app.leagueCode=code||null;
-  await loadLeagueData(); await loadDraft(); await loadLineup(); await loadAllLineups(); await loadSchedule(); await loadTrades(); await loadTransactions(); loadQueue(); subscribeDraft();
+  await loadLeagueData(); await loadDraft(); await loadLineup(); await loadAllLineups(); await loadSchedule(); await loadTrades(); await loadTransactions(); await loadWaivers(); loadQueue(); subscribeDraft();
   if(app.realLeague){ await loadAllRealScoringData(); setupRealMatchup(); refreshRealInv(); }
   app.sim=freshSim(); app.tab="home"; render();
 }
@@ -1697,11 +1700,12 @@ function faRow(p, btnLabel, btnCls, onClick, showBye, scoreMode){
   const rk = rnum ? `<span style="color:var(--gold);font-size:10px;font-weight:800">#${rnum}</span> ` : "";
   const byeWk = showBye ? teamByeWeek(p.teamAb) : null;
   const byeTxt = byeWk ? ` · <span style="color:var(--gold)">Bye Wk ${byeWk}</span>` : "";
+  const waiverTxt = (scoreMode==="fa" && app.realLeague && p.id && isOnWaivers(p.id)) ? ` · <span style="color:var(--opp);font-weight:800">On Waivers</span>` : "";
   let meta;
   if(app.realLeague){
     const gi=weekGameInfo(p, app.currentWeek||1);
     const oppTxt = gi ? ` · ${gi.home?"vs":"@"} ${gi.opp}${gi.date?" · "+gameTimeLabel(gi.date):""}` : "";
-    meta = `${p.teamAb||""}${oppTxt}${dvpBadge(p.pos, gi&&gi.opp)}${byeTxt}`;
+    meta = `${p.teamAb||""}${oppTxt}${dvpBadge(p.pos, gi&&gi.opp)}${byeTxt}${waiverTxt}`;
   } else {
     meta = `${p.teamAb||p.opp||""}${p.jersey?" · #"+p.jersey:""}${byeTxt}`;
   }
@@ -1779,8 +1783,16 @@ function renderPlayersList(){
       const row=faRow(p,"","",()=>{},false,"fa");
       const btnSlot=row.lastElementChild; btnSlot.innerHTML=`<span class="muted" style="font-size:11px;margin-left:auto">🔒 ${owner}</span>`;
       c.appendChild(row);
+    } else if(app.realLeague){
+      const draftDone = app.draft && app.draft.status==="done";
+      const onWaivers = draftDone && isOnWaivers(p.id);
+      const label = !draftDone ? "＋" : (onWaivers ? "🚫" : "＋");
+      c.appendChild(faRow(p, label, onWaivers?" sec":" sec", ()=>{
+        if(!draftDone){ toast("Add/drop opens once the draft is complete"); return; }
+        openRealAddModal(p);
+      }, false, "fa"));
     } else {
-      c.appendChild(faRow(p, app.realLeague?"＋":"+ Add", app.realLeague?" sec":"", ()=>{ if(app.realLeague){ toast("Add/drop (waivers) is coming in a future update"); } else addPlayer(p); }, false, "fa"));
+      c.appendChild(faRow(p, "+ Add", "", ()=>addPlayer(p), false, "fa"));
     }
   });
   s.appendChild(c);
@@ -1806,6 +1818,45 @@ function dropPlayer(p){
   let i=myBench.indexOf(p); if(i>=0){ myBench.splice(i,1); }
   else { i=myStarters.indexOf(p); if(i>=0) myStarters.splice(i,1); }
   toast("Dropped "+p.name); renderPlayers();
+}
+// Real-league add flow — instant for free agents, a waiver claim for
+// anyone still locked from a recent drop (see isOnWaivers). Roster-full
+// requires picking a drop in the same step; otherwise it's a single tap.
+function openRealAddModal(p){
+  const ov=$("overlay");
+  const onWaivers=isOnWaivers(p.id);
+  const cap=app.settings.league.rosterSize||16;
+  const mine=myDraftPicks();
+  const needsDrop=mine.length>=cap;
+  const dropOptions=mine.map((pk,i)=>`<button class="btn sec radOpt" data-i="${i}" style="width:100%;text-align:left;margin-top:6px">${pk.pos} · ${pk.player_name}</button>`).join("");
+  const doIt=async(dropPk)=>{
+    const btn=ov.querySelector("#radGo"); if(btn){ btn.disabled=true; btn.textContent="…"; }
+    try{
+      if(onWaivers){
+        const {error}=await sb.rpc("submit_waiver_claim",{lid:app.sbLeagueId, add_pid:p.id, add_pname:p.name, add_ppos:p.pos, add_pteam:p.teamAb||"", add_phead:p.headshot||p.logo||"",
+          drop_pid:dropPk?dropPk.player_id:null, drop_pname:dropPk?dropPk.player_name:null});
+        if(error) throw error;
+        toast("Claim submitted — processes with the rest of the league next waiver run");
+      } else {
+        const {error}=await sb.rpc("add_free_agent",{lid:app.sbLeagueId, pid:p.id, pname:p.name, ppos:p.pos, pteam:p.teamAb||"", phead:p.headshot||p.logo||"",
+          drop_pid:dropPk?dropPk.player_id:null, drop_pname:dropPk?dropPk.player_name:null});
+        if(error) throw error;
+        toast("Added "+p.name);
+      }
+      $("overlay").innerHTML="";
+      await loadDraft(); await loadWaivers(); renderPlayers();
+    }catch(e){ toast(e.message||"Failed"); if(btn){ btn.disabled=false; btn.textContent=onWaivers?"Submit Claim":"Add "+p.name; } }
+  };
+  ov.innerHTML=`<div class="modal"><div class="box" style="max-width:380px;text-align:left">
+    <div class="modal-x" id="radClose">✕</div>
+    <div style="font-weight:800">${onWaivers?"🚫 Submit Waiver Claim":"＋ Add Free Agent"}</div>
+    <div class="muted" style="font-size:12px;margin:6px 0 10px">${onWaivers?(p.name+" is on waivers — claims process together next waiver run, in priority order."):(p.name+" is a free agent — this adds them right away.")}</div>
+    ${needsDrop?`<div style="font-weight:700;font-size:13px;margin-top:8px">Roster full (${mine.length}/${cap}) — choose who to drop:</div><div style="max-height:38vh;overflow:auto">${dropOptions||'<div class="muted">No droppable players found.</div>'}</div>`
+      :`<button class="btn" id="radGo" style="width:100%;margin-top:8px">${onWaivers?"Submit Claim":"Add "+p.name}</button>`}
+  </div></div>`;
+  ov.querySelector("#radClose").onclick=()=>{ ov.innerHTML=""; };
+  if(needsDrop){ ov.querySelectorAll(".radOpt").forEach(b=> b.onclick=()=> doIt(mine[+b.dataset.i])); }
+  else { const go=ov.querySelector("#radGo"); if(go) go.onclick=()=>doIt(null); }
 }
 function openDropModal(pAdd){
   const ov=$("overlay"); const all=rosterAll();
@@ -1855,8 +1906,9 @@ function subscribeDraft(){
     if(after>before) toast("📨 New trade offer!");
     if(!app.showConfirm && app.user && app.connectedLeague) render(); };
   const refreshTx=async ()=>{ await loadTransactions(); if(!app.showConfirm && app.user && app.connectedLeague) render(); };
-  const refreshSchedule=async ()=>{ await loadSchedule(); if(app.realLeague) setupRealMatchup();
+  const refreshSchedule=async ()=>{ await loadSchedule(); await loadLeagueData(); if(app.realLeague) setupRealMatchup();
     if(!app.showConfirm && app.user && app.connectedLeague) render(); };
+  const refreshWaivers=async ()=>{ await loadWaivers(); if(!app.showConfirm && app.user && app.connectedLeague) render(); };
   const refreshScoring=async ()=>{ if(!app.realLeague) return; await loadAllRealScoringData(); refreshRealInv();
     if(!app.showConfirm && app.user && app.connectedLeague) render(); };
   const refreshLineups=async ()=>{ if(!app.realLeague) return; await loadLineup(); await loadAllLineups();
@@ -1872,6 +1924,8 @@ function subscribeDraft(){
     .on("postgres_changes",{event:"*",schema:"public",table:"powerup_picks",filter:"league_id=eq."+lid}, refreshScoring)
     .on("postgres_changes",{event:"*",schema:"public",table:"weekly_lineups",filter:"league_id=eq."+lid}, refreshScoring)
     .on("postgres_changes",{event:"*",schema:"public",table:"player_week_stats"}, refreshScoring)
+    .on("postgres_changes",{event:"*",schema:"public",table:"waiver_claims",filter:"league_id=eq."+lid}, refreshWaivers)
+    .on("postgres_changes",{event:"*",schema:"public",table:"waiver_wire",filter:"league_id=eq."+lid}, refreshWaivers)
     .subscribe();
 }
 function unsubscribeDraft(){ if(app.draftChannel){ try{ sb.removeChannel(app.draftChannel); }catch(e){} app.draftChannel=null; } }
@@ -1952,6 +2006,18 @@ async function loadTransactions(){
   if(!app.sbLeagueId){ app.transactions=[]; return; }
   try{ const {data}=await sb.from("transactions").select("*").eq("league_id",app.sbLeagueId).order("created_at",{ascending:false}); app.transactions=data||[]; }
   catch(e){ app.transactions=[]; }
+}
+async function loadWaivers(){
+  if(!app.sbLeagueId){ app.waiverWire=[]; app.waiverClaims=[]; return; }
+  try{ const {data}=await sb.from("waiver_wire").select("*").eq("league_id",app.sbLeagueId); app.waiverWire=data||[]; }
+  catch(e){ app.waiverWire=[]; }
+  try{ const {data}=await sb.from("waiver_claims").select("*").eq("league_id",app.sbLeagueId).order("priority",{ascending:true}); app.waiverClaims=data||[]; }
+  catch(e){ app.waiverClaims=[]; }
+}
+function isOnWaivers(pid){
+  const w=(app.waiverWire||[]).find(x=>x.player_id===pid); if(!w) return false;
+  const cutoff=app.leagueLastWaiverProcess||0;
+  return new Date(w.dropped_at).getTime() > cutoff;
 }
 function renderTransactions(s){
   const chips=el("div","chips"); chips.style.marginBottom="10px";
@@ -2644,7 +2710,91 @@ function getRealStandings(){
   // Tiebreak on point differential (PF-PA), not raw PF — a team that wins
   // low-scoring games shouldn't out-rank one that's actually outscoring
   // opponents by more, at the same record.
-  return rows.sort((a,b)=>b.w-a.w||(b.pf-b.pa)-(a.pf-a.pa));
+  const sorted=rows.sort((a,b)=>b.w-a.w||(b.pf-b.pa)-(a.pf-a.pa));
+  syncStandingsCache(sorted);
+  return sorted;
+}
+// Waiver processing (background job) has no access to the power-up-adjusted
+// scoring engine — that logic only exists client-side — so any browser that
+// computes real standings best-effort pushes them here for the job to read
+// when ordering Reverse Standings waiver priority. Guarded so it only
+// writes when the snapshot actually changed, not on every render.
+function syncStandingsCache(rows){
+  if(!app.sbLeagueId) return;
+  const snap=rows.map(r=>({uid:r.uid,w:r.w,l:r.l,t:r.t,pf:r.pf,pa:r.pa}));
+  const key=JSON.stringify(snap);
+  if(app._lastStandingsPush===key) return;
+  app._lastStandingsPush=key;
+  sb.rpc("sync_standings_cache",{lid:app.sbLeagueId, standings:snap}).then(({error})=>{ if(error) app._lastStandingsPush=null; });
+}
+// Worst-first order for waiver priority. Reverse Standings recomputes live
+// from getRealStandings() (best-first, so reversed); Rolling priority uses
+// the persisted list the background job maintains (see phase5 SQL /
+// poll-scores.js's buildPriorityOrder — same logic, mirrored here for
+// display since the server-side run is the one that actually matters).
+function computeWaiverOrder(){
+  const method=(app.settings.league&&app.settings.league.waiver)||"Reverse standings";
+  const memberIds=(app.members||[]).map(m=>m.user_id);
+  let order;
+  if(method==="Rolling priority"){
+    const saved=(app.leagueWaiverPriority||[]).filter(u=>memberIds.includes(u));
+    const missing=memberIds.filter(u=>!saved.includes(u));
+    order=[...saved,...missing];
+  } else {
+    order=getRealStandings().slice().reverse().map(r=>r.uid);
+  }
+  return {method, order};
+}
+function renderWaiversTab(s){
+  const {method, order}=computeWaiverOrder();
+  const c=el("div","card");
+  c.appendChild(el("h2","title","📋 Waiver Order"));
+  c.appendChild(el("div","muted",`<div style="font-size:12px;margin-bottom:8px">Method: <b style="color:var(--gold)">${method}</b> · ${method==="Reverse standings"?"resets every week from current standings — worst record picks first":"persists — only a successful claim sends you to the back"}</div>`));
+  order.forEach((uid,i)=>{
+    const m=(app.members||[]).find(x=>x.user_id===uid);
+    const row=el("div","",`<div style="padding:8px 0;border-top:1px solid var(--line);font-size:13px">${i+1}. ${(m&&m.team_name)||"Team"}${uid===(app.user&&app.user.id)?' <span class="muted" style="font-size:11px">(you)</span>':''}</div>`);
+    c.appendChild(row);
+  });
+  const last=app.leagueLastWaiverProcess?new Date(app.leagueLastWaiverProcess):null;
+  c.appendChild(el("div","muted",`<div style="font-size:11px;margin-top:10px">${last?"Last processed "+last.toLocaleString():"Not processed yet"} · claims process automatically, weekly.</div>`));
+  s.appendChild(c);
+
+  const mine=(app.waiverClaims||[]).filter(x=>x.status==="pending" && x.user_id===(app.user&&app.user.id)).sort((a,b)=>a.priority-b.priority);
+  const cc=el("div","card");
+  cc.appendChild(el("h2","title","Your Pending Claims"));
+  if(!mine.length){ cc.appendChild(el("div","muted","<div style='font-size:13px'>No pending claims — submit one from the Players tab.</div>")); }
+  else mine.forEach((cl,i)=>{
+    const row=el("div","row"); row.style.cssText="padding:8px 0;border-top:1px solid var(--line);align-items:center;gap:8px";
+    row.innerHTML=`<div style="flex:1"><div style="font-weight:700;font-size:13px">#${cl.priority} · ${cl.add_player_name}</div>
+      <div class="muted" style="font-size:11px">${cl.drop_player_name?"drop "+cl.drop_player_name:"no drop needed"}</div></div>`;
+    const btns=el("div","row"); btns.style.cssText="gap:4px;flex:none";
+    const up=el("button","btn sm sec","↑"); up.disabled=i===0; up.onclick=()=>reorderClaim(mine,i,-1);
+    const dn=el("button","btn sm sec","↓"); dn.disabled=i===mine.length-1; dn.onclick=()=>reorderClaim(mine,i,1);
+    const cancel=el("button","btn sm sec","✕"); cancel.onclick=async()=>{
+      try{ const {error}=await sb.rpc("cancel_waiver_claim",{cid:cl.id}); if(error) throw error; await loadWaivers(); renderLeague(); }
+      catch(e){ toast(e.message||"Cancel failed"); } };
+    btns.append(up,dn,cancel); row.appendChild(btns);
+    cc.appendChild(row);
+  });
+  s.appendChild(cc);
+
+  const history=(app.waiverClaims||[]).filter(x=>x.status!=="pending" && x.user_id===(app.user&&app.user.id)).slice(0,10);
+  if(history.length){
+    const hc=el("div","card"); hc.appendChild(el("h2","title","Recent Claim Results"));
+    history.forEach(cl=>{
+      const ok=cl.status==="successful";
+      hc.appendChild(el("div","",`<div style="padding:7px 0;border-top:1px solid var(--line);font-size:12px">
+        ${ok?"✅":"❌"} ${cl.add_player_name} <span class="muted">${ok?"— won the claim":"— "+(cl.fail_reason||"failed")}</span></div>`));
+    });
+    s.appendChild(hc);
+  }
+}
+async function reorderClaim(mine, i, dir){
+  const j=i+dir; if(j<0||j>=mine.length) return;
+  const ids=mine.map(x=>x.id);
+  const tmp=ids[i]; ids[i]=ids[j]; ids[j]=tmp;
+  try{ const {error}=await sb.rpc("reorder_waiver_claims",{lid:app.sbLeagueId, ordered_ids:ids}); if(error) throw error; await loadWaivers(); renderLeague(); }
+  catch(e){ toast(e.message||"Reorder failed"); }
 }
 function openBenchMove(pick){
   if(isPlayerLocked(pick)){ toast("🔒 "+pick.player_name+"'s game already started — can't start them now"); return; }
@@ -2807,7 +2957,7 @@ function renderDraft(){
 function renderLeague(){
   const s=$("screen"); s.innerHTML="";
   const ts=el("div","tabset");
-  [["scoreboard","Scores"],["standings","Standings"],["playoffs","Playoffs"],["transactions","Transactions"],["schedule","Schedule"],["chat","Chat"]].forEach(([id,lab])=>{
+  [["scoreboard","Scores"],["standings","Standings"],["waivers","Waivers"],["playoffs","Playoffs"],["transactions","Transactions"],["schedule","Schedule"],["chat","Chat"]].forEach(([id,lab])=>{
     const b=el("button",app.leagueTab===id?"on":"",lab); b.onclick=()=>{app.leagueTab=id;app.leagueMatchup=null;renderLeague();}; ts.appendChild(b);
   });
   s.appendChild(ts);
@@ -2844,6 +2994,8 @@ function renderLeague(){
       html+=`<tr class="${t.me?'me':''}"><td>${i+1}</td><td>${t.team}</td><td>${t.w}-${t.l}</td><td>${t.pf}</td><td>${t.pa||"—"}</td><td style="color:${sc};font-weight:700">${st||"—"}</td><td style="color:var(--gold);font-weight:700;white-space:nowrap">${pu}</td></tr>`;
     });
     html+=`</table>`; wrap.innerHTML=html; c.appendChild(wrap); s.appendChild(c);
+  } else if(app.leagueTab==="waivers"){
+    renderWaiversTab(s);
   } else if(app.leagueTab==="schedule"){
     const teams=LEAGUE.map(t=>t.team);
     const ci=Math.max(0,teams.indexOf(app.schedTeam));
@@ -3142,9 +3294,9 @@ function renderCommish(){
   // Acquisitions & trades
   const acq=el("div","card"); acq.appendChild(el("h2","title","Acquisitions & Trades"));
   acq.append(
-    cRow("Waiver type","", cSel(["FAAB","Rolling priority","Reverse standings"], lg.waiver, v=>{lg.waiver=v;renderCommish();})),
+    cRow("Waiver type","", cSel(["Rolling priority","Reverse standings"], lg.waiver, v=>{lg.waiver=v;renderCommish();})),
   );
-  if(lg.waiver==="FAAB") acq.append(cRow("FAAB budget","$ per team / season", cNum(lg.faab,1,v=>lg.faab=v)));
+  acq.append(el("div","muted","<div style='font-size:11px;margin:-4px 0 8px'>Reverse standings resets every week — worst record picks first. Rolling priority persists week to week — only a successful claim sends you to the back.</div>"));
   acq.append(
     cRow("Trade deadline","", cSel(["Week 9","Week 10","Week 11","Week 12","No deadline"], lg.tradeDeadline, v=>{lg.tradeDeadline=v;renderCommish();})),
     cRow("Trade review","who approves", cSel(["Commissioner","League vote","No review"], lg.tradeReview, v=>{lg.tradeReview=v;renderCommish();})),
