@@ -218,7 +218,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260824e";
+const BUILD_ID = "20260824f";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -2341,10 +2341,19 @@ async function loadAllRealScoringData(){
       sb.from("weekly_lineups").select("*").eq("league_id",app.sbLeagueId),
       ids.length ? sb.from("player_week_stats").select("*").in("athlete_id",ids) : Promise.resolve({data:[]}),
     ]);
+    if(pu.error||wl.error||pws.error){
+      console.error("loadAllRealScoringData failed", {puError:pu.error, wlError:wl.error, pwsError:pws.error});
+      if(!app._scoringLoadWarned){ app._scoringLoadWarned=true;
+        toast("⚠ Couldn't load power-up/score data: "+((pu.error||wl.error||pws.error).message)); }
+      return;
+    }
     app.powerupPicks=pu.data||[];
     app.weeklyLineups={}; (wl.data||[]).forEach(r=>{ (app.weeklyLineups[r.week]=app.weeklyLineups[r.week]||{})[r.user_id]=r.starters; });
     app.playerWeekStats={}; (pws.data||[]).forEach(r=>{ (app.playerWeekStats[r.week]=app.playerWeekStats[r.week]||{})[r.athlete_id]=r; });
-  }catch(e){}
+  }catch(e){
+    console.error("loadAllRealScoringData threw", e);
+    if(!app._scoringLoadWarned){ app._scoringLoadWarned=true; toast("⚠ Couldn't load power-up/score data: "+e.message); }
+  }
 }
 async function persistPowerup(key,pid,pname,q,targetId){
   if(!app.realLeague) return;
