@@ -218,7 +218,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260824h";
+const BUILD_ID = "20260824i";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -646,8 +646,9 @@ function usePU(k,p){
   const cq=app.realLeague ? realCurrentQuarterFor(p) : currentQuarter();
   if(app.realLeague){
     const tid=teamIdForAb(p.teamAb);
-    console.log("DEBUG usePU quarter-gate", {name:p.name, teamAb:p.teamAb, tid, playerGameState:tid!=null?app.playerGameState[tid]:undefined, cq});
-    toast(`DEBUG ${p.name}: tid=${tid} state=${tid!=null?JSON.stringify(app.playerGameState[tid]):"n/a"} cq=${cq}`);
+    const inScanList=[...myStarters,...myBench,...oppStarters,...oppBench].some(x=>x.id===p.id);
+    console.log("DEBUG usePU quarter-gate", {name:p.name, teamAb:p.teamAb, tid, playerGameState:tid!=null?app.playerGameState[tid]:undefined, cq, inScanList});
+    toast(`DEBUG ${p.name}: tid=${tid} state=${tid!=null?JSON.stringify(app.playerGameState[tid]):"n/a"} cq=${cq} inScan=${inScanList}`);
   }
   const allowed=[]; for(let q=1;q<=4;q++) if(q>cq) allowed.push(q);
   if(!allowed.length){ toast("No upcoming quarters left"); app.armed=null; renderMatchup(); return; }
@@ -2385,6 +2386,11 @@ async function persistPowerup(key,pid,pname,q,targetId){
 function refreshRealInv(){
   if(!app.realLeague || !app.user) return;
   const mine=app.powerupPicks.filter(p=>p.week===app.currentWeek && p.user_id===app.user.id);
+  if(app._invDebugFor!==app.powerupPicks){
+    app._invDebugFor=app.powerupPicks;
+    console.log("DEBUG refreshRealInv", {myUserId:app.user.id, currentWeek:app.currentWeek, allPicks:app.powerupPicks, mine});
+    toast(`DEBUG inv: wk=${app.currentWeek} myUid=${app.user.id.slice(0,8)} totalPicks=${app.powerupPicks.length} mine=${mine.length} (${mine.map(p=>p.powerup_key).join(",")})`);
+  }
   ["double","freeze","sub","hotstart"].forEach(k=>{ app.inv[k]= mine.some(p=>p.powerup_key===k) ? 0 : 1; });
 }
 // Fantasy points are ALWAYS derived fresh from the raw stat counts + current
