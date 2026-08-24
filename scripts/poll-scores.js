@@ -66,20 +66,41 @@ function teamDefenseBonusRaw(statGroups) {
   return { sacks, ints, td: defTD + intTD };
 }
 
+// Thrown for a 429 specifically, so callers can distinguish "back off" from
+// an ordinary transient failure worth just retrying next cycle.
+class RateLimitedError extends Error {}
+async function espnFetch(url) {
+  const r = await fetch(url);
+  if (r.status === 429) throw new RateLimitedError(`429 from ${url}`);
+  if (!r.ok) throw new Error(`${r.status} from ${url}`);
+  return r.json();
+}
+
 const gameIdCache = {};
 async function findGameId(teamId, wk, seasonType) {
   const ck = `${teamId}_${wk}_${seasonType}`;
   if (gameIdCache[ck] !== undefined) return gameIdCache[ck];
-  try {
-    const sd = await (await fetch(`${ESPN}/teams/${teamId}/schedule`)).json();
-    const ev = (sd.events || []).find((e) => e.week && e.week.number === wk && e.seasonType && e.seasonType.type === seasonType);
-    gameIdCache[ck] = ev ? ev.id : null;
-  } catch (e) { gameIdCache[ck] = null; }
+  const sd = await espnFetch(`${ESPN}/teams/${teamId}/schedule`);
+  const ev = (sd.events || []).find((e) => e.week && e.week.number === wk && e.seasonType && e.seasonType.type === seasonType);
+  gameIdCache[ck] = ev ? ev.id : null;
   return gameIdCache[ck];
+}
+// Cheap single check: is there any real reason to be polling right now at all?
+// Cuts request volume by well over 90% outside actual game windows, which is
+// the main thing that could ever get this rate-limited or blocked.
+async function anyGameLiveOrStartingSoon() {
+  const d = await espnFetch(`${ESPN}/scoreboard`);
+  const now = Date.now();
+  return (d.events || []).some((e) => {
+    const state = e.status && e.status.type && e.status.type.state;
+    if (state === "in") return true;
+    if (state === "pre") return new Date(e.date).getTime() - now < 30 * 60 * 1000;
+    return false;
+  });
 }
 
 async function fetchGameBox(eventId) {
-  const d = await (await fetch(`${ESPN}/summary?event=${eventId}`)).json();
+  const d = await espnFetch(`${ESPN}/summary?event=${eventId}`);
   const comp = (d.header && d.header.competitions && d.header.competitions[0]) || {};
   const status = comp.status || {};
   const final = !!(status.type && status.type.completed);
@@ -117,10 +138,13 @@ async function pollLeague(league) {
   const updates = [];
   for (const ab of Object.keys(byTeam)) {
     const teamId = TEAM_ID_BY_AB[ab];
-    const eventId = await findGameId(teamId, wk, seasonType);
+    let eventId;
+    try { eventId = await findGameId(teamId, wk, seasonType); }
+    catch (e) { if (e instanceof RateLimitedError) throw e; console.error(`schedule fetch failed for ${ab}`, e.message); continue; }
     if (!eventId) continue;
     let box;
-    try { box = await fetchGameBox(eventId); } catch (e) { console.error(`box fetch failed for ${ab}`, e.message); continue; }
+    try { box = await fetchGameBox(eventId); }
+    catch (e) { if (e instanceof RateLimitedError) throw e; console.error(`box fetch failed for ${ab}`, e.message); continue; }
     for (const p of byTeam[ab]) {
       if (p.pos === "DEF") {
         const athleteId = `def_${teamId}`;
@@ -192,7 +216,8 @@ async function pollLeague(league) {
 async function pollOnce() {
   const leagues = await sb("leagues?select=id,settings,current_week&current_week=not.is.null");
   for (const league of leagues) {
-    try { await pollLeague(league); } catch (e) { console.error(`league ${league.id} failed:`, e.message); }
+    try { await pollLeague(league); }
+    catch (e) { if (e instanceof RateLimitedError) throw e; console.error(`league ${league.id} failed:`, e.message); }
   }
   return leagues.length;
 }
@@ -201,11 +226,22 @@ async function pollOnce() {
 // each run loops internally every ~20s for its own ~4.5-minute window before
 // exiting — so the next scheduled run picks up right as this one finishes,
 // giving near-continuous ~20s-cadence polling instead of one-shot-every-5-min.
-// Public repos get unlimited free Actions minutes, so this costs nothing extra.
+// Public repos get unlimited free Actions minutes, so the frequency itself
+// costs nothing — the actual safeguard against ever being rate-limited is
+// doing this ONLY while a game is actually live (see anyGameLiveOrStartingSoon
+// above), which cuts total request volume by 90%+ compared to running 24/7.
 const LOOP_BUDGET_MS = 270_000; // 4.5 min — leaves headroom before the next 5-min trigger
 const POLL_INTERVAL_MS = 20_000;
 
 async function main() {
+  let live;
+  try { live = await anyGameLiveOrStartingSoon(); }
+  catch (e) {
+    console.log(`scoreboard check failed (${e.message}) — skipping this run, next one retries in 5 min.`);
+    return;
+  }
+  if (!live) { console.log("no NFL games live or starting soon — skipping this run."); return; }
+
   const start = Date.now();
   let cycle = 0;
   while (true) {
@@ -214,6 +250,10 @@ async function main() {
       const n = await pollOnce();
       console.log(`cycle ${cycle}: polled ${n} league(s), ${((Date.now() - start) / 1000).toFixed(0)}s elapsed`);
     } catch (e) {
+      if (e instanceof RateLimitedError) {
+        console.log(`Got a 429 from ESPN on cycle ${cycle} — backing off for the rest of this run. Next scheduled run retries in ~5 min.`);
+        break;
+      }
       console.error(`cycle ${cycle} failed:`, e.message);
     }
     if (Date.now() - start >= LOOP_BUDGET_MS) break;
