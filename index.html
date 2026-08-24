@@ -218,7 +218,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260824b";
+const BUILD_ID = "20260824c";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -1050,7 +1050,7 @@ function recapCard(){
 function renderMatchup(){
   syncRealPointsToPlayers();
   const s=$("screen"); if(!s) return; s.innerHTML="";
-  const others = app.sim.others||[];
+  const others = app.realLeague ? realOtherMatchups(app.currentWeek||1) : (app.sim.others||[]);
   const all = [{your:true, a:app.myTeam, b:app.oppTeam}, ...others.map(m=>({your:false, ...m}))];
   if(app.matchupIdx>=all.length) app.matchupIdx=0;
   const idx=app.matchupIdx; const m=all[idx];
@@ -1323,7 +1323,7 @@ function renderTeam(){
     SLOTS.forEach((slot,i)=>{
       const p=app.lineup[i]?pickById(app.lineup[i]):null;
       const row=el("div","plr"+(edit?" tappable":"")); row.style.gridTemplateColumns="42px 34px 1fr auto"; row.style.cursor="pointer";
-      if(p) row.innerHTML=`<div class="pos">${slot.lbl}</div>${avatarHTML({pos:p.pos,name:p.player_name,headshot:p.headshot})}<div><div class="nm">${p.player_name}</div><div class="meta2">${metaFor(p)}</div></div><div class="muted" style="font-size:11px">${edit?"change":"ⓘ"}</div>`;
+      if(p) row.innerHTML=`<div class="pos">${slot.lbl}</div>${avatarHTML({pos:p.pos,name:p.player_name,headshot:p.headshot})}<div><div class="nm">${isPlayerLocked(p)?"🔒 ":""}${p.player_name}</div><div class="meta2">${metaFor(p)}</div></div><div class="muted" style="font-size:11px">${edit?"change":"ⓘ"}</div>`;
       else row.innerHTML=`<div class="pos">${slot.lbl}</div><div class="avatar" style="background:var(--ink)"></div><div><div class="nm muted">— empty</div><div class="meta2">needs a ${slot.pos.join("/")}</div></div><div class="muted" style="font-size:11px">set</div>`;
       row.onclick=()=>{ if(edit || !p) openLineupChooser(i); else playerActionModal(p); };
       sc.appendChild(row);
@@ -1334,7 +1334,7 @@ function renderTeam(){
     const bc=el("div","card"); bc.appendChild(el("h2","title","Bench ("+bench.length+")"));
     if(!bench.length) bc.appendChild(el("div","muted","<div style='font-size:13px'>No bench players.</div>"));
     bench.forEach(p=>{ const row=el("div","plr tappable"); row.style.gridTemplateColumns="34px 26px 1fr auto"; row.style.cursor="pointer";
-      row.innerHTML=`${avatarHTML({pos:p.pos,name:p.player_name,headshot:p.headshot})}<div class="pos">${p.pos}</div><div><div class="nm">${p.player_name}</div><div class="meta2">${metaFor(p)}</div></div><div class="muted" style="font-size:11px">${edit?"move":"ⓘ"}</div>`;
+      row.innerHTML=`${avatarHTML({pos:p.pos,name:p.player_name,headshot:p.headshot})}<div class="pos">${p.pos}</div><div><div class="nm">${isPlayerLocked(p)?"🔒 ":""}${p.player_name}</div><div class="meta2">${metaFor(p)}</div></div><div class="muted" style="font-size:11px">${edit?"move":"ⓘ"}</div>`;
       row.onclick=()=>{ if(edit) openBenchMove(p); else playerActionModal(p); };
       bc.appendChild(row); });
     s.appendChild(bc);
@@ -1897,12 +1897,27 @@ function renderTrades(s){
     history.forEach(t=>{ const mine=t.from_user===meId; h.appendChild(el("div","",`<div style="padding:7px 0;border-top:1px solid var(--line);font-size:12px"><b>${t.status}</b> · ${mine?"you → "+teamNameOf(t.to_user):teamNameOf(t.from_user)+" → you"}</div>`)); });
     s.appendChild(h); }
 }
+// Locked once that player's REAL NFL game has kicked off — checked against
+// the actual kickoff time (not whether we've polled their box score yet, so
+// this can't be fooled by a slow poll). Prevents swapping in/out based on
+// how a game is actually going, which the "Emergency Sub" power-up exists
+// to do in a controlled, one-time way instead.
+function isPlayerLocked(pick){
+  if(!app.realLeague || !pick || !pick.team) return false;
+  const tid=teamIdForAb(pick.team); if(tid==null) return false;
+  const gi=app._teamGameInfo && app._teamGameInfo[tid+"_"+(app.currentWeek||1)];
+  if(!gi || !gi.date) return false;
+  return new Date(gi.date).getTime() <= Date.now();
+}
 function openLineupChooser(i){
   const slot=SLOTS[i]; const myPicks=myDraftPicks();
+  const curId=app.lineup[i]; const curPick=curId?myPicks.find(p=>p.player_id===curId):null;
+  if(curPick && isPlayerLocked(curPick)){ toast("🔒 "+curPick.player_name+"'s game already started — locked for the week"); return; }
   const eligible=myPicks.filter(p=>slot.pos.includes(p.pos));
   const ov=$("overlay");
   const items=eligible.map(p=>{ const here=app.lineup[i]===p.player_id; const elsewhere=app.lineup.includes(p.player_id)&&!here;
-    return `<button class="btn sec lc" data-id="${p.player_id}" style="width:100%;text-align:left;margin-top:6px${here?';border-color:var(--gold)':''}">${p.pos} · ${p.player_name} <span class="muted" style="font-size:11px">${p.team||""}${here?" · here":elsewhere?" · starting elsewhere":""}</span></button>`; }).join("");
+    const locked=!here && isPlayerLocked(p);
+    return `<button class="btn sec${locked?" disabled":" lc"}" ${locked?"disabled":`data-id="${p.player_id}"`} style="width:100%;text-align:left;margin-top:6px${here?';border-color:var(--gold)':''}">${p.pos} · ${p.player_name} <span class="muted" style="font-size:11px">${p.team||""}${here?" · here":locked?" · 🔒 game started":elsewhere?" · starting elsewhere":""}</span></button>`; }).join("");
   ov.innerHTML=`<div class="modal"><div class="box" style="max-width:360px;text-align:left">
     <div style="font-weight:800">Set ${slot.lbl}</div>
     <div class="muted" style="font-size:12px;margin:4px 0 8px">Choose a ${slot.pos.join("/")}:</div>
@@ -2076,17 +2091,20 @@ async function computeDvP(wkMax){
   const picks=(app.draft&&app.draft.picks)||[];
   const offPicks=picks.filter(p=>p.pos!=="DEF" && p.team);
   const teamAbs=[...new Set(offPicks.map(p=>p.team))];
+  const lookups=[];
   for(const ab of teamAbs){
     const tid=teamIdForAb(ab); if(tid==null) continue;
-    for(let wk=1; wk<=wkMax; wk++) await findGameId(tid, wk);
+    for(let wk=1; wk<=wkMax; wk++) lookups.push(findGameId(tid, wk));
   }
+  await Promise.all(lookups); // parallel — sequential awaits made this take several seconds for no reason
   const agg={};
   for(let wk=1; wk<=wkMax; wk++){
     const wkStats=app.playerWeekStats[wk]||{};
     offPicks.forEach(p=>{
       const row=wkStats[p.player_id]; if(!row||!row.q_pts) return;
       const gi=weekGameInfo({teamAb:p.team}, wk); if(!gi||!gi.opp) return;
-      let fp=0; for(let q=1;q<=4;q++){ const v=row.q_pts[q]||row.q_pts[String(q)]; if(v) fp+=v.fp||0; }
+      let fp=row.q_pts.pa?row.q_pts.pa.fp:0;
+      for(let q=1;q<=4;q++){ const v=row.q_pts[q]||row.q_pts[String(q)]; if(v) fp+=quarterFpFromStats(p.pos, v.stats); }
       const o=agg[gi.opp]=agg[gi.opp]||{}; const pp=o[p.pos]=o[p.pos]||{sum:0,games:0};
       pp.sum+=fp; pp.games+=1;
     });
@@ -2100,17 +2118,25 @@ async function computeDvP(wkMax){
   });
   return ranks;
 }
+// Fetches every team's game-info in parallel (not one-at-a-time) so this
+// resolves in about one round-trip instead of N — the old sequential version
+// took several seconds, which is why info seemed to only "show up" after
+// clicking away and back (the cache had warmed up in the background by then).
+async function fetchTeamsWeekInfo(teams, wk){
+  let changed=false;
+  await Promise.all(teams.map(async ab=>{
+    const tid=teamIdForAb(ab); if(tid==null) return;
+    const had=app._teamGameInfo && app._teamGameInfo[tid+"_"+wk];
+    await findGameId(tid, wk);
+    if(!had && app._teamGameInfo && app._teamGameInfo[tid+"_"+wk]) changed=true;
+  }));
+  return changed;
+}
 async function ensureCurrentWeekInfo(){
   if(!app.realLeague) return;
   const wk=app.currentWeek||1;
   const teams=[...new Set(((app.draft&&app.draft.picks)||[]).filter(p=>p.team).map(p=>p.team))];
-  let changed=false;
-  for(const ab of teams){
-    const tid=teamIdForAb(ab); if(tid==null) continue;
-    const had=app._teamGameInfo && app._teamGameInfo[tid+"_"+wk];
-    await findGameId(tid, wk);
-    if(!had && app._teamGameInfo && app._teamGameInfo[tid+"_"+wk]) changed=true;
-  }
+  const changed=await fetchTeamsWeekInfo(teams, wk);
   if(changed && app.tab==="team") renderTeam();
 }
 // Broader than ensureCurrentWeekInfo (which only covers rostered teams) —
@@ -2119,13 +2145,7 @@ async function ensureAllTeamsWeekInfo(){
   if(!app.realLeague) return;
   const wk=app.currentWeek||1;
   const teams=[...new Set((app.pool||[]).map(p=>p.teamAb).filter(Boolean))];
-  let changed=false;
-  for(const ab of teams){
-    const tid=teamIdForAb(ab); if(tid==null) continue;
-    const had=app._teamGameInfo && app._teamGameInfo[tid+"_"+wk];
-    await findGameId(tid, wk);
-    if(!had && app._teamGameInfo && app._teamGameInfo[tid+"_"+wk]) changed=true;
-  }
+  const changed=await fetchTeamsWeekInfo(teams, wk);
   if(changed){ if(app.tab==="players") renderPlayersList(); else if(app.tab==="draft") renderDraft(); }
 }
 // Real weekly score using OUR scoring rules (no power-up math here — that's
@@ -2168,6 +2188,12 @@ function dvpBadge(pos, opp){
   const frac=d.rank/d.of;
   const color = frac<=0.34 ? "#f87171" : frac>=0.66 ? "#4ade80" : "var(--muted)";
   return ` · <span style="color:${color};font-weight:800">${pos} ${d.rank}/${d.of}</span>`;
+}
+function realOtherMatchups(wk){
+  const me=app.user&&app.user.id;
+  return (app.schedule||[]).filter(g=>g.week===wk && g.home_user && g.away_user && g.home_user!==me && g.away_user!==me)
+    .map(g=>({ a:teamNameOf(g.home_user), as:computeRealTeamScore(g.home_user,wk), uidA:g.home_user,
+               b:teamNameOf(g.away_user), bs:computeRealTeamScore(g.away_user,wk), uidB:g.away_user }));
 }
 function teamOppLine(p){
   if(!p.teamAb) return "";
@@ -2403,10 +2429,12 @@ function getRealStandings(){
   return rows.sort((a,b)=>b.w-a.w||b.pf-a.pf);
 }
 function openBenchMove(pick){
+  if(isPlayerLocked(pick)){ toast("🔒 "+pick.player_name+"'s game already started — can't start them now"); return; }
   const ov=$("overlay"); const myPicks=myDraftPicks();
   const items=SLOTS.map((s,i)=>({s,i})).filter(o=>o.s.pos.includes(pick.pos)).map(o=>{
     const cur=app.lineup[o.i]; const curP=cur?myPicks.find(x=>x.player_id===cur):null;
-    return `<button class="btn sec bm" data-i="${o.i}" style="width:100%;text-align:left;margin-top:6px">${o.s.lbl} <span class="muted" style="font-size:11px">${curP?"(swap out "+curP.player_name+")":"(empty)"}</span></button>`;
+    const locked=curP && isPlayerLocked(curP);
+    return `<button class="btn sec${locked?" disabled":" bm"}" ${locked?"disabled":`data-i="${o.i}"`} style="width:100%;text-align:left;margin-top:6px">${o.s.lbl} <span class="muted" style="font-size:11px">${locked?"🔒 "+curP.player_name+" (game started)":curP?"(swap out "+curP.player_name+")":"(empty)"}</span></button>`;
   }).join("");
   ov.innerHTML=`<div class="modal"><div class="box" style="max-width:340px;text-align:left">
     <div style="font-weight:800">Move ${pick.player_name} into…</div>
@@ -2567,7 +2595,7 @@ function renderLeague(){
   s.appendChild(ts);
 
   if(app.leagueTab==="scoreboard"){
-    const matchups=[{a:app.myTeam,b:app.oppTeam,as:myTeamScore(),bs:oppTeamScore(),me:true}, ...(app.realLeague?[]:OTHER_MATCHUPS)];
+    const matchups=[{a:app.myTeam,b:app.oppTeam,as:myTeamScore(),bs:oppTeamScore(),me:true}, ...(app.realLeague?realOtherMatchups(app.currentWeek||1):OTHER_MATCHUPS)];
     if(app.leagueMatchup!=null && matchups[app.leagueMatchup]){
       renderMatchupDetail(s, matchups[app.leagueMatchup]);
     } else {
@@ -2704,11 +2732,22 @@ function bmatchEl(lines){ const d=el("div","bmatch"); d.innerHTML=lines.join("")
 function renderMatchupDetail(s,m){
   const back=el("button","btn sec"); back.style.width="100%"; back.style.marginBottom="12px"; back.textContent="← All matchups";
   back.onclick=()=>{ app.leagueMatchup=null; renderLeague(); }; s.appendChild(back);
-  const aRost=m.me?myStarters:genRoster(m.a), bRost=m.me?oppStarters:genRoster(m.b);
+  let aRost,bRost;
+  if(app.realLeague){
+    const wk=app.currentWeek||1;
+    aRost = m.me ? myStarters : startersForUser(m.uidA, app.lineupsByUser[m.uidA]).startersOut;
+    bRost = m.me ? oppStarters : startersForUser(m.uidB, app.lineupsByUser[m.uidB]).startersOut;
+    if(!m.me){
+      aRost.forEach(p=>{ p.pts=playerWeekScore(p.id,wk)||0; });
+      bRost.forEach(p=>{ p.pts=playerWeekScore(p.id,wk)||0; });
+    }
+  } else {
+    aRost=m.me?myStarters:genRoster(m.a); bRost=m.me?oppStarters:genRoster(m.b);
+  }
   const aScore=m.me?myTeamScore():(+m.as), bScore=m.me?oppTeamScore():(+m.bs);
   s.appendChild(el("div","card",`<div class="scoreboard">
     <div class="ts me"><div class="nm">${m.a}</div><div class="pts">${aScore.toFixed(1)}</div></div>
-    <div class="clock"><div class="q">WK 11</div><div class="st">${m.me?'your game':'league game'}</div></div>
+    <div class="clock"><div class="q">${app.realLeague?"WK "+(app.currentWeek||1):"WK 11"}</div><div class="st">${m.me?'your game':'league game'}</div></div>
     <div class="ts op"><div class="nm">${m.b}</div><div class="pts">${bScore.toFixed(1)}</div></div></div>`));
   const c=el("div","card");
   const head=el("div","row"); head.style.marginBottom="4px";
@@ -2718,13 +2757,13 @@ function renderMatchupDetail(s,m){
   for(let i=0;i<n;i++){
     const lp=aRost[i], rp=bRost[i]; const pos=(lp&&lp.pos)||(rp&&rp.pos)||"";
     const row=el("div","mrow");
-    row.appendChild(detailCell(lp,true,m.me));
+    row.appendChild(detailCell(lp,true,m.me||app.realLeague));
     const mid=el("div","mrow-pos"); mid.textContent=pos; row.appendChild(mid);
-    row.appendChild(detailCell(rp,false,m.me));
+    row.appendChild(detailCell(rp,false,m.me||app.realLeague));
     c.appendChild(row);
   }
   s.appendChild(c);
-  if(!m.me) s.appendChild(el("div","muted","<div style='font-size:11px;text-align:center'>Projected points shown for league games (live per-player scoring in-season).</div>"));
+  if(!m.me && !app.realLeague) s.appendChild(el("div","muted","<div style='font-size:11px;text-align:center'>Projected points shown for league games (live per-player scoring in-season).</div>"));
 }
 function detailCell(p,leftSide,live){
   const cell=el("div","mcell "+(leftSide?"l":"r"));
