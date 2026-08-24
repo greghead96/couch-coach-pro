@@ -218,7 +218,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260824o";
+const BUILD_ID = "20260824p";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -494,24 +494,6 @@ function maybeOpponentAI(adv){
   }
 }
 function toast(msg){ const t=el("div","toast",msg); document.body.appendChild(t); setTimeout(()=>t.remove(),1800); }
-// Persistent, stays until manually closed — for temporary debugging only,
-// since toasts stack and auto-dismiss too fast to read, let alone copy.
-function debugLog(msg){
-  let panel=document.getElementById("debugPanel");
-  if(!panel){
-    panel=document.createElement("div"); panel.id="debugPanel";
-    panel.style.cssText="position:fixed;top:0;left:0;right:0;max-height:55vh;overflow:auto;background:rgba(10,10,10,.95);color:#7CFC00;font-family:monospace;font-size:10px;padding:8px;z-index:9999;white-space:pre-wrap;word-break:break-all;";
-    const closeBtn=document.createElement("button"); closeBtn.textContent="✕ Close Debug Panel";
-    closeBtn.style.cssText="display:block;width:100%;margin-bottom:6px;background:#333;color:#fff;border:1px solid #666;padding:6px;font-size:11px;";
-    closeBtn.onclick=()=>panel.remove();
-    panel.appendChild(closeBtn);
-    document.body.appendChild(panel);
-  }
-  const line=document.createElement("div"); line.style.cssText="border-top:1px solid #333;padding-top:4px;margin-top:4px";
-  line.textContent=new Date().toISOString().slice(11,19)+" "+msg;
-  panel.appendChild(line);
-  panel.scrollTop=panel.scrollHeight;
-}
 // Overlay model: write actions deep-link into Sleeper (real app would target the exact league screen).
 const SLEEPER_URL="https://sleeper.com";
 function sleeperLeagueUrl(){ return app.leagueId ? `https://sleeper.app/leagues/${app.leagueId}` : SLEEPER_URL; }
@@ -662,12 +644,6 @@ function usePU(k,p){
   // Double / Freeze — one power-up per player per week
   if(playerAssigned(p.id)){ toast(p.name+" already has a power-up this week"); app.armed=null; renderMatchup(); return; }
   const cq=app.realLeague ? realCurrentQuarterFor(p) : currentQuarter();
-  if(app.realLeague){
-    const tid=teamIdForAb(p.teamAb);
-    const inScanList=[...myStarters,...myBench,...oppStarters,...oppBench].some(x=>x.id===p.id);
-    console.log("DEBUG usePU quarter-gate", {name:p.name, teamAb:p.teamAb, tid, playerGameState:tid!=null?app.playerGameState[tid]:undefined, cq, inScanList});
-    debugLog(`usePU ${p.name}: tid=${tid} state=${tid!=null?JSON.stringify(app.playerGameState[tid]):"n/a"} cq=${cq} inScan=${inScanList}`);
-  }
   const allowed=[]; for(let q=1;q<=4;q++) if(q>cq) allowed.push(q);
   if(!allowed.length){ toast("No upcoming quarters left"); app.armed=null; renderMatchup(); return; }
   showQuarterPicker(k,p,allowed);
@@ -1141,16 +1117,6 @@ function renderMatchup(){
     const rf=el("button","btn","↻ Refresh live scores");
     rf.onclick=async ()=>{ rf.textContent="🔄 Checking ESPN…"; rf.disabled=true; await pollRealStats(); renderMatchup(); };
     ctl.append(rf);
-    // TEMP: tests the save itself, independent of any real game's quarter —
-    // no need to wait for a live game just to check whether double/freeze persists.
-    const tb=el("button","btn sec","🧪 Test save");
-    tb.onclick=async ()=>{
-      const target=myStarters.find(p=>p.id && !p.id.startsWith("e_"));
-      if(!target){ debugLog("Test save: no eligible starter found"); return; }
-      debugLog(`Test save: force-applying double to ${target.name} (${target.id}) Q1, bypassing quarter picker`);
-      await persistPowerup("double", target.id, target.name, 1);
-    };
-    ctl.append(tb);
   } else {
     const start=el("button","btn", app.sim.running?"⏸ Pause":(app.sim.gameSec>0?"▶ Resume":"▶ Kick Off"));
     start.onclick=()=>{ if(app.sim.gameSec>=4*QSEC)return; app.sim.running=!app.sim.running;
@@ -1187,11 +1153,6 @@ function renderMatchup(){
   if(app.sim.hotStart){ const hp=findPlayer(app.sim.hotStart);
     trayCard.appendChild(el("div","muted",`<div style='font-size:12px;margin-top:8px'>🔥 Hot Start: <b style="color:var(--txt)">${(hp&&hp.name)||"—"}</b>${app.sim.firstTD?(app.sim.firstTD.pid===app.sim.hotStart?" — hit! 3× applied":" — missed (someone scored first)"):" — awaiting first TD"}</div>`)); }
   s.appendChild(trayCard);
-
-  const fc=el("div","card"); fc.appendChild(el("h2","title","Live Feed"));
-  const ff=el("div","feed");
-  app.sim.feed.forEach(x=> ff.appendChild(el("div","ln",`<span class="t">${x.t}</span><span class="${x.c}">${x.txt}</span>`)));
-  fc.appendChild(ff); s.appendChild(fc);
 
   if(app.sim.scheduled.length){
     const cq=currentQuarter();
@@ -1288,8 +1249,6 @@ function openPlayerBoxScore(p){
   const wk=app.currentWeek||1;
   const row=app.playerWeekStats[wk] && app.playerWeekStats[wk][p.id];
   const pu=app.powerupPicks.find(x=>x.week===wk && x.player_id===p.id);
-  const debugMatches=app.powerupPicks.filter(x=>x.player_id===p.id);
-  console.log("DEBUG openPlayerBoxScore", {pId:p.id, wk, wkType:typeof wk, pu, allPicksForPlayer:debugMatches, allPicks:app.powerupPicks});
   const ov=$("overlay");
   const pic=p.headshot?`<img src="${p.headshot}" style="width:48px;height:48px;border-radius:50%;object-fit:cover;background:#1a2e22">`:avatarHTML(p);
   const gi=weekGameInfo(p, wk);
@@ -1315,14 +1274,12 @@ function openPlayerBoxScore(p){
   }
   const teamLine = p.pos+" · "+(p.teamAb||"")+(gi?(" · "+(gi.home?"vs ":"@ ")+gi.opp):"");
   const noData = !row ? `<div class="muted" style="font-size:12px;margin-top:10px">No live data yet — this player's game may not have started, or their team hasn't been polled yet. It updates automatically once it's live.</div>` : "";
-  const debugHtml=`<div style="font-size:10px;margin-top:10px;padding:8px;background:#0a140e;border-radius:8px;word-break:break-all">DEBUG pId=${p.id} wk=${wk}(${typeof wk}) pu=${pu?JSON.stringify({key:pu.powerup_key,quarter:pu.quarter,qType:typeof pu.quarter,player_id:pu.player_id}):"NOT FOUND"} allForPlayer=${JSON.stringify(debugMatches.map(x=>({wk:x.week,q:x.quarter,key:x.powerup_key})))}</div>`;
   ov.innerHTML=`<div class="modal"><div class="box" style="max-width:440px;text-align:left">
     <div style="display:flex;align-items:center;gap:10px">${pic}<div><div style="font-weight:800">${p.name}</div><div class="muted" style="font-size:12px">${teamLine}</div></div></div>
     <div style="overflow-x:auto;margin-top:12px"><table class="std"><tr><th>Qtr</th><th>Stats</th><th style="text-align:right">FP</th></tr>${rows}${paRow}
       <tr style="border-top:2px solid var(--line)"><td colspan="2" style="font-weight:800">Total</td><td style="text-align:right;font-weight:800;color:var(--gold)">${total.toFixed(1)}</td></tr>
     </table></div>
     ${noData}
-    ${debugHtml}
     <button class="btn sec" id="pbClose" style="width:100%;margin-top:14px">Close</button>
   </div></div>`;
   ov.querySelector("#pbClose").onclick=()=>{ ov.innerHTML=""; };
@@ -2299,13 +2256,10 @@ async function pollRealStats(){
   // and defaulted to "unknown" — which is why the quarter picker was letting
   // every quarter be picked mid-game. Parallel fetch closes that window.
   const teamIds=Object.keys(byTeam);
-  const testPreseason=!!(app.settings.league && app.settings.league.testPreseason);
-  debugLog(`pollRealStats: wk=${wk} testPreseason=${testPreseason} teams=${teamIds.join(",")}`);
   const boxes=await Promise.all(teamIds.map(async teamId=>{
-    let eventId; try{ eventId=await findGameId(teamId, wk); }catch(e){ debugLog(`findGameId(${teamId}) threw: ${e.message}`); return null; }
-    if(!eventId){ debugLog(`findGameId(${teamId}, wk=${wk}, preseason=${testPreseason}) -> null (no event found)`); return null; }
-    try{ const box=await fetchGameBoxFP(eventId); debugLog(`team ${teamId} event=${eventId} -> period=${box.period} final=${box.final}`); return box; }
-    catch(e){ debugLog(`fetchGameBoxFP(${teamId}, event=${eventId}) threw: ${e.message}`); return null; }
+    let eventId; try{ eventId=await findGameId(teamId, wk); }catch(e){ return null; }
+    if(!eventId) return null;
+    try{ return await fetchGameBoxFP(eventId); }catch(e){ return null; }
   }));
   teamIds.forEach((teamId,idx)=>{
     const box=boxes[idx]; if(!box) return;
@@ -2404,9 +2358,6 @@ async function loadAllRealScoringData(){
     app.powerupPicks=pu.data||[];
     app.weeklyLineups={}; (wl.data||[]).forEach(r=>{ (app.weeklyLineups[r.week]=app.weeklyLineups[r.week]||{})[r.user_id]=r.starters; });
     app.playerWeekStats={}; (pws.data||[]).forEach(r=>{ (app.playerWeekStats[r.week]=app.playerWeekStats[r.week]||{})[r.athlete_id]=r; });
-    console.log("DEBUG loadAllRealScoringData ok", {leagueId:app.sbLeagueId, powerupPicksCount:app.powerupPicks.length, powerupPicks:app.powerupPicks});
-    if(!app._scoringLoadDebugShown){ app._scoringLoadDebugShown=true;
-      debugLog(`loadAllRealScoringData: powerup_picks rows=${app.powerupPicks.length} lid=${app.sbLeagueId} picks=${JSON.stringify(app.powerupPicks.map(p=>({wk:p.week,pid:p.player_id,key:p.powerup_key,q:p.quarter,uid:p.user_id})))}`); }
   }catch(e){
     console.error("loadAllRealScoringData threw", e);
     if(!app._scoringLoadWarned){ app._scoringLoadWarned=true; toast("⚠ Couldn't load power-up/score data: "+e.message); }
@@ -2414,23 +2365,16 @@ async function loadAllRealScoringData(){
 }
 async function persistPowerup(key,pid,pname,q,targetId){
   if(!app.realLeague) return;
-  const args={lid:app.sbLeagueId, wk:app.currentWeek, pid, pname, key, q, target:targetId||null};
-  try{ const {error}=await sb.rpc("log_powerup",args);
-    if(error){ debugLog(`persistPowerup FAILED: ${JSON.stringify(args)} -> ${error.message} (code ${error.code||"?"})`); throw error; }
-    debugLog(`persistPowerup OK: ${JSON.stringify(args)}`);
+  try{ const {error}=await sb.rpc("log_powerup",{lid:app.sbLeagueId, wk:app.currentWeek, pid, pname, key, q, target:targetId||null});
+    if(error) throw error;
     await loadAllRealScoringData(); refreshRealInv(); }
-  catch(e){ debugLog(`persistPowerup THREW: ${JSON.stringify(args)} -> ${e.message}`); toast(e.message||"Couldn't save power-up"); }
+  catch(e){ toast(e.message||"Couldn't save power-up"); }
 }
 // For real leagues, weekly inventory is derived from persisted picks (so it
 // survives refreshes/devices and naturally refills when the week advances).
 function refreshRealInv(){
   if(!app.realLeague || !app.user) return;
   const mine=app.powerupPicks.filter(p=>p.week===app.currentWeek && p.user_id===app.user.id);
-  if(app._invDebugFor!==app.powerupPicks){
-    app._invDebugFor=app.powerupPicks;
-    console.log("DEBUG refreshRealInv", {myUserId:app.user.id, currentWeek:app.currentWeek, allPicks:app.powerupPicks, mine});
-    debugLog(`refreshRealInv: wk=${app.currentWeek} myUid=${app.user.id} totalPicks=${app.powerupPicks.length} mine=${mine.length} (${mine.map(p=>p.powerup_key).join(",")})`);
-  }
   ["double","freeze","sub","hotstart"].forEach(k=>{ app.inv[k]= mine.some(p=>p.powerup_key===k) ? 0 : 1; });
 }
 // Fantasy points are ALWAYS derived fresh from the raw stat counts + current
