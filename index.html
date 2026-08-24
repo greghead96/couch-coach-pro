@@ -218,7 +218,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260824n";
+const BUILD_ID = "20260824o";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -719,6 +719,7 @@ function schedulePU(k,p,q){
   logPU("me",k,p.name,false,q);
   feed(`${cfg.icon} ${cfg.name} scheduled on ${p.name} for Q${q}.`,"ev-pu");
   toast(`${cfg.name} set for Q${q}`);
+  if(app.realLeague) persistPowerup(k,p.id,p.name,q);
   renderMatchup();
 }
 
