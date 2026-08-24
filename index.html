@@ -218,7 +218,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260824a";
+const BUILD_ID = "20260824b";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -1553,8 +1553,16 @@ function faRow(p, btnLabel, btnCls, onClick){
   } else {
     meta = `${p.teamAb||p.opp||""}${p.jersey?" · #"+p.jersey:""}`;
   }
+  let scoreHtml="";
+  if(app.realLeague && p.id){
+    const wk=app.currentWeek||1;
+    const score=playerWeekScore(p.id, wk);
+    if(score!=null) scoreHtml=`<div style="text-align:right;font-weight:800;color:var(--gold);font-size:13px">${score.toFixed(1)}</div>`;
+    else { const proj=playerProjEstimate(p.id); if(proj!=null) scoreHtml=`<div style="text-align:right;color:var(--muted);font-size:11px">Est. ${proj.toFixed(1)}</div>`; }
+  }
   row.innerHTML=`${avatarHTML(p)}<div class="pos">${p.pos}</div>
-    <div><div class="nm">${rk}${inj}${p.name}</div><div class="meta2">${meta}</div></div><div></div>`;
+    <div><div class="nm">${rk}${inj}${p.name}</div><div class="meta2">${meta}</div></div><div>${scoreHtml}</div>`;
+  row.lastElementChild.style.cssText="display:flex;flex-direction:column;align-items:flex-end;gap:4px";
   row.onclick=()=>openPlayerDetail(p);
   const b=el("button","btn sm"+(btnCls||"")); b.textContent=btnLabel; b.style.marginLeft="auto";
   b.onclick=(e)=>{ e.stopPropagation(); onClick(b); }; row.lastElementChild.appendChild(b);
@@ -2119,6 +2127,24 @@ async function ensureAllTeamsWeekInfo(){
     if(!had && app._teamGameInfo && app._teamGameInfo[tid+"_"+wk]) changed=true;
   }
   if(changed){ if(app.tab==="players") renderPlayersList(); else if(app.tab==="draft") renderDraft(); }
+}
+// Real weekly score using OUR scoring rules (no power-up math here — that's
+// a per-team-matchup concept, not meaningful while just browsing players).
+function playerWeekScore(pid, wk){
+  const row=app.playerWeekStats[wk] && app.playerWeekStats[wk][pid]; if(!row||!row.q_pts) return null;
+  const pick=(app.draft&&app.draft.picks||[]).find(x=>x.player_id===pid); const pos=pick&&pick.pos;
+  let total=row.q_pts.pa?row.q_pts.pa.fp:0;
+  for(let q=1;q<=4;q++){ const v=row.q_pts[q]||row.q_pts[String(q)]; if(v) total+=quarterFpFromStats(pos, v.stats); }
+  return Math.round(total*10)/10;
+}
+// "Est. Proj" — honest label, not ESPN's real model: just this player's own
+// real scoring average so far this season. No data yet (preseason, or an
+// undrafted free agent we've never tracked) → no number, not a guess.
+function playerProjEstimate(pid){
+  const weeks=Object.keys(app.playerWeekStats||{});
+  const scores=weeks.map(wk=>playerWeekScore(pid,+wk)).filter(v=>v!=null);
+  if(!scores.length) return null;
+  return Math.round((scores.reduce((a,b)=>a+b,0)/scores.length)*10)/10;
 }
 function gameTimeLabel(iso){
   if(!iso) return "";
@@ -2805,10 +2831,12 @@ function renderCommish(){
     const lg=app.settings.league;
     scw.appendChild(el("div","muted","<div style='font-size:11px;margin-top:12px'>🧪 Preseason and regular season both number weeks 1, 2, 3… — turn this on so the live-scoring engine looks up preseason games instead (for testing before the real season). Saves immediately so every manager's browser polls the same games.</div>"));
     scw.appendChild(cRow("Test with preseason games","", cToggle(lg.testPreseason, async v=>{
-      lg.testPreseason=v; app._gameIdCache={};
-      try{ await sb.from("leagues").update({settings:app.settings}).eq("id",app.sbLeagueId); }catch(e){}
+      const prev=lg.testPreseason;
+      lg.testPreseason=v; app._gameIdCache={}; renderCommish();
+      const {error}=await sb.from("leagues").update({settings:app.settings}).eq("id",app.sbLeagueId);
+      if(error){ lg.testPreseason=prev; toast("⚠ Couldn't save: "+error.message); renderCommish(); return; }
+      toast(v?"Preseason test mode ON — saved":"Preseason test mode OFF — saved");
       if(app.realLeague) pollRealStats();
-      renderCommish();
     })));
     s.appendChild(scw);
   }
