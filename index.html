@@ -219,7 +219,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260824t";
+const BUILD_ID = "20260824u";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -1236,7 +1236,7 @@ function playerCell(p,side,armedCfg,cq,leftSide){
     <div class="mc-stat">${sub}</div><div class="mc-pt">${p.pts.toFixed(1)}</div></div>`;
   cell.innerHTML = leftSide ? body+av : av+body;
   if(tappable) cell.onclick=()=>usePU(app.armed,p);
-  else if(app.realLeague && p.pos!=="DEF"){ cell.style.cursor="pointer"; cell.onclick=()=>openPlayerCardFor(p); }
+  else if(app.realLeague){ cell.style.cursor="pointer"; cell.onclick=()=>openPlayerCardFor(p); }
   if(app.realLeague){
     const ptEl=cell.querySelector(".mc-pt");
     if(ptEl){ ptEl.style.cursor="pointer"; ptEl.style.textDecoration="underline dotted";
@@ -1441,16 +1441,23 @@ async function loadPool(){
 }
 function availablePlayers(){ return app.pool||[]; }
 async function openPlayerDetail(p){
-  if(!p.espnId){ toast("No profile for "+p.name); return; }
+  const isDef = p.pos==="DEF";
+  // D/ST has no individual athlete profile on ESPN's side — everything for
+  // it comes from the team schedule fetch below, not the /overview or
+  // /gamelog athlete endpoints, so it doesn't need (or have) an espnId.
+  if(!isDef && !p.espnId){ toast("No profile for "+p.name); return; }
   app.pDetail={p, loading:true}; app.pDetailTab="season"; showDetailModal();
-  const base="https://site.web.api.espn.com/apis/common/v3/sports/football/nfl/athletes/"+p.espnId;
   let data=null, gl=null, sched=[], bye="";
   // Roster/lineup views only pass {espnId, teamAb, ...} (no teamId) — fall
   // back to the pool-derived ab->id map so the schedule fetch below doesn't
   // silently hit /teams/undefined/schedule.
   const teamId = p.teamId || teamIdForAb(p.teamAb);
-  try{ data=await (await fetch(base+"/overview")).json(); }catch(e){}
-  try{ gl=await (await fetch(base+"/gamelog")).json(); }catch(e){}
+  if(!isDef){
+    const base="https://site.web.api.espn.com/apis/common/v3/sports/football/nfl/athletes/"+p.espnId;
+    try{ data=await (await fetch(base+"/overview")).json(); }catch(e){}
+    try{ gl=await (await fetch(base+"/gamelog")).json(); }catch(e){}
+  }
+  let schedOk=false;
   try{ // seasontype=2 forces the full regular-season slate — without it ESPN's
     // schedule endpoint only returns a rolling window around "now", which
     // misidentifies whatever week that window happens to start at as the bye.
@@ -1462,17 +1469,19 @@ async function openPlayerDetail(p){
       sched.push({ wk:w, opp:((opp&&opp.team&&opp.team.abbreviation))||"", done:!!(c.status&&c.status.type&&c.status.type.completed) });
     });
     for(let w=1;w<=18;w++){ if(!weeks.has(w)){ bye=w; break; } }
+    schedOk=true;
   }catch(e){}
-  app.pDetail = data ? {p, data, gl, sched, bye, loading:false} : {p, error:true, loading:false};
+  const ok = isDef ? schedOk : !!data;
+  app.pDetail = ok ? {p, data, gl, sched, bye, loading:false, isDef} : {p, error:true, loading:false};
   showDetailModal();
 }
 // Matchup/spectate rows only carry {id, name, pos, teamAb, headshot} — no
 // espnId — so rebuild it the same way the roster-action modals already do
-// (player_id/id is "e"+espnId; DEF picks and empty lineup slots have no
-// individual profile, so those are silently skipped).
+// (player_id/id is "e"+espnId, or "def_<teamId>" for defenses). Empty
+// lineup slots (emptyP()'s "e_<random>" ids) have no player to show.
 function openPlayerCardFor(p){
-  if(!p || !p.id || p.pos==="DEF" || p.id.indexOf("e_")===0) return;
-  openPlayerDetail({ espnId:(p.id||"").replace(/^e/,""), name:p.name, pos:p.pos, teamAb:p.teamAb, headshot:p.headshot });
+  if(!p || !p.id || p.id.indexOf("e_")===0) return;
+  openPlayerDetail({ id:p.id, espnId:(p.id||"").replace(/^e/,""), name:p.name, pos:p.pos, teamAb:p.teamAb, headshot:p.headshot });
 }
 function statGroups(names){
   const g={passing:[],rushing:[],receiving:[],kicking:[]};
@@ -1583,29 +1592,43 @@ function sortControl(s){
   const c=el("div","chip on"); c.textContent="Rankings"; wrap.appendChild(c);
   s.appendChild(wrap);
 }
-// Free-agent screen only — lets you find last week's top performers or the
-// best upcoming projections, not just ESPN's preseason ranking. Separate
-// state (app.faSort) from Draft's sortPool so switching this doesn't
+// Free-agent screen only — a "Rank" chip that resets to the default order,
+// plus PROJ/SCORE column labels you click directly (ESPN-style) to sort by
+// that column, toggling high→low / low→high on repeat clicks. Separate
+// state (app.faSort/app.faSortDir) from Draft's sortPool so this doesn't
 // silently reorder the draft board too.
 function faSortControl(s){
   if(!app.realLeague) return;
-  const wrap=el("div","chips"); wrap.style.marginBottom="10px";
-  wrap.appendChild(el("span","muted",`<span style="font-size:10px;align-self:center;margin-right:4px">Sort:</span>`));
-  [["rank","Rank"],["lastwk","Last Wk"],["proj","Proj"]].forEach(([id,lab])=>{
-    const c=el("div","chip"+((app.faSort||"rank")===id?" on":"")); c.textContent=lab;
-    c.onclick=()=>{ app.faSort=id; renderPlayersList(); }; wrap.appendChild(c);
-  });
+  const wrap=el("div","row"); wrap.style.cssText="margin-bottom:8px;align-items:center;gap:14px";
+  const rankOn=(app.faSort||"rank")==="rank";
+  const rankBtn=el("div","chip"+(rankOn?" on":"")); rankBtn.textContent="Rank"; rankBtn.style.marginRight="auto";
+  rankBtn.onclick=()=>{ app.faSort="rank"; app.faSortDir=null; renderPlayersList(); };
+  wrap.appendChild(rankBtn);
+  const mkHdr=(key,label)=>{
+    const active=app.faSort===key;
+    const arrow=active ? (app.faSortDir==="asc"?" ▲":" ▼") : "";
+    const h=el("div","",`<span style="font-size:11px;font-weight:800;cursor:pointer;color:${active?'var(--gold)':'var(--muted)'}">${label}${arrow}</span>`);
+    h.onclick=()=>{ if(active) app.faSortDir = app.faSortDir==="asc"?"desc":"asc"; else { app.faSort=key; app.faSortDir="desc"; } renderPlayersList(); };
+    return h;
+  };
+  wrap.appendChild(mkHdr("proj","PROJ"));
+  wrap.appendChild(mkHdr("lastwk","SCORE"));
   s.appendChild(wrap);
 }
 function sortPool(list){
-  const s=app.pSort||"rank";
-  if(s==="lastwk" || s==="proj") return sortPoolBy(list, s);
-  return list.slice().sort((a,b)=>(a.rank||9999)-(b.rank||9999)||a.name.localeCompare(b.name));
+  return sortPoolBy(list, app.pSort||"rank", null);
 }
-function sortPoolBy(list, s){
-  const NA=-1e9;
-  if(s==="lastwk") return list.slice().sort((a,b)=>{ const av=lastWeekScoreOf(a.id), bv=lastWeekScoreOf(b.id); return (bv==null?NA:bv)-(av==null?NA:av); });
-  if(s==="proj") return list.slice().sort((a,b)=>{ const av=playerProjEstimate(a.id), bv=playerProjEstimate(b.id); return (bv==null?NA:bv)-(av==null?NA:av); });
+function sortPoolBy(list, s, dir){
+  if(s==="lastwk" || s==="proj"){
+    const getter = s==="lastwk" ? (id=>lastWeekScoreOf(id)) : (id=>playerProjEstimate(id));
+    const mul = dir==="asc" ? 1 : -1;
+    return list.slice().sort((a,b)=>{
+      const av=getter(a.id), bv=getter(b.id);
+      if(av==null && bv==null) return 0;
+      if(av==null) return 1; if(bv==null) return -1; // no data yet always sinks to the bottom
+      return mul*(av-bv);
+    });
+  }
   return list.slice().sort((a,b)=>(a.rank||9999)-(b.rank||9999)||a.name.localeCompare(b.name));
 }
 function faRow(p, btnLabel, btnCls, onClick, showBye, scoreMode){
@@ -1627,10 +1650,10 @@ function faRow(p, btnLabel, btnCls, onClick, showBye, scoreMode){
   let scoreHtml="";
   if(app.realLeague && p.id && scoreMode==="fa"){
     const lw=lastWeekScoreOf(p.id), proj=playerProjEstimate(p.id);
-    const parts=[];
-    if(lw!=null) parts.push(`<div style="text-align:right;font-weight:800;color:var(--gold);font-size:12px">Wk${(app.currentWeek||1)-1}: ${lw.toFixed(1)}</div>`);
-    if(proj!=null) parts.push(`<div style="text-align:right;color:var(--muted);font-size:11px">Proj ${proj.toFixed(1)}</div>`);
-    scoreHtml=parts.join("");
+    scoreHtml=`<div style="display:flex;gap:12px">
+      <div style="text-align:center;min-width:34px"><div class="muted" style="font-size:9px">PROJ</div><div style="font-weight:800;color:var(--gold);font-size:13px">${proj!=null?proj.toFixed(1):"--"}</div></div>
+      <div style="text-align:center;min-width:34px"><div class="muted" style="font-size:9px">SCORE</div><div style="font-weight:800;font-size:13px">${lw!=null?lw.toFixed(1):"--"}</div></div>
+    </div>`;
   } else if(app.realLeague && p.id){
     const wk=app.currentWeek||1;
     const score=playerWeekScore(p.id, wk);
@@ -1688,7 +1711,7 @@ function renderPlayersList(){
   const matchesTeam=p=> app.pTeam==="ALL" || p.teamAb===app.pTeam;
   let base=availablePlayers().filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter).filter(matchesSearch).filter(matchesTeam);
   if(!app.pShowAll) base=base.filter(p=>!takenIds.has(p.id));
-  const pool=sortPoolBy(base, app.faSort||"rank");
+  const pool=sortPoolBy(base, app.faSort||"rank", app.faSortDir);
   const c=el("div","card");
   c.appendChild(el("h2","title", app.pShowAll?"All Players":"Available"));
   if(!pool.length) c.appendChild(el("div","muted","<div style='font-size:13px'>No players match these filters.</div>"));
@@ -1843,7 +1866,7 @@ function allowedDraftPositions(userId){
   return { set, labels:empty.map(f=>f.lbl) };
 }
 function playerActionModal(pick){
-  if(pick.user_id!==(app.user&&app.user.id)){ openPlayerDetail({espnId:(pick.player_id||"").replace(/^e/,""),name:pick.player_name,pos:pick.pos,teamAb:pick.team,headshot:pick.headshot}); return; }
+  if(pick.user_id!==(app.user&&app.user.id)){ openPlayerDetail({id:pick.player_id,espnId:(pick.player_id||"").replace(/^e/,""),name:pick.player_name,pos:pick.pos,teamAb:pick.team,headshot:pick.headshot}); return; }
   const ov=$("overlay");
   ov.innerHTML=`<div class="modal"><div class="box" style="max-width:340px">
     <div style="display:flex;align-items:center;gap:10px;text-align:left">${avatarHTML({pos:pick.pos,name:pick.player_name,headshot:pick.headshot})}<div><div style="font-weight:800">${pick.player_name}</div><div class="muted" style="font-size:12px">${pick.pos} · ${pick.team||""}</div></div></div>
@@ -1851,7 +1874,7 @@ function playerActionModal(pick){
     <button class="btn sec" id="paTrade" style="width:100%;margin-top:8px">🔁 Offer in Trade</button>
     <button class="btn" id="paDrop" style="width:100%;margin-top:8px">🗑️ Drop Player</button>
     <button class="btn sec" id="paCancel" style="width:100%;margin-top:8px">Cancel</button></div></div>`;
-  ov.querySelector("#paInfo").onclick=()=> openPlayerDetail({espnId:(pick.player_id||"").replace(/^e/,""),name:pick.player_name,pos:pick.pos,teamAb:pick.team,headshot:pick.headshot});
+  ov.querySelector("#paInfo").onclick=()=> openPlayerDetail({id:pick.player_id,espnId:(pick.player_id||"").replace(/^e/,""),name:pick.player_name,pos:pick.pos,teamAb:pick.team,headshot:pick.headshot});
   ov.querySelector("#paTrade").onclick=()=> openTradeBuilder(pick);
   ov.querySelector("#paDrop").onclick=async ()=>{
     if(!confirm("Drop "+pick.player_name+"? They become a free agent.")) return;
@@ -1899,7 +1922,7 @@ function tbRow(p, selected, onToggle){
   row.innerHTML=`<div style="text-align:center;font-weight:800;color:${selected?'var(--gold)':'var(--muted)'}">${selected?'✓':'○'}</div><div class="pos">${p.pos}</div><div><div class="nm">${p.player_name}</div><div class="meta2">${p.team||""}</div></div><div></div>`;
   row.onclick=onToggle;
   const info=el("button","btn sm sec"); info.textContent="ⓘ"; info.style.marginLeft="auto";
-  info.onclick=(e)=>{ e.stopPropagation(); openPlayerDetail({espnId:(p.player_id||"").replace(/^e/,""),name:p.player_name,pos:p.pos,teamAb:p.team,headshot:p.headshot}); };
+  info.onclick=(e)=>{ e.stopPropagation(); openPlayerDetail({id:p.player_id,espnId:(p.player_id||"").replace(/^e/,""),name:p.player_name,pos:p.pos,teamAb:p.team,headshot:p.headshot}); };
   row.lastElementChild.appendChild(info);
   return row;
 }
@@ -2907,7 +2930,7 @@ function detailCell(p,leftSide,live){
   const av=avatarHTML(p);
   const body=`<div class="mc-body"><div class="mc-nm">${p.name}</div><div class="mc-stat">${sub}</div><div class="mc-pt">${val}</div></div>`;
   cell.innerHTML= leftSide ? body+av : av+body;
-  if(app.realLeague && p.pos!=="DEF"){ cell.style.cursor="pointer"; cell.onclick=()=>openPlayerCardFor(p); }
+  if(app.realLeague){ cell.style.cursor="pointer"; cell.onclick=()=>openPlayerCardFor(p); }
   return cell;
 }
 
