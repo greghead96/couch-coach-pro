@@ -218,7 +218,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260824d";
+const BUILD_ID = "20260824e";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -1078,6 +1078,8 @@ function renderMatchup(){
     ? `<div class="q">${rgs.total===0?"NO GAMES":rgs.final===rgs.total?"FINAL":rgs.live>0?"🔴 LIVE":"UPCOMING"}</div>
        <div class="tt" style="font-size:12px">${rgs.live} live · ${rgs.final} final</div>
        <div class="st">${m.your&&app.armed?"⚠ pick target":(rgs.upcoming)+" upcoming"}</div>`
+    : app.realLeague
+    ? `<div class="q">WK ${app.currentWeek||1}</div><div class="st">league game</div>`
     : `<div class="q">${app.sim.gameSec===0&&!app.sim.running?"PREGAME":done?"FINAL":"Q"+q}</div>
        <div class="tt">${done?"0:00":fmt(rem)}</div>
        <div class="st">${done?"Final":app.sim.running?(m.your&&app.armed?"⚠ pick target":"LIVE"):"Paused"}</div>`;
@@ -1093,6 +1095,14 @@ function renderMatchup(){
     const lead = lp>rp ? `${m.a} leads by ${(lp-rp).toFixed(1)}` : rp>lp ? `${m.b} leads by ${(rp-lp).toFixed(1)}` : "All tied up";
     s.appendChild(el("div","card",`<div style="text-align:center;font-weight:700;font-size:15px">${lead}</div>
       <div class="muted" style="font-size:12px;text-align:center;margin-top:6px">🔭 Spectating — power-ups can only be used in your own matchup.</div>`));
+    if(app.realLeague && m.uidA && m.uidB){
+      const wk=app.currentWeek||1;
+      const aRoster=startersForUser(m.uidA, app.lineupsByUser[m.uidA]);
+      const bRoster=startersForUser(m.uidB, app.lineupsByUser[m.uidB]);
+      [...aRoster.startersOut,...aRoster.bench,...bRoster.startersOut,...bRoster.bench].forEach(p=>{ if(p.id) p.pts=playerWeekScore(p.id,wk)||0; });
+      s.appendChild(matchupLineups(aRoster.startersOut,bRoster.startersOut,"Starters",false,m.a,m.b));
+      s.appendChild(matchupLineups(aRoster.bench,bRoster.bench,"Bench",false,m.a,m.b));
+    }
     const jump=el("button","btn sec"); jump.style.width="100%"; jump.textContent="← Back to my matchup";
     jump.onclick=()=>{ app.matchupIdx=0; renderMatchup(); };
     s.appendChild(jump);
@@ -1164,12 +1174,12 @@ function renderMatchup(){
   s.appendChild(matchupLineups(myStarters,oppStarters,"Starters",true));
   s.appendChild(matchupLineups(myBench,oppBench,"Bench",false));
 }
-function matchupLineups(myArr,opArr,title,allowTap){
+function matchupLineups(myArr,opArr,title,allowTap,labelA,labelB){
   const c=el("div","card");
   const head=el("div","row"); head.style.marginBottom="4px";
-  head.innerHTML=`<span style="color:var(--you);font-size:12px;font-weight:700">Your ${title}</span>
+  head.innerHTML=`<span style="color:var(--you);font-size:12px;font-weight:700">${labelA||"Your"} ${title}</span>
     <span class="muted" style="font-size:10px">vs</span>
-    <span style="color:var(--opp);font-size:12px;font-weight:700">Their ${title}</span>`;
+    <span style="color:var(--opp);font-size:12px;font-weight:700">${labelB||"Their"} ${title}</span>`;
   c.appendChild(head);
   const armedCfg=(allowTap && app.armed)?POWERUPS[app.armed]:null;
   const cq=currentQuarter();
@@ -1243,6 +1253,8 @@ function openPlayerBoxScore(p){
   const wk=app.currentWeek||1;
   const row=app.playerWeekStats[wk] && app.playerWeekStats[wk][p.id];
   const pu=app.powerupPicks.find(x=>x.week===wk && x.player_id===p.id);
+  const debugMatches=app.powerupPicks.filter(x=>x.player_id===p.id);
+  console.log("DEBUG openPlayerBoxScore", {pId:p.id, wk, wkType:typeof wk, pu, allPicksForPlayer:debugMatches, allPicks:app.powerupPicks});
   const ov=$("overlay");
   const pic=p.headshot?`<img src="${p.headshot}" style="width:48px;height:48px;border-radius:50%;object-fit:cover;background:#1a2e22">`:avatarHTML(p);
   const gi=weekGameInfo(p, wk);
@@ -1268,12 +1280,14 @@ function openPlayerBoxScore(p){
   }
   const teamLine = p.pos+" · "+(p.teamAb||"")+(gi?(" · "+(gi.home?"vs ":"@ ")+gi.opp):"");
   const noData = !row ? `<div class="muted" style="font-size:12px;margin-top:10px">No live data yet — this player's game may not have started, or their team hasn't been polled yet. It updates automatically once it's live.</div>` : "";
+  const debugHtml=`<div style="font-size:10px;margin-top:10px;padding:8px;background:#0a140e;border-radius:8px;word-break:break-all">DEBUG pId=${p.id} wk=${wk}(${typeof wk}) pu=${pu?JSON.stringify({key:pu.powerup_key,quarter:pu.quarter,qType:typeof pu.quarter,player_id:pu.player_id}):"NOT FOUND"} allForPlayer=${JSON.stringify(debugMatches.map(x=>({wk:x.week,q:x.quarter,key:x.powerup_key})))}</div>`;
   ov.innerHTML=`<div class="modal"><div class="box" style="max-width:440px;text-align:left">
     <div style="display:flex;align-items:center;gap:10px">${pic}<div><div style="font-weight:800">${p.name}</div><div class="muted" style="font-size:12px">${teamLine}</div></div></div>
     <div style="overflow-x:auto;margin-top:12px"><table class="std"><tr><th>Qtr</th><th>Stats</th><th style="text-align:right">FP</th></tr>${rows}${paRow}
       <tr style="border-top:2px solid var(--line)"><td colspan="2" style="font-weight:800">Total</td><td style="text-align:right;font-weight:800;color:var(--gold)">${total.toFixed(1)}</td></tr>
     </table></div>
     ${noData}
+    ${debugHtml}
     <button class="btn sec" id="pbClose" style="width:100%;margin-top:14px">Close</button>
   </div></div>`;
   ov.querySelector("#pbClose").onclick=()=>{ ov.innerHTML=""; };
