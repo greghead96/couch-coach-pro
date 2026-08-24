@@ -218,7 +218,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260824i";
+const BUILD_ID = "20260824j";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -494,6 +494,24 @@ function maybeOpponentAI(adv){
   }
 }
 function toast(msg){ const t=el("div","toast",msg); document.body.appendChild(t); setTimeout(()=>t.remove(),1800); }
+// Persistent, stays until manually closed — for temporary debugging only,
+// since toasts stack and auto-dismiss too fast to read, let alone copy.
+function debugLog(msg){
+  let panel=document.getElementById("debugPanel");
+  if(!panel){
+    panel=document.createElement("div"); panel.id="debugPanel";
+    panel.style.cssText="position:fixed;top:0;left:0;right:0;max-height:55vh;overflow:auto;background:rgba(10,10,10,.95);color:#7CFC00;font-family:monospace;font-size:10px;padding:8px;z-index:9999;white-space:pre-wrap;word-break:break-all;";
+    const closeBtn=document.createElement("button"); closeBtn.textContent="✕ Close Debug Panel";
+    closeBtn.style.cssText="display:block;width:100%;margin-bottom:6px;background:#333;color:#fff;border:1px solid #666;padding:6px;font-size:11px;";
+    closeBtn.onclick=()=>panel.remove();
+    panel.appendChild(closeBtn);
+    document.body.appendChild(panel);
+  }
+  const line=document.createElement("div"); line.style.cssText="border-top:1px solid #333;padding-top:4px;margin-top:4px";
+  line.textContent=new Date().toISOString().slice(11,19)+" "+msg;
+  panel.appendChild(line);
+  panel.scrollTop=panel.scrollHeight;
+}
 // Overlay model: write actions deep-link into Sleeper (real app would target the exact league screen).
 const SLEEPER_URL="https://sleeper.com";
 function sleeperLeagueUrl(){ return app.leagueId ? `https://sleeper.app/leagues/${app.leagueId}` : SLEEPER_URL; }
@@ -648,7 +666,7 @@ function usePU(k,p){
     const tid=teamIdForAb(p.teamAb);
     const inScanList=[...myStarters,...myBench,...oppStarters,...oppBench].some(x=>x.id===p.id);
     console.log("DEBUG usePU quarter-gate", {name:p.name, teamAb:p.teamAb, tid, playerGameState:tid!=null?app.playerGameState[tid]:undefined, cq, inScanList});
-    toast(`DEBUG ${p.name}: tid=${tid} state=${tid!=null?JSON.stringify(app.playerGameState[tid]):"n/a"} cq=${cq} inScan=${inScanList}`);
+    debugLog(`usePU ${p.name}: tid=${tid} state=${tid!=null?JSON.stringify(app.playerGameState[tid]):"n/a"} cq=${cq} inScan=${inScanList}`);
   }
   const allowed=[]; for(let q=1;q<=4;q++) if(q>cq) allowed.push(q);
   if(!allowed.length){ toast("No upcoming quarters left"); app.armed=null; renderMatchup(); return; }
@@ -2369,7 +2387,7 @@ async function loadAllRealScoringData(){
     app.playerWeekStats={}; (pws.data||[]).forEach(r=>{ (app.playerWeekStats[r.week]=app.playerWeekStats[r.week]||{})[r.athlete_id]=r; });
     console.log("DEBUG loadAllRealScoringData ok", {leagueId:app.sbLeagueId, powerupPicksCount:app.powerupPicks.length, powerupPicks:app.powerupPicks});
     if(!app._scoringLoadDebugShown){ app._scoringLoadDebugShown=true;
-      toast(`DEBUG powerup_picks rows=${app.powerupPicks.length} lid=${app.sbLeagueId}`); }
+      debugLog(`loadAllRealScoringData: powerup_picks rows=${app.powerupPicks.length} lid=${app.sbLeagueId} picks=${JSON.stringify(app.powerupPicks.map(p=>({wk:p.week,pid:p.player_id,key:p.powerup_key,q:p.quarter,uid:p.user_id})))}`); }
   }catch(e){
     console.error("loadAllRealScoringData threw", e);
     if(!app._scoringLoadWarned){ app._scoringLoadWarned=true; toast("⚠ Couldn't load power-up/score data: "+e.message); }
@@ -2389,7 +2407,7 @@ function refreshRealInv(){
   if(app._invDebugFor!==app.powerupPicks){
     app._invDebugFor=app.powerupPicks;
     console.log("DEBUG refreshRealInv", {myUserId:app.user.id, currentWeek:app.currentWeek, allPicks:app.powerupPicks, mine});
-    toast(`DEBUG inv: wk=${app.currentWeek} myUid=${app.user.id.slice(0,8)} totalPicks=${app.powerupPicks.length} mine=${mine.length} (${mine.map(p=>p.powerup_key).join(",")})`);
+    debugLog(`refreshRealInv: wk=${app.currentWeek} myUid=${app.user.id} totalPicks=${app.powerupPicks.length} mine=${mine.length} (${mine.map(p=>p.powerup_key).join(",")})`);
   }
   ["double","freeze","sub","hotstart"].forEach(k=>{ app.inv[k]= mine.some(p=>p.powerup_key===k) ? 0 : 1; });
 }
