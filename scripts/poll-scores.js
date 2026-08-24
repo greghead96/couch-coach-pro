@@ -103,8 +103,11 @@ async function fetchGameBox(eventId) {
   const d = await espnFetch(`${ESPN}/summary?event=${eventId}`);
   const comp = (d.header && d.header.competitions && d.header.competitions[0]) || {};
   const status = comp.status || {};
+  const state = status.type && status.type.state;
   const final = !!(status.type && status.type.completed);
-  const period = final ? 4 : (status.period || 1);
+  // Pregame has no real period — defaulting to 1 would misreport "already
+  // in Q1" for a game that hasn't kicked off (same bug fixed client-side).
+  const period = final ? 4 : state === "pre" ? 0 : (status.period || 1);
   const byAthlete = {}, teamStats = {};
   ((d.boxscore && d.boxscore.players) || []).forEach((tm) => {
     const tid = String((tm.team && tm.team.id) || "");

@@ -218,7 +218,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260824p";
+const BUILD_ID = "20260824q";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -2210,8 +2210,12 @@ async function fetchGameBoxFP(eventId){
   const d=await (await fetch(ESPN+"/summary?event="+eventId)).json();
   const comp=(d.header&&d.header.competitions&&d.header.competitions[0])||{};
   const status=comp.status||{};
+  const state=status.type&&status.type.state;
   const final=!!(status.type&&status.type.completed);
-  const period= final?4:(status.period||1);
+  // A game that hasn't kicked off yet has no real period — defaulting that
+  // to 1 (as if Q1 were already underway) is what locked Q1 out of the
+  // quarter picker for players whose games hadn't started.
+  const period= final?4 : state==="pre" ? 0 : (status.period||1);
   const byAthlete={}, teamStats={};
   ((d.boxscore&&d.boxscore.players)||[]).forEach(tm=>{
     const tid=String((tm.team&&tm.team.id)||"");
