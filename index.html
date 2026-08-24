@@ -219,7 +219,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260824u";
+const BUILD_ID = "20260824v";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -243,6 +243,11 @@ const SB_URL="https://qonkkpsgjlhinzknpckw.supabase.co";
 const SB_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFvbmtrcHNnamxoaW56a25wY2t3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc0MjUzMTcsImV4cCI6MjEwMzAwMTMxN30.tVaiUFo0BuBQ4jSe5FHBkJ9dxIQ89eU1rmVlrE2mxwI";
 const sb = window.supabase.createClient(SB_URL, SB_KEY);
 const AUTH_REDIRECT = /(access_token|[?&]code=|type=signup|type=recovery|type=magiclink|type=email)/i.test((location.hash||"")+(location.search||""));
+// Recovery links land with the same kind of hash as signup/magic-link
+// confirmations, but need a "set a new password" screen instead of the
+// generic "you're confirmed" one — checked separately so boot() can route
+// to the right screen before AUTH_REDIRECT's more generic check fires.
+const AUTH_RECOVERY = /type=recovery/i.test((location.hash||"")+(location.search||""));
 
 // ============================ DATA ============================
 const POWERUPS = {
@@ -403,7 +408,7 @@ const ACTIVITY=[
 // ============================ STATE ============================
 const QSEC = 15*60, TICK=250, BASE_SPD=20;
 let app = {
-  user:null, connectedLeague:null, sbLeagueId:null, leagueCode:null, myLeagues:[], authMode:"login", authBusy:false, authErr:"", authMsg:"", showConfirm:false,
+  user:null, connectedLeague:null, sbLeagueId:null, leagueCode:null, myLeagues:[], authMode:"login", authBusy:false, authErr:"", authMsg:"", showConfirm:false, showReset:false,
   tab:"home", leagueTab:"scoreboard",
   inv:{ double:1, freeze:1, sub:1, hotstart:1 },
   realData:false, chat:CHAT_SEED.slice(),
@@ -626,6 +631,7 @@ function armPU(k){
 }
 function usePU(k,p){
   const cfg=POWERUPS[k];
+  if(!p.id || p.id.indexOf("e_")===0){ toast("That lineup spot is empty"); app.armed=null; renderMatchup(); return; }
   const side = myStarters.includes(p)?"me":"op";
   if(side!==cfg.target){ toast(cfg.target==="me"?"Target YOUR player":"Target the OPPONENT"); return; }
   confirmPUTarget(k,p,()=>usePUConfirmed(k,p));
@@ -724,6 +730,7 @@ function schedulePU(k,p,q){
 
 // ============================ RENDER: SHELL ============================
 function render(){
+  if(app.showReset){ renderResetPassword(); return; }
   if(app.showConfirm){ renderConfirm(); return; }
   if(!app.user){ renderAuth(); return; }
   if(!app.connectedLeague){ renderLeaguePicker(); return; }
@@ -782,7 +789,33 @@ function renderTab(){
 function renderAuth(){
   const a=$("app"); a.innerHTML="";
   const signup = app.authMode==="signup";
+  const forgot = app.authMode==="forgot";
   const w=el("div","login");
+  if(forgot){
+    w.innerHTML=`
+      <div class="logo">🔑</div>
+      <h1>Reset Password</h1>
+      <p class="sub">Enter your email and we'll send you a reset link.</p>
+      <input class="input" id="em" type="email" placeholder="Email" autocomplete="email"/>
+      ${app.authMsg?`<div class="small" style="color:var(--you);text-align:left">${app.authMsg}</div>`:""}
+      ${app.authErr?`<div class="small" style="color:var(--opp);text-align:left">${app.authErr}</div>`:""}
+      <button class="btn" id="authBtn"${app.authBusy?" disabled":""}>${app.authBusy?"…":"Send Reset Link"}</button>
+      <div class="small"><b id="toggleAuth" style="color:var(--gold);cursor:pointer">← Back to log in</b></div>`;
+    a.appendChild(w);
+    w.querySelector("#toggleAuth").onclick=()=>{ app.authMode="login"; app.authErr=""; app.authMsg=""; render(); };
+    w.querySelector("#authBtn").onclick=async ()=>{
+      const em=(w.querySelector("#em").value||"").trim();
+      if(!em){ app.authErr="Email required."; app.authMsg=""; render(); return; }
+      app.authBusy=true; app.authErr=""; app.authMsg=""; render();
+      try{
+        const { error } = await sb.auth.resetPasswordForEmail(em, { redirectTo: location.origin+location.pathname });
+        if(error) throw error;
+        app.authBusy=false; app.authMsg="Check your email for a password reset link.";
+        render();
+      }catch(e){ app.authBusy=false; app.authErr=friendlyAuthError(e); render(); }
+    };
+    return;
+  }
   w.innerHTML=`
     <div class="logo">🛋️</div>
     <h1>Couch Coach Fantasy</h1>
@@ -790,12 +823,15 @@ function renderAuth(){
     ${signup?`<input class="input" id="dn" placeholder="Display name"/>`:""}
     <input class="input" id="em" type="email" placeholder="Email" autocomplete="email"/>
     <input class="input" id="pw" type="password" placeholder="Password (6+ chars)" autocomplete="${signup?'new-password':'current-password'}"/>
+    ${!signup?`<div class="small" style="text-align:right"><b id="forgotLink" style="color:var(--gold);cursor:pointer">Forgot password?</b></div>`:""}
     ${app.authMsg?`<div class="small" style="color:var(--you);text-align:left">${app.authMsg}</div>`:""}
     ${app.authErr?`<div class="small" style="color:var(--opp);text-align:left">${app.authErr}</div>`:""}
     <button class="btn" id="authBtn"${app.authBusy?" disabled":""}>${app.authBusy?"…":(signup?"Sign Up":"Log In")}</button>
     <div class="small">${signup?"Have an account?":"New here?"} <b id="toggleAuth" style="color:var(--gold);cursor:pointer">${signup?"Log in":"Sign up free"}</b></div>`;
   a.appendChild(w);
   w.querySelector("#toggleAuth").onclick=()=>{ app.authMode=signup?"login":"signup"; app.authErr=""; app.authMsg=""; render(); };
+  const forgotLink=w.querySelector("#forgotLink");
+  if(forgotLink) forgotLink.onclick=()=>{ app.authMode="forgot"; app.authErr=""; app.authMsg=""; render(); };
   w.querySelector("#authBtn").onclick=async ()=>{
     const em=(w.querySelector("#em").value||"").trim(), pw=w.querySelector("#pw").value||"";
     const dn=signup?((w.querySelector("#dn").value||"").trim()):"";
@@ -822,6 +858,7 @@ function friendlyAuthError(e){
   if(m.includes("already registered") || m.includes("already exists")) return "An account with that email already exists — try logging in instead.";
   if(m.includes("email not confirmed")) return "Check your email for the confirmation link before logging in.";
   if(m.includes("load failed") || m.includes("failed to fetch") || m.includes("network")) return "Couldn't reach the server — check your connection and try again.";
+  if(m.includes("session missing") || m.includes("not authenticated") || m.includes("auth session")) return "This reset link has expired — request a new one from the login page.";
   return "Incorrect username or password.";
 }
 async function loadMyLeagues(){
@@ -867,6 +904,30 @@ async function autoEnterIfSingle(){
     return true;
   }
   return false;
+}
+function renderResetPassword(){
+  const a=$("app"); a.innerHTML="";
+  const w=el("div","login");
+  w.innerHTML=`<div class="logo">🔑</div><h1>Set New Password</h1>
+    <p class="sub">Choose a new password for your account.</p>
+    <input class="input" id="rpw1" type="password" placeholder="New password (6+ chars)" autocomplete="new-password"/>
+    <input class="input" id="rpw2" type="password" placeholder="Confirm new password" autocomplete="new-password"/>
+    ${app.authErr?`<div class="small" style="color:var(--opp);text-align:left">${app.authErr}</div>`:""}
+    <button class="btn" id="rpBtn"${app.authBusy?" disabled":""}>${app.authBusy?"…":"Update Password"}</button>`;
+  a.appendChild(w);
+  w.querySelector("#rpBtn").onclick=async ()=>{
+    const p1=w.querySelector("#rpw1").value||"", p2=w.querySelector("#rpw2").value||"";
+    if(p1.length<6){ app.authErr="Password must be at least 6 characters."; render(); return; }
+    if(p1!==p2){ app.authErr="Passwords don't match."; render(); return; }
+    app.authBusy=true; app.authErr=""; render();
+    try{
+      const {error}=await sb.auth.updateUser({password:p1});
+      if(error) throw error;
+      app.showReset=false; app.authBusy=false; app.authErr="";
+      toast("Password updated!");
+      if(!(await autoEnterIfSingle())) render();
+    }catch(e){ app.authBusy=false; app.authErr=friendlyAuthError(e); render(); }
+  };
 }
 function renderConfirm(){
   const a=$("app"); a.innerHTML="";
@@ -1216,7 +1277,8 @@ function matchupLineups(myArr,opArr,title,allowTap,labelA,labelB){
 function playerCell(p,side,armedCfg,cq,leftSide){
   const cell=el("div","mcell "+(leftSide?"l":"r"));
   if(!p){ cell.innerHTML="<span class='muted'>—</span>"; return cell; }
-  const tappable=armedCfg && armedCfg.target===side;
+  const isEmptySlot = !p.id || p.id.indexOf("e_")===0;
+  const tappable=armedCfg && armedCfg.target===side && !isEmptySlot;
   let sched=app.sim.scheduled.filter(x=>x.pid===p.id);
   let hotOn = app.sim.hotStart===p.id;
   if(app.realLeague && !sched.length){
@@ -3256,8 +3318,12 @@ function renderBox(s){
 // ============================ BOOT ============================
 async function boot(){
   try{ const { data } = await sb.auth.getSession();
+    // supabase-js parses the recovery token out of the URL hash during
+    // getSession() itself, so app.user is already the recovery session's
+    // user by this point — no separate token handling needed.
     if(data && data.session){ app.user=data.session.user; await loadMyLeagues(); }
   }catch(e){}
+  if(AUTH_RECOVERY){ app.showReset=true; try{ history.replaceState({}, "", location.pathname); }catch(e){} render(); return; }
   if(AUTH_REDIRECT){ app.showConfirm=true; try{ history.replaceState({}, "", location.pathname); }catch(e){} render(); return; }
   if(app.user && await autoEnterIfSingle()) return;
   render();
