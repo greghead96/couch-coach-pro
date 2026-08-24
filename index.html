@@ -219,7 +219,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260824v";
+const BUILD_ID = "20260824w";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -1195,12 +1195,8 @@ function renderMatchup(){
 
   s.appendChild(el("div","muted",`<div style='font-size:11px;margin:-2px 0 12px;text-align:center'>${app.realLeague?("🗓️ <b>Week "+(app.currentWeek||1)+"</b> · your lineup vs "+app.oppTeam+" — "):""}🏆 <b style='color:var(--gold)'>CCF Score</b> = points + power-ups. ⏱️ Power-ups scheduled <b style='color:var(--gold)'>by quarter</b>. <span style='opacity:.7'>Simulated preview until live scoring.</span></div>`));
 
-  const ctl=el("div","row"); ctl.style.marginBottom="14px";
-  if(app.realLeague){
-    const rf=el("button","btn","↻ Refresh live scores");
-    rf.onclick=async ()=>{ rf.textContent="🔄 Checking ESPN…"; rf.disabled=true; await pollRealStats(); renderMatchup(); };
-    ctl.append(rf);
-  } else {
+  if(!app.realLeague){
+    const ctl=el("div","row"); ctl.style.marginBottom="14px";
     const start=el("button","btn", app.sim.running?"⏸ Pause":(app.sim.gameSec>0?"▶ Resume":"▶ Kick Off"));
     start.onclick=()=>{ if(app.sim.gameSec>=4*QSEC)return; app.sim.running=!app.sim.running;
       if(app.sim.running&&app.sim.gameSec===0)feed("Kickoff! Live.","ev-pu"); renderMatchup(); };
@@ -1209,8 +1205,8 @@ function renderMatchup(){
     const rs=el("button","btn sec","↺ Reset");
     rs.onclick=()=>{ app.sim=freshSim(); app.armed=null; renderMatchup(); };
     ctl.append(start,spd,rs);
+    s.appendChild(ctl);
   }
-  s.appendChild(ctl);
 
   if(done && app.sim.puLog.length) s.appendChild(recapCard());
 
@@ -2645,7 +2641,10 @@ function getRealStandings(){
     });
   }
   rows.forEach(r=>{ r.pf=Math.round(r.pf*10)/10; r.pa=Math.round(r.pa*10)/10; });
-  return rows.sort((a,b)=>b.w-a.w||b.pf-a.pf);
+  // Tiebreak on point differential (PF-PA), not raw PF — a team that wins
+  // low-scoring games shouldn't out-rank one that's actually outscoring
+  // opponents by more, at the same record.
+  return rows.sort((a,b)=>b.w-a.w||(b.pf-b.pa)-(a.pf-a.pa));
 }
 function openBenchMove(pick){
   if(isPlayerLocked(pick)){ toast("🔒 "+pick.player_name+"'s game already started — can't start them now"); return; }
