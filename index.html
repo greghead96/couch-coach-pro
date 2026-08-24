@@ -218,7 +218,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260824m";
+const BUILD_ID = "20260824n";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -1140,6 +1140,16 @@ function renderMatchup(){
     const rf=el("button","btn","↻ Refresh live scores");
     rf.onclick=async ()=>{ rf.textContent="🔄 Checking ESPN…"; rf.disabled=true; await pollRealStats(); renderMatchup(); };
     ctl.append(rf);
+    // TEMP: tests the save itself, independent of any real game's quarter —
+    // no need to wait for a live game just to check whether double/freeze persists.
+    const tb=el("button","btn sec","🧪 Test save");
+    tb.onclick=async ()=>{
+      const target=myStarters.find(p=>p.id && !p.id.startsWith("e_"));
+      if(!target){ debugLog("Test save: no eligible starter found"); return; }
+      debugLog(`Test save: force-applying double to ${target.name} (${target.id}) Q1, bypassing quarter picker`);
+      await persistPowerup("double", target.id, target.name, 1);
+    };
+    ctl.append(tb);
   } else {
     const start=el("button","btn", app.sim.running?"⏸ Pause":(app.sim.gameSec>0?"▶ Resume":"▶ Kick Off"));
     start.onclick=()=>{ if(app.sim.gameSec>=4*QSEC)return; app.sim.running=!app.sim.running;
