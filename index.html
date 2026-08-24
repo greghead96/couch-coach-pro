@@ -218,7 +218,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260824r";
+const BUILD_ID = "20260824s";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -1443,16 +1443,20 @@ async function openPlayerDetail(p){
   app.pDetail={p, loading:true}; app.pDetailTab="season"; showDetailModal();
   const base="https://site.web.api.espn.com/apis/common/v3/sports/football/nfl/athletes/"+p.espnId;
   let data=null, gl=null, sched=[], bye="";
+  // Roster/lineup views only pass {espnId, teamAb, ...} (no teamId) — fall
+  // back to the pool-derived ab->id map so the schedule fetch below doesn't
+  // silently hit /teams/undefined/schedule.
+  const teamId = p.teamId || teamIdForAb(p.teamAb);
   try{ data=await (await fetch(base+"/overview")).json(); }catch(e){}
   try{ gl=await (await fetch(base+"/gamelog")).json(); }catch(e){}
   try{ // seasontype=2 forces the full regular-season slate — without it ESPN's
     // schedule endpoint only returns a rolling window around "now", which
     // misidentifies whatever week that window happens to start at as the bye.
-    const sd=await (await fetch(ESPN+"/teams/"+p.teamId+"/schedule?seasontype=2")).json();
+    const sd=await (await fetch(ESPN+"/teams/"+teamId+"/schedule?seasontype=2")).json();
     const weeks=new Set();
     (sd.events||[]).forEach(e=>{ const w=e.week&&e.week.number; if(w)weeks.add(w);
       const c=(e.competitions&&e.competitions[0])||{}; const comps=c.competitors||[];
-      const opp=comps.find(x=>String((x.team||{}).id)!==String(p.teamId));
+      const opp=comps.find(x=>String((x.team||{}).id)!==String(teamId));
       sched.push({ wk:w, opp:((opp&&opp.team&&opp.team.abbreviation))||"", done:!!(c.status&&c.status.type&&c.status.type.completed) });
     });
     for(let w=1;w<=18;w++){ if(!weeks.has(w)){ bye=w; break; } }
@@ -1572,19 +1576,21 @@ function sortPool(list){
   if(s==="name") return list.slice().sort((a,b)=>a.name.localeCompare(b.name));
   return list.slice().sort((a,b)=>(a.rank||9999)-(b.rank||9999)||a.name.localeCompare(b.name));
 }
-function faRow(p, btnLabel, btnCls, onClick){
+function faRow(p, btnLabel, btnCls, onClick, showBye){
   const row=el("div","plr"); row.style.gridTemplateColumns="34px 26px 1fr auto"; row.style.cursor="pointer";
   const inj = (p.injury && p.injury!=="ACTIVE") ? '<span style="color:var(--opp);font-size:9px;font-weight:800">⚠ </span>' : "";
   const isPos = app.pFilter && app.pFilter!=="ALL";
   const rnum = isPos ? p.posRank : p.rank;
   const rk = rnum ? `<span style="color:var(--gold);font-size:10px;font-weight:800">#${rnum}</span> ` : "";
+  const byeWk = showBye ? teamByeWeek(p.teamAb) : null;
+  const byeTxt = byeWk ? ` · <span style="color:var(--gold)">Bye Wk ${byeWk}</span>` : "";
   let meta;
   if(app.realLeague){
     const gi=weekGameInfo(p, app.currentWeek||1);
     const oppTxt = gi ? ` · ${gi.home?"vs":"@"} ${gi.opp}${gi.date?" · "+gameTimeLabel(gi.date):""}` : "";
-    meta = `${p.teamAb||""}${oppTxt}${dvpBadge(p.pos, gi&&gi.opp)}`;
+    meta = `${p.teamAb||""}${oppTxt}${dvpBadge(p.pos, gi&&gi.opp)}${byeTxt}`;
   } else {
-    meta = `${p.teamAb||p.opp||""}${p.jersey?" · #"+p.jersey:""}`;
+    meta = `${p.teamAb||p.opp||""}${p.jersey?" · #"+p.jersey:""}${byeTxt}`;
   }
   let scoreHtml="";
   if(app.realLeague && p.id){
@@ -2216,6 +2222,29 @@ async function ensureDvP(){
   else if(app.tab==="players") renderPlayersList();
   else if(app.tab==="draft") renderDraft();
 }
+// Bye weeks are per-TEAM, not per-player, so this is a one-time 32-fetch
+// (max) sweep rather than a per-player lookup — cached for the session.
+// Needs seasontype=2 for the same rolling-window reason as openPlayerDetail.
+async function ensureTeamByeWeeks(){
+  if(app._byeMap || app._byeLoading) return;
+  const teamIds=[...new Set((app.pool||[]).map(p=>p.teamId).filter(Boolean))];
+  if(!teamIds.length) return;
+  app._byeLoading=true;
+  const map={};
+  await Promise.all(teamIds.map(async tid=>{
+    try{
+      const sd=await (await fetch(ESPN+"/teams/"+tid+"/schedule?seasontype=2")).json();
+      const weeks=new Set(); (sd.events||[]).forEach(e=>{ const w=e.week&&e.week.number; if(w)weeks.add(w); });
+      for(let w=1;w<=18;w++){ if(!weeks.has(w)){ map[tid]=w; break; } }
+    }catch(e){}
+  }));
+  app._byeMap=map; app._byeLoading=false;
+  if(app.tab==="draft") renderDraft();
+}
+function teamByeWeek(ab){
+  const tid=teamIdForAb(ab); if(tid==null || !app._byeMap) return null;
+  return app._byeMap[tid]||null;
+}
 function dvpBadge(pos, opp){
   const d=app._dvpRanks && app._dvpRanks[pos] && app._dvpRanks[pos][opp]; if(!d) return "";
   const frac=d.rank/d.of;
@@ -2509,7 +2538,7 @@ function openBenchMove(pick){
 function renderDraft(){
   const s=$("screen"); if(!s) return; s.innerHTML="";
   if(!app.draft){ s.appendChild(el("div","card","<div class='muted' style='text-align:center;padding:12px'>🔄 Loading draft…</div>")); loadDraft().then(()=>{ if(app.tab==="draft") renderDraft(); }); return; }
-  ensurePool(); ensureAllTeamsWeekInfo(); ensureDvP();
+  ensurePool(); ensureAllTeamsWeekInfo(); ensureDvP(); ensureTeamByeWeeks();
   const D=app.draft, order=D.order||[], N=order.length, ROUNDS=D.rounds||15, TOTAL=N*ROUNDS;
   const done = D.status==="done" || (N>0 && D.picks.length>=TOTAL);
   const live = D.status==="live" && !done;
@@ -2606,8 +2635,8 @@ function renderDraft(){
     const qc=el("div","card"); qc.appendChild(el("h2","title","⭐ Your Queue"));
     app.queue.forEach(id=>{ const p=byId[id]; if(!p) return;
       if(isMe){ const ok=posOK(p);
-        qc.appendChild(faRow(p, ok?"Draft":("🔒 "+restrict.labels.join("/")+" first"), ok?"":" sec", ()=>{ if(ok) draftPlayer(p); else toast("You must fill "+restrict.labels.join(", ")+" first"); }));
-      } else qc.appendChild(faRow(p, "✕ Remove", " sec", ()=>toggleQueue(id)));
+        qc.appendChild(faRow(p, ok?"Draft":("🔒 "+restrict.labels.join("/")+" first"), ok?"":" sec", ()=>{ if(ok) draftPlayer(p); else toast("You must fill "+restrict.labels.join(", ")+" first"); }, true));
+      } else qc.appendChild(faRow(p, "✕ Remove", " sec", ()=>toggleQueue(id), true));
     });
     s.appendChild(qc);
   }
@@ -2643,7 +2672,7 @@ function renderDraft(){
     if(isMe){ label="Draft"; act=()=>draftPlayer(p); }
     else if(commishPicking){ label="Pick for "+onclockName.split(" ")[0]; act=()=>commishPick(p); }
     else { label=app.queue.includes(p.id)?"✓ Queued":"＋ Queue"; cls=" sec"; act=()=>toggleQueue(p.id); }
-    c.appendChild(faRow(p,label,cls,act));
+    c.appendChild(faRow(p,label,cls,act,true));
   });
   s.appendChild(c);
 }
