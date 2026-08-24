@@ -134,6 +134,7 @@ async function pollLeague(league) {
   const defenses = picks.filter((p) => p.pos === "DEF" && p.team && TEAM_ID_BY_AB[p.team]);
   const byTeam = {};
   [...offense, ...defenses].forEach((p) => { (byTeam[p.team] = byTeam[p.team] || []).push(p); });
+  console.log(`DEBUG league ${league.id}: wk=${wk} testPreseason=${testPreseason} seasonType=${seasonType} picks=${picks.length} teams=${Object.keys(byTeam).join(",")}`);
 
   const updates = [];
   for (const ab of Object.keys(byTeam)) {
@@ -141,6 +142,7 @@ async function pollLeague(league) {
     let eventId;
     try { eventId = await findGameId(teamId, wk, seasonType); }
     catch (e) { if (e instanceof RateLimitedError) throw e; console.error(`schedule fetch failed for ${ab}`, e.message); continue; }
+    console.log(`DEBUG  ${ab} (teamId ${teamId}) -> eventId=${eventId}`);
     if (!eventId) continue;
     let box;
     try { box = await fetchGameBox(eventId); }
