@@ -111,7 +111,8 @@
   .cap-bar > div { height:100%; background:var(--gold); }
 
   .modal { position:fixed; inset:0; background:rgba(0,0,0,.78); display:flex; align-items:center; justify-content:center; z-index:50; padding:24px; }
-  .modal .box { background:var(--panel); border:3px solid var(--ink); border-radius:18px; padding:24px; max-width:340px; text-align:center; width:100%; box-shadow:0 6px 0 rgba(5,11,30,.6); }
+  .modal .box { position:relative; background:var(--panel); border:3px solid var(--ink); border-radius:18px; padding:24px; max-width:340px; text-align:center; width:100%; box-shadow:0 6px 0 rgba(5,11,30,.6); }
+  .modal-x { position:absolute; top:10px; right:10px; width:30px; height:30px; border-radius:50%; background:var(--panel2); border:2px solid var(--ink); color:var(--txt); font-weight:800; font-size:16px; line-height:26px; text-align:center; cursor:pointer; z-index:1; }
   .toast { position:fixed; bottom:88px; left:50%; transform:translateX(-50%); background:var(--gold); color:var(--ink); border:2px solid var(--ink);
            padding:10px 18px; border-radius:24px; font-weight:700; font-size:13px; z-index:60; box-shadow:0 6px 20px rgba(0,0,0,.4); }
 
@@ -218,7 +219,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260824s";
+const BUILD_ID = "20260824t";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -936,14 +937,14 @@ function accountModal(){
   const ov=$("overlay"); const lg=app.myLeagues.find(m=>m.league_id===app.sbLeagueId);
   const code=app.leagueCode||(lg&&lg.leagues&&lg.leagues.join_code)||"";
   ov.innerHTML=`<div class="modal"><div class="box" style="max-width:340px">
+    <div class="modal-x" id="acctClose">✕</div>
     <div style="font-size:34px">👤</div>
     <div style="font-weight:800;margin-top:6px">${app.user.email}</div>
     <div class="muted" style="font-size:12px;margin-top:4px">League: ${app.connectedLeague}${lg?" · "+(lg.team_name||""):""}</div>
     <div style="font-size:13px;margin-top:8px">Invite code: <b style="color:var(--gold);letter-spacing:2px">${code}</b></div>
     <button class="btn sec" id="copyCodeBtn" style="width:100%;margin-top:10px">📋 Copy invite code</button>
     <button class="btn sec" id="switchLg" style="width:100%;margin-top:8px">Switch / Join League</button>
-    <button class="btn sec" id="signOutBtn" style="width:100%;margin-top:8px">Sign Out</button>
-    <button class="btn sec" id="acctClose" style="width:100%;margin-top:8px">Close</button></div></div>`;
+    <button class="btn sec" id="signOutBtn" style="width:100%;margin-top:8px">Sign Out</button></div></div>`;
   ov.querySelector("#copyCodeBtn").onclick=()=>copyCode(code);
   ov.querySelector("#switchLg").onclick=()=>{ ov.innerHTML=""; unsubscribeDraft(); app.draft=null; app.realLeague=false; app.connectedLeague=null; app.sbLeagueId=null; render(); };
   ov.querySelector("#signOutBtn").onclick=()=>{ ov.innerHTML=""; signOut(); };
@@ -1235,6 +1236,7 @@ function playerCell(p,side,armedCfg,cq,leftSide){
     <div class="mc-stat">${sub}</div><div class="mc-pt">${p.pts.toFixed(1)}</div></div>`;
   cell.innerHTML = leftSide ? body+av : av+body;
   if(tappable) cell.onclick=()=>usePU(app.armed,p);
+  else if(app.realLeague && p.pos!=="DEF"){ cell.style.cursor="pointer"; cell.onclick=()=>openPlayerCardFor(p); }
   if(app.realLeague){
     const ptEl=cell.querySelector(".mc-pt");
     if(ptEl){ ptEl.style.cursor="pointer"; ptEl.style.textDecoration="underline dotted";
@@ -1296,12 +1298,12 @@ function openPlayerBoxScore(p){
   const teamLine = p.pos+" · "+(p.teamAb||"")+(gi?(" · "+(gi.home?"vs ":"@ ")+gi.opp):"");
   const noData = !row ? `<div class="muted" style="font-size:12px;margin-top:10px">No live data yet — this player's game may not have started, or their team hasn't been polled yet. It updates automatically once it's live.</div>` : "";
   ov.innerHTML=`<div class="modal"><div class="box" style="max-width:440px;text-align:left">
+    <div class="modal-x" id="pbClose">✕</div>
     <div style="display:flex;align-items:center;gap:10px">${pic}<div><div style="font-weight:800">${p.name}</div><div class="muted" style="font-size:12px">${teamLine}</div></div></div>
     <div style="overflow-x:auto;margin-top:12px"><table class="std"><tr><th>Qtr</th><th>Stats</th><th style="text-align:right">FP</th></tr>${rows}${paRow}
       <tr style="border-top:2px solid var(--line)"><td colspan="2" style="font-weight:800">Total</td><td style="text-align:right;font-weight:800;color:var(--gold)">${total.toFixed(1)}</td></tr>
     </table></div>
     ${noData}
-    <button class="btn sec" id="pbClose" style="width:100%;margin-top:14px">Close</button>
   </div></div>`;
   ov.querySelector("#pbClose").onclick=()=>{ ov.innerHTML=""; };
 }
@@ -1464,6 +1466,14 @@ async function openPlayerDetail(p){
   app.pDetail = data ? {p, data, gl, sched, bye, loading:false} : {p, error:true, loading:false};
   showDetailModal();
 }
+// Matchup/spectate rows only carry {id, name, pos, teamAb, headshot} — no
+// espnId — so rebuild it the same way the roster-action modals already do
+// (player_id/id is "e"+espnId; DEF picks and empty lineup slots have no
+// individual profile, so those are silently skipped).
+function openPlayerCardFor(p){
+  if(!p || !p.id || p.pos==="DEF" || p.id.indexOf("e_")===0) return;
+  openPlayerDetail({ espnId:(p.id||"").replace(/^e/,""), name:p.name, pos:p.pos, teamAb:p.teamAb, headshot:p.headshot });
+}
 function statGroups(names){
   const g={passing:[],rushing:[],receiving:[],kicking:[]};
   (names||[]).forEach((n,i)=>{ const s=n.toLowerCase();
@@ -1551,7 +1561,10 @@ function showDetailModal(){
       ${f.projection?sec("Outlook")+`<div style="font-size:12px;line-height:1.5">${f.projection}</div>`:""}
       ${ro.headline?sec("Latest News")+`<div style="font-size:12px;line-height:1.5"><b>${ro.headline}</b>${ro.story?`<br><span class="muted">${ro.story}</span>`:""}</div>`:""}`;
   }
-  ov.innerHTML=`<div class="modal"><div class="box" style="max-width:430px;text-align:left;max-height:88vh;overflow:auto">${head}${body}<button class="btn sec" id="pdClose" style="width:100%;margin-top:16px">Close</button></div></div>`;
+  ov.innerHTML=`<div class="modal"><div class="box" style="max-width:430px;text-align:left;max-height:88vh;display:flex;flex-direction:column">
+    <div class="modal-x" id="pdClose">✕</div>
+    <div style="overflow:auto;flex:1;min-height:0">${head}${body}</div>
+  </div></div>`;
   ov.querySelector("#pdClose").onclick=()=>{ app.pDetail=null; ov.innerHTML=""; };
   const dt=ov.querySelector("#pDetailTabs"); if(dt) dt.querySelectorAll(".chip").forEach(b=> b.onclick=()=>{ app.pDetailTab=b.dataset.t; showDetailModal(); });
   const tw=ov.querySelector("#statTabs"); if(tw) tw.querySelectorAll(".chip").forEach(b=> b.onclick=()=>{ app.pStatTab=b.dataset.t; showDetailModal(); });
@@ -1570,13 +1583,32 @@ function sortControl(s){
   const c=el("div","chip on"); c.textContent="Rankings"; wrap.appendChild(c);
   s.appendChild(wrap);
 }
+// Free-agent screen only — lets you find last week's top performers or the
+// best upcoming projections, not just ESPN's preseason ranking. Separate
+// state (app.faSort) from Draft's sortPool so switching this doesn't
+// silently reorder the draft board too.
+function faSortControl(s){
+  if(!app.realLeague) return;
+  const wrap=el("div","chips"); wrap.style.marginBottom="10px";
+  wrap.appendChild(el("span","muted",`<span style="font-size:10px;align-self:center;margin-right:4px">Sort:</span>`));
+  [["rank","Rank"],["lastwk","Last Wk"],["proj","Proj"]].forEach(([id,lab])=>{
+    const c=el("div","chip"+((app.faSort||"rank")===id?" on":"")); c.textContent=lab;
+    c.onclick=()=>{ app.faSort=id; renderPlayersList(); }; wrap.appendChild(c);
+  });
+  s.appendChild(wrap);
+}
 function sortPool(list){
   const s=app.pSort||"rank";
-  if(s==="pos") return list.slice().sort((a,b)=>(POS_ORDER[a.pos]-POS_ORDER[b.pos])||a.name.localeCompare(b.name));
-  if(s==="name") return list.slice().sort((a,b)=>a.name.localeCompare(b.name));
+  if(s==="lastwk" || s==="proj") return sortPoolBy(list, s);
   return list.slice().sort((a,b)=>(a.rank||9999)-(b.rank||9999)||a.name.localeCompare(b.name));
 }
-function faRow(p, btnLabel, btnCls, onClick, showBye){
+function sortPoolBy(list, s){
+  const NA=-1e9;
+  if(s==="lastwk") return list.slice().sort((a,b)=>{ const av=lastWeekScoreOf(a.id), bv=lastWeekScoreOf(b.id); return (bv==null?NA:bv)-(av==null?NA:av); });
+  if(s==="proj") return list.slice().sort((a,b)=>{ const av=playerProjEstimate(a.id), bv=playerProjEstimate(b.id); return (bv==null?NA:bv)-(av==null?NA:av); });
+  return list.slice().sort((a,b)=>(a.rank||9999)-(b.rank||9999)||a.name.localeCompare(b.name));
+}
+function faRow(p, btnLabel, btnCls, onClick, showBye, scoreMode){
   const row=el("div","plr"); row.style.gridTemplateColumns="34px 26px 1fr auto"; row.style.cursor="pointer";
   const inj = (p.injury && p.injury!=="ACTIVE") ? '<span style="color:var(--opp);font-size:9px;font-weight:800">⚠ </span>' : "";
   const isPos = app.pFilter && app.pFilter!=="ALL";
@@ -1593,7 +1625,13 @@ function faRow(p, btnLabel, btnCls, onClick, showBye){
     meta = `${p.teamAb||p.opp||""}${p.jersey?" · #"+p.jersey:""}${byeTxt}`;
   }
   let scoreHtml="";
-  if(app.realLeague && p.id){
+  if(app.realLeague && p.id && scoreMode==="fa"){
+    const lw=lastWeekScoreOf(p.id), proj=playerProjEstimate(p.id);
+    const parts=[];
+    if(lw!=null) parts.push(`<div style="text-align:right;font-weight:800;color:var(--gold);font-size:12px">Wk${(app.currentWeek||1)-1}: ${lw.toFixed(1)}</div>`);
+    if(proj!=null) parts.push(`<div style="text-align:right;color:var(--muted);font-size:11px">Proj ${proj.toFixed(1)}</div>`);
+    scoreHtml=parts.join("");
+  } else if(app.realLeague && p.id){
     const wk=app.currentWeek||1;
     const score=playerWeekScore(p.id, wk);
     if(score!=null) scoreHtml=`<div style="text-align:right;font-weight:800;color:var(--gold);font-size:13px">${score.toFixed(1)}</div>`;
@@ -1633,7 +1671,7 @@ function renderPlayers(){
   allBtn.onclick=()=>{ app.pShowAll=!app.pShowAll; renderPlayers(); };
   filterRow.appendChild(allBtn);
   s.appendChild(filterRow);
-  posChips(s);
+  posChips(s); faSortControl(s);
   const listAnchor=el("div"); listAnchor.id="playersList"; s.appendChild(listAnchor);
   renderPlayersList();
   setTimeout(()=>search.focus(), 0);
@@ -1650,18 +1688,18 @@ function renderPlayersList(){
   const matchesTeam=p=> app.pTeam==="ALL" || p.teamAb===app.pTeam;
   let base=availablePlayers().filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter).filter(matchesSearch).filter(matchesTeam);
   if(!app.pShowAll) base=base.filter(p=>!takenIds.has(p.id));
-  const pool=sortPool(base);
+  const pool=sortPoolBy(base, app.faSort||"rank");
   const c=el("div","card");
   c.appendChild(el("h2","title", app.pShowAll?"All Players":"Available"));
   if(!pool.length) c.appendChild(el("div","muted","<div style='font-size:13px'>No players match these filters.</div>"));
   pool.slice(0,60).forEach(p=>{
     const owner=app.realLeague && ownerOf[p.id];
     if(owner){
-      const row=faRow(p,"","",()=>{});
+      const row=faRow(p,"","",()=>{},false,"fa");
       const btnSlot=row.lastElementChild; btnSlot.innerHTML=`<span class="muted" style="font-size:11px;margin-left:auto">🔒 ${owner}</span>`;
       c.appendChild(row);
     } else {
-      c.appendChild(faRow(p, app.realLeague?"＋":"+ Add", app.realLeague?" sec":"", ()=>{ if(app.realLeague){ toast("Add/drop (waivers) is coming in a future update"); } else addPlayer(p); }));
+      c.appendChild(faRow(p, app.realLeague?"＋":"+ Add", app.realLeague?" sec":"", ()=>{ if(app.realLeague){ toast("Add/drop (waivers) is coming in a future update"); } else addPlayer(p); }, false, "fa"));
     }
   });
   s.appendChild(c);
@@ -2195,6 +2233,10 @@ function playerWeekScore(pid, wk){
   let total=row.q_pts.pa?row.q_pts.pa.fp:0;
   for(let q=1;q<=4;q++){ const v=row.q_pts[q]||row.q_pts[String(q)]; if(v) total+=quarterFpFromStats(pos, v.stats); }
   return Math.round(total*10)/10;
+}
+function lastWeekScoreOf(pid){
+  const wk=(app.currentWeek||1)-1;
+  return wk>=1 ? playerWeekScore(pid, wk) : null;
 }
 // "Est. Proj" — honest label, not ESPN's real model: just this player's own
 // real scoring average so far this season. No data yet (preseason, or an
@@ -2865,6 +2907,7 @@ function detailCell(p,leftSide,live){
   const av=avatarHTML(p);
   const body=`<div class="mc-body"><div class="mc-nm">${p.name}</div><div class="mc-stat">${sub}</div><div class="mc-pt">${val}</div></div>`;
   cell.innerHTML= leftSide ? body+av : av+body;
+  if(app.realLeague && p.pos!=="DEF"){ cell.style.cursor="pointer"; cell.onclick=()=>openPlayerCardFor(p); }
   return cell;
 }
 
