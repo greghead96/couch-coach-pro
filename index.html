@@ -218,7 +218,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260824f";
+const BUILD_ID = "20260824g";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -2252,9 +2252,19 @@ async function pollRealStats(){
   const byTeam={};
   all.forEach(p=>{ const tid=teamIdForAb(p.teamAb); if(!tid) return; (byTeam[tid]=byTeam[tid]||[]).push(p); });
   const updates=[];
-  for(const teamId of Object.keys(byTeam)){
-    const eventId=await findGameId(teamId, wk); if(!eventId) continue;
-    let box; try{ box=await fetchGameBoxFP(eventId); }catch(e){ continue; }
+  // Fetch every team in parallel — this used to be a sequential for-loop
+  // awaiting one team at a time, which for a matchup spanning many real NFL
+  // teams could take several seconds. Until a team's entry landed here,
+  // realCurrentQuarterFor() couldn't tell a live game from an unstarted one
+  // and defaulted to "unknown" — which is why the quarter picker was letting
+  // every quarter be picked mid-game. Parallel fetch closes that window.
+  const teamIds=Object.keys(byTeam);
+  const boxes=await Promise.all(teamIds.map(async teamId=>{
+    const eventId=await findGameId(teamId, wk); if(!eventId) return null;
+    try{ return await fetchGameBoxFP(eventId); }catch(e){ return null; }
+  }));
+  teamIds.forEach((teamId,idx)=>{
+    const box=boxes[idx]; if(!box) return;
     app.playerGameState[teamId]={period:box.period, final:box.final};
     for(const p of byTeam[teamId]){
       let curFp, curQtd=0, curBonus=0, curBonusTd=0, curRaw=null, curSacks=0, curInts=0, totalAllowed=null;
@@ -2272,7 +2282,7 @@ async function pollRealStats(){
       }
       updates.push({athlete_id:p.id, week:wk, period:box.period, curFp, curQtd, curBonus, curBonusTd, curSacks, curInts, curRaw, totalAllowed, isDef:p.pos==="DEF"});
     }
-  }
+  });
   if(!updates.length) return;
   const {data:existing}=await sb.from("player_week_stats").select("*")
     .in("athlete_id", updates.map(u=>u.athlete_id)).eq("week",wk);
