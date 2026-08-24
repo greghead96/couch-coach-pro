@@ -218,7 +218,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260823g";
+const BUILD_ID = "20260824a";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -1545,8 +1545,16 @@ function faRow(p, btnLabel, btnCls, onClick){
   const isPos = app.pFilter && app.pFilter!=="ALL";
   const rnum = isPos ? p.posRank : p.rank;
   const rk = rnum ? `<span style="color:var(--gold);font-size:10px;font-weight:800">#${rnum}</span> ` : "";
+  let meta;
+  if(app.realLeague){
+    const gi=weekGameInfo(p, app.currentWeek||1);
+    const oppTxt = gi ? ` · ${gi.home?"vs":"@"} ${gi.opp}${gi.date?" · "+gameTimeLabel(gi.date):""}` : "";
+    meta = `${p.teamAb||""}${oppTxt}${dvpBadge(p.pos, gi&&gi.opp)}`;
+  } else {
+    meta = `${p.teamAb||p.opp||""}${p.jersey?" · #"+p.jersey:""}`;
+  }
   row.innerHTML=`${avatarHTML(p)}<div class="pos">${p.pos}</div>
-    <div><div class="nm">${rk}${inj}${p.name}</div><div class="meta2">${p.teamAb||p.opp||""}${p.jersey?" · #"+p.jersey:""}</div></div><div></div>`;
+    <div><div class="nm">${rk}${inj}${p.name}</div><div class="meta2">${meta}</div></div><div></div>`;
   row.onclick=()=>openPlayerDetail(p);
   const b=el("button","btn sm"+(btnCls||"")); b.textContent=btnLabel; b.style.marginLeft="auto";
   b.onclick=(e)=>{ e.stopPropagation(); onClick(b); }; row.lastElementChild.appendChild(b);
@@ -1563,6 +1571,7 @@ function renderPlayers(){
   s.appendChild(el("div","card",`<h2 class='title'>Players · real NFL data</h2>
     <div class='muted' style='font-size:12px'>Real players from ESPN — tap any player for research (stats, projection, bye, news). Add to your bench; roster full → pick a drop.</div>`));
   if(!poolGuard(s,renderPlayers)) return;
+  ensureAllTeamsWeekInfo(); ensureDvP();
   const search=el("input","input"); search.placeholder="Search by player or team…"; search.value=app.pSearch||"";
   search.style.marginBottom="10px";
   search.oninput=()=>{ app.pSearch=search.value; renderPlayersList(); };
@@ -2041,7 +2050,7 @@ async function findGameId(teamId, wk){
     app._gameIdCache[ck]=ev?ev.id:null;
     if(ev && ev.shortName){
       const parts=ev.shortName.split(" @ "); const myAb=(sd.team&&sd.team.abbreviation)||"";
-      if(parts.length===2 && myAb){ const home=parts[1]===myAb; app._teamGameInfo[teamId+"_"+wk]={opp:home?parts[0]:parts[1], home}; }
+      if(parts.length===2 && myAb){ const home=parts[1]===myAb; app._teamGameInfo[teamId+"_"+wk]={opp:home?parts[0]:parts[1], home, date:ev.date||null}; }
     }
   }catch(e){ app._gameIdCache[ck]=null; }
   return app._gameIdCache[ck];
@@ -2096,6 +2105,26 @@ async function ensureCurrentWeekInfo(){
   }
   if(changed && app.tab==="team") renderTeam();
 }
+// Broader than ensureCurrentWeekInfo (which only covers rostered teams) —
+// Players/Draft browse the WHOLE pool, so this covers every team represented there.
+async function ensureAllTeamsWeekInfo(){
+  if(!app.realLeague) return;
+  const wk=app.currentWeek||1;
+  const teams=[...new Set((app.pool||[]).map(p=>p.teamAb).filter(Boolean))];
+  let changed=false;
+  for(const ab of teams){
+    const tid=teamIdForAb(ab); if(tid==null) continue;
+    const had=app._teamGameInfo && app._teamGameInfo[tid+"_"+wk];
+    await findGameId(tid, wk);
+    if(!had && app._teamGameInfo && app._teamGameInfo[tid+"_"+wk]) changed=true;
+  }
+  if(changed){ if(app.tab==="players") renderPlayersList(); else if(app.tab==="draft") renderDraft(); }
+}
+function gameTimeLabel(iso){
+  if(!iso) return "";
+  try{ const d=new Date(iso); return d.toLocaleDateString("en-US",{weekday:"short"})+" "+d.toLocaleTimeString("en-US",{hour:"numeric",minute:"2-digit"}); }
+  catch(e){ return ""; }
+}
 async function ensureDvP(){
   if(!app.realLeague || app._dvpLoading) return;
   const wkMax=(app.currentWeek||1)-1;
@@ -2105,6 +2134,8 @@ async function ensureDvP(){
   try{ app._dvpRanks=await computeDvP(wkMax); app._dvpForWk=wkMax; }catch(e){ app._dvpRanks={}; }
   app._dvpLoading=false;
   if(app.tab==="team") renderTeam();
+  else if(app.tab==="players") renderPlayersList();
+  else if(app.tab==="draft") renderDraft();
 }
 function dvpBadge(pos, opp){
   const d=app._dvpRanks && app._dvpRanks[pos] && app._dvpRanks[pos][opp]; if(!d) return "";
@@ -2361,7 +2392,7 @@ function openBenchMove(pick){
 function renderDraft(){
   const s=$("screen"); if(!s) return; s.innerHTML="";
   if(!app.draft){ s.appendChild(el("div","card","<div class='muted' style='text-align:center;padding:12px'>🔄 Loading draft…</div>")); loadDraft().then(()=>{ if(app.tab==="draft") renderDraft(); }); return; }
-  ensurePool();
+  ensurePool(); ensureAllTeamsWeekInfo(); ensureDvP();
   const D=app.draft, order=D.order||[], N=order.length, ROUNDS=D.rounds||15, TOTAL=N*ROUNDS;
   const done = D.status==="done" || (N>0 && D.picks.length>=TOTAL);
   const live = D.status==="live" && !done;
@@ -2471,8 +2502,21 @@ function renderDraft(){
     tg.onclick=()=>{ app.commishMode=!app.commishMode; renderDraft(); };
     s.appendChild(tg);
   }
+  const search=el("input","input"); search.placeholder="Search by player or team…"; search.value=app.pSearch||"";
+  search.style.marginBottom="10px";
+  search.oninput=()=>{ app.pSearch=search.value; renderDraft(); };
+  s.appendChild(search);
+  const teamRow=el("div","row"); teamRow.style.marginBottom="10px";
+  const teamSel=el("select","input"); teamSel.style.marginBottom="0";
+  const draftTeams=[...new Set((app.pool||[]).map(p=>p.teamAb).filter(Boolean))].sort();
+  teamSel.innerHTML=`<option value="ALL">All Teams</option>`+draftTeams.map(t=>`<option value="${t}"${app.pTeam===t?" selected":""}>${t}</option>`).join("");
+  teamSel.onchange=()=>{ app.pTeam=teamSel.value; renderDraft(); };
+  teamRow.appendChild(teamSel); s.appendChild(teamRow);
   posChips(s); sortControl(s);
-  let avail=sortPool(poolAll.filter(p=>!draftedSet.has(p.id)).filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter));
+  const dq=(app.pSearch||"").trim().toLowerCase();
+  const draftMatchesSearch=p=> !dq || (p.name||"").toLowerCase().includes(dq) || (p.teamAb||"").toLowerCase().includes(dq);
+  const draftMatchesTeam=p=> app.pTeam==="ALL" || p.teamAb===app.pTeam;
+  let avail=sortPool(poolAll.filter(p=>!draftedSet.has(p.id)).filter(p=>app.pFilter==="ALL"||p.pos===app.pFilter).filter(draftMatchesSearch).filter(draftMatchesTeam));
   if(restrict) avail=avail.filter(posOK);
   const c=el("div","card"); c.appendChild(el("h2","title","Available · tap for research"));
   if(restrict) c.appendChild(el("div","muted",`<div style='font-size:11px;margin-bottom:6px;color:var(--gold)'>🔒 Roster rules: you still need <b>${restrict.labels.join(", ")}</b> — only those positions are draftable now.</div>`));
