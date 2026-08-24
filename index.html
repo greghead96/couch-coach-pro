@@ -218,7 +218,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260824c";
+const BUILD_ID = "20260824d";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -1196,7 +1196,7 @@ function playerCell(p,side,armedCfg,cq,leftSide){
     sched=persisted.map(x=>({key:x.powerup_key,pid:p.id,q:x.quarter}));
     if(!hotOn) hotOn=app.powerupPicks.some(x=>x.week===app.currentWeek && x.player_id===p.id && x.powerup_key==="hotstart");
   }
-  const activeNow = cq>=1 && cq<=4 && sched.some(x=>x.q===cq);
+  const activeNow = cq>=1 && cq<=4 && sched.some(x=>Number(x.q)===cq);
   if(tappable) cell.classList.add("tappable");
   if(activeNow) cell.classList.add("boosted");
   const hot = hotOn ? "🔥" : "";
@@ -1250,7 +1250,7 @@ function openPlayerBoxScore(p){
   for(let q=1;q<=4;q++){
     const qd=row && row.q_pts && (row.q_pts[q]||row.q_pts[String(q)]);
     const lines=quarterStatLines(p.pos, qd&&qd.stats);
-    const isPuQ=pu && pu.quarter===q; const cfg=isPuQ?POWERUPS[pu.powerup_key]:null;
+    const isPuQ=pu && Number(pu.quarter)===q; const cfg=isPuQ?POWERUPS[pu.powerup_key]:null;
     const mult = cfg&&pu.powerup_key==="double" ? 2 : (cfg&&pu.powerup_key==="freeze" ? 0 : 1);
     let qTotal=0;
     const lineHtml = lines.length ? lines.map(l=>{
@@ -2389,7 +2389,7 @@ function computeRealTeamScore(uid, wk){
       const rq=realQuarterly(contributor, wk);
       let fp=rq.q[q];
       const pu=byPlayerPU[contributor];
-      if(pu && pu.quarter===q){ if(pu.powerup_key==="double") fp*=2; else if(pu.powerup_key==="freeze") fp=0; }
+      if(pu && Number(pu.quarter)===q){ if(pu.powerup_key==="double") fp*=2; else if(pu.powerup_key==="freeze") fp=0; }
       total+=fp;
       if(q===1 && rq.pa) total+=rq.pa.fp; // whole-game DEF component, added once (not per-quarter, not power-up eligible)
       if(rq.qtd[q]>0 && (!bestTD || q<bestTD.q)) bestTD={q,pid:contributor};
@@ -2406,7 +2406,7 @@ function realPlayerAdjustedTotal(pid, wk){
   const pu=app.powerupPicks.find(p=>p.week===wk && p.player_id===pid);
   const rq=realQuarterly(pid, wk);
   let total=rq.pa?rq.pa.fp:0;
-  for(let q=1;q<=4;q++){ let fp=rq.q[q]; if(pu && pu.quarter===q){ if(pu.powerup_key==="double") fp*=2; else if(pu.powerup_key==="freeze") fp=0; } total+=fp; }
+  for(let q=1;q<=4;q++){ let fp=rq.q[q]; if(pu && Number(pu.quarter)===q){ if(pu.powerup_key==="double") fp*=2; else if(pu.powerup_key==="freeze") fp=0; } total+=fp; }
   return Math.round(total*10)/10;
 }
 function syncRealPointsToPlayers(){
