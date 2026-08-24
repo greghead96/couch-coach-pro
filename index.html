@@ -218,7 +218,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260824k";
+const BUILD_ID = "20260824l";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -2283,10 +2283,13 @@ async function pollRealStats(){
   // and defaulted to "unknown" — which is why the quarter picker was letting
   // every quarter be picked mid-game. Parallel fetch closes that window.
   const teamIds=Object.keys(byTeam);
+  const testPreseason=!!(app.settings.league && app.settings.league.testPreseason);
+  debugLog(`pollRealStats: wk=${wk} testPreseason=${testPreseason} teams=${teamIds.join(",")}`);
   const boxes=await Promise.all(teamIds.map(async teamId=>{
-    let eventId; try{ eventId=await findGameId(teamId, wk); }catch(e){ console.error("DEBUG findGameId failed",teamId,e); return null; }
-    if(!eventId) return null;
-    try{ return await fetchGameBoxFP(eventId); }catch(e){ console.error("DEBUG fetchGameBoxFP failed",teamId,eventId,e); return null; }
+    let eventId; try{ eventId=await findGameId(teamId, wk); }catch(e){ debugLog(`findGameId(${teamId}) threw: ${e.message}`); return null; }
+    if(!eventId){ debugLog(`findGameId(${teamId}, wk=${wk}, preseason=${testPreseason}) -> null (no event found)`); return null; }
+    try{ const box=await fetchGameBoxFP(eventId); debugLog(`team ${teamId} event=${eventId} -> period=${box.period} final=${box.final}`); return box; }
+    catch(e){ debugLog(`fetchGameBoxFP(${teamId}, event=${eventId}) threw: ${e.message}`); return null; }
   }));
   teamIds.forEach((teamId,idx)=>{
     const box=boxes[idx]; if(!box) return;
