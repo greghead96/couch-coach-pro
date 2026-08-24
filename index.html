@@ -218,7 +218,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260824g";
+const BUILD_ID = "20260824h";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -644,6 +644,11 @@ function usePU(k,p){
   // Double / Freeze — one power-up per player per week
   if(playerAssigned(p.id)){ toast(p.name+" already has a power-up this week"); app.armed=null; renderMatchup(); return; }
   const cq=app.realLeague ? realCurrentQuarterFor(p) : currentQuarter();
+  if(app.realLeague){
+    const tid=teamIdForAb(p.teamAb);
+    console.log("DEBUG usePU quarter-gate", {name:p.name, teamAb:p.teamAb, tid, playerGameState:tid!=null?app.playerGameState[tid]:undefined, cq});
+    toast(`DEBUG ${p.name}: tid=${tid} state=${tid!=null?JSON.stringify(app.playerGameState[tid]):"n/a"} cq=${cq}`);
+  }
   const allowed=[]; for(let q=1;q<=4;q++) if(q>cq) allowed.push(q);
   if(!allowed.length){ toast("No upcoming quarters left"); app.armed=null; renderMatchup(); return; }
   showQuarterPicker(k,p,allowed);
@@ -2260,8 +2265,9 @@ async function pollRealStats(){
   // every quarter be picked mid-game. Parallel fetch closes that window.
   const teamIds=Object.keys(byTeam);
   const boxes=await Promise.all(teamIds.map(async teamId=>{
-    const eventId=await findGameId(teamId, wk); if(!eventId) return null;
-    try{ return await fetchGameBoxFP(eventId); }catch(e){ return null; }
+    let eventId; try{ eventId=await findGameId(teamId, wk); }catch(e){ console.error("DEBUG findGameId failed",teamId,e); return null; }
+    if(!eventId) return null;
+    try{ return await fetchGameBoxFP(eventId); }catch(e){ console.error("DEBUG fetchGameBoxFP failed",teamId,eventId,e); return null; }
   }));
   teamIds.forEach((teamId,idx)=>{
     const box=boxes[idx]; if(!box) return;
@@ -2360,6 +2366,9 @@ async function loadAllRealScoringData(){
     app.powerupPicks=pu.data||[];
     app.weeklyLineups={}; (wl.data||[]).forEach(r=>{ (app.weeklyLineups[r.week]=app.weeklyLineups[r.week]||{})[r.user_id]=r.starters; });
     app.playerWeekStats={}; (pws.data||[]).forEach(r=>{ (app.playerWeekStats[r.week]=app.playerWeekStats[r.week]||{})[r.athlete_id]=r; });
+    console.log("DEBUG loadAllRealScoringData ok", {leagueId:app.sbLeagueId, powerupPicksCount:app.powerupPicks.length, powerupPicks:app.powerupPicks});
+    if(!app._scoringLoadDebugShown){ app._scoringLoadDebugShown=true;
+      toast(`DEBUG powerup_picks rows=${app.powerupPicks.length} lid=${app.sbLeagueId}`); }
   }catch(e){
     console.error("loadAllRealScoringData threw", e);
     if(!app._scoringLoadWarned){ app._scoringLoadWarned=true; toast("⚠ Couldn't load power-up/score data: "+e.message); }
