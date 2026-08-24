@@ -218,7 +218,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260824l";
+const BUILD_ID = "20260824m";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -2270,7 +2270,12 @@ async function fetchGameBoxFP(eventId){
 // all clients observe the same real-world truth, so last write wins fine.
 async function pollRealStats(){
   if(!app.realLeague || !app.sbLeagueId) return;
+  // teamIdForAb() can't resolve anyone until app.pool has loaded — without
+  // this wait, the very first poll after opening the app/tab would run
+  // against an empty pool, find zero teams, and leave quarter-lock state
+  // undefined until the next 30s cycle caught up.
   ensurePool();
+  for(let i=0;i<25 && (app.poolLoading || (!app.pool && !app.poolError)); i++) await new Promise(r=>setTimeout(r,200));
   const wk=app.currentWeek||1;
   const all=[...myStarters,...myBench,...oppStarters,...oppBench].filter(p=>p.id && !p.id.startsWith("e_"));
   const byTeam={};
