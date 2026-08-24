@@ -218,7 +218,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260824j";
+const BUILD_ID = "20260824k";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -2395,9 +2395,12 @@ async function loadAllRealScoringData(){
 }
 async function persistPowerup(key,pid,pname,q,targetId){
   if(!app.realLeague) return;
-  try{ const {error}=await sb.rpc("log_powerup",{lid:app.sbLeagueId, wk:app.currentWeek, pid, pname, key, q, target:targetId||null});
-    if(error) throw error; await loadAllRealScoringData(); refreshRealInv(); }
-  catch(e){ toast(e.message||"Couldn't save power-up"); }
+  const args={lid:app.sbLeagueId, wk:app.currentWeek, pid, pname, key, q, target:targetId||null};
+  try{ const {error}=await sb.rpc("log_powerup",args);
+    if(error){ debugLog(`persistPowerup FAILED: ${JSON.stringify(args)} -> ${error.message} (code ${error.code||"?"})`); throw error; }
+    debugLog(`persistPowerup OK: ${JSON.stringify(args)}`);
+    await loadAllRealScoringData(); refreshRealInv(); }
+  catch(e){ debugLog(`persistPowerup THREW: ${JSON.stringify(args)} -> ${e.message}`); toast(e.message||"Couldn't save power-up"); }
 }
 // For real leagues, weekly inventory is derived from persisted picks (so it
 // survives refreshes/devices and naturally refills when the week advances).
