@@ -225,6 +225,50 @@ async function pollOnce() {
   return leagues.length;
 }
 
+// ESPN moves its own "current week" scoreboard forward automatically once
+// Monday's late game wraps — no query params needed, it always reflects
+// today's date. Piggybacking on that means we don't have to hand-roll a
+// "Tuesday after MNF" calendar rule ourselves.
+async function getEspnRegularSeasonWeek() {
+  const d = await espnFetch(`${ESPN}/scoreboard`);
+  const wk = d.week && d.week.number;
+  const seasonType = d.season && d.season.type;
+  if (!wk || seasonType !== 2) return null; // preseason/postseason/off — nothing to auto-advance to
+  return wk;
+}
+
+// Advances real-season leagues to match the NFL's actual current week, same
+// snapshot-then-advance behavior as the set_week() RPC, but run with the
+// service role so it works unattended (the RPC requires an authenticated
+// commissioner, which no one is at 3am on a Tuesday).
+// Leagues in preseason-testing mode are left alone — the commissioner still
+// drives those manually since preseason weeks don't map onto ESPN's regular-
+// season week counter.
+async function autoAdvanceWeeks() {
+  let espnWk;
+  try { espnWk = await getEspnRegularSeasonWeek(); }
+  catch (e) { console.log(`auto-advance: scoreboard check failed (${e.message}) — skipping`); return; }
+  if (!espnWk) { console.log("auto-advance: NFL not in regular season right now — skipping"); return; }
+
+  const leagues = await sb("leagues?select=id,settings,current_week&current_week=not.is.null");
+  for (const league of leagues) {
+    const testPreseason = !!(league.settings && league.settings.league && league.settings.league.testPreseason);
+    if (testPreseason) continue;
+    if (!(espnWk > league.current_week)) continue;
+    try {
+      const lineups = await sb(`lineups?select=user_id,starters&league_id=eq.${league.id}`);
+      if (lineups.length) {
+        const rows = lineups.map((l) => ({ league_id: league.id, week: league.current_week, user_id: l.user_id, starters: l.starters }));
+        await sb("weekly_lineups", { method: "POST", headers: { Prefer: "resolution=merge-duplicates" }, body: JSON.stringify(rows) });
+      }
+      await sb(`leagues?id=eq.${league.id}`, { method: "PATCH", body: JSON.stringify({ current_week: espnWk }) });
+      console.log(`auto-advance: league ${league.id} week ${league.current_week} -> ${espnWk}`);
+    } catch (e) {
+      console.error(`auto-advance: league ${league.id} failed:`, e.message);
+    }
+  }
+}
+
 // The GitHub Actions trigger only fires every 5 minutes (its own minimum), but
 // each run loops internally every ~20s for its own ~4.5-minute window before
 // exiting — so the next scheduled run picks up right as this one finishes,
@@ -237,6 +281,8 @@ const LOOP_BUDGET_MS = 270_000; // 4.5 min — leaves headroom before the next 5
 const POLL_INTERVAL_MS = 20_000;
 
 async function main() {
+  await autoAdvanceWeeks();
+
   let live;
   try { live = await anyGameLiveOrStartingSoon(); }
   catch (e) {

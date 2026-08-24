@@ -218,7 +218,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260824q";
+const BUILD_ID = "20260824r";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -627,6 +627,24 @@ function usePU(k,p){
   const cfg=POWERUPS[k];
   const side = myStarters.includes(p)?"me":"op";
   if(side!==cfg.target){ toast(cfg.target==="me"?"Target YOUR player":"Target the OPPONENT"); return; }
+  confirmPUTarget(k,p,()=>usePUConfirmed(k,p));
+}
+function confirmPUTarget(k,p,onConfirm){
+  const cfg=POWERUPS[k]; const ov=$("overlay");
+  ov.innerHTML=`<div class="modal"><div class="box" style="max-width:340px">
+    <div style="font-size:30px">${cfg.icon}</div>
+    <div style="font-weight:800;margin-top:6px">${cfg.name}</div>
+    <div class="muted" style="font-size:13px;margin:8px 0 4px">Use on <b style="color:var(--txt)">${p.name}</b> (${p.pos}${p.teamAb?" · "+p.teamAb:""})?</div>
+    <div class="muted" style="font-size:11px">This locks in your target — you won't be able to change it once confirmed.</div>
+    <div class="row" style="margin-top:16px;gap:8px">
+      <button class="btn sec" id="puCancel" style="flex:1">Cancel</button>
+      <button class="btn" id="puConfirm" style="flex:1">Confirm</button>
+    </div></div></div>`;
+  ov.querySelector("#puCancel").onclick=()=>{ ov.innerHTML=""; app.armed=null; renderMatchup(); };
+  ov.querySelector("#puConfirm").onclick=()=>{ ov.innerHTML=""; onConfirm(); };
+}
+function usePUConfirmed(k,p){
+  const cfg=POWERUPS[k];
   if(k==="hotstart"){
     if(app.sim.gameSec>0 || app.sim.running){ toast("Set Hot Start before kickoff"); return; }
     if(playerAssigned(p.id)){ toast(p.name+" already has a power-up this week"); return; }
@@ -650,15 +668,18 @@ function usePU(k,p){
 }
 function openSubModal(starter){
   const ov=$("overlay");
-  const list=myBench.map((p,i)=>`<button class="btn sec subOpt" data-i="${i}" style="width:100%;text-align:left;margin-top:6px">${p.pos} · ${p.name} <span class="muted" style="font-size:11px">· not kicked off</span></button>`).join("");
+  const si=myStarters.indexOf(starter);
+  const slot=SLOTS[si]; // same eligibility rule as setting a lineup slot — FLEX allows RB/WR/TE, everything else must match exactly
+  const eligible=myBench.map((p,i)=>({p,i})).filter(o=>!slot || slot.pos.includes(o.p.pos));
+  const list=eligible.map(o=>`<button class="btn sec subOpt" data-i="${o.i}" style="width:100%;text-align:left;margin-top:6px">${o.p.pos} · ${o.p.name} <span class="muted" style="font-size:11px">· not kicked off</span></button>`).join("");
   ov.innerHTML=`<div class="modal"><div class="box" style="max-width:360px">
     <div style="font-weight:800">🔁 Emergency Sub</div>
-    <div class="muted" style="font-size:12px;margin:6px 0 8px">Sub in for <b style="color:var(--txt)">${starter.name}</b> (${starter.pos}, game underway). Pick a bench player who hasn't kicked off — they start fresh:</div>
-    <div style="max-height:46vh;overflow:auto">${list||'<div class="muted">No bench players available.</div>'}</div>
+    <div class="muted" style="font-size:12px;margin:6px 0 8px">Sub in for <b style="color:var(--txt)">${starter.name}</b> (${starter.pos}, game underway). Pick a ${slot?slot.pos.join("/"):starter.pos} on your bench who hasn't kicked off — they start fresh:</div>
+    <div style="max-height:46vh;overflow:auto">${list||'<div class="muted">No eligible bench players at this position.</div>'}</div>
     <button class="btn sec" id="subCancel" style="width:100%;margin-top:12px">Cancel</button></div></div>`;
   ov.querySelectorAll(".subOpt").forEach(b=> b.onclick=()=>{
     const bp=myBench[+b.dataset.i];
-    const si=myStarters.indexOf(starter), bi=myBench.indexOf(bp);
+    const bi=myBench.indexOf(bp);
     reset(bp);
     myStarters[si]=bp; myBench[bi]=starter;
     app.inv.sub--; app.armed=null; $("overlay").innerHTML="";
@@ -1419,12 +1440,15 @@ async function loadPool(){
 function availablePlayers(){ return app.pool||[]; }
 async function openPlayerDetail(p){
   if(!p.espnId){ toast("No profile for "+p.name); return; }
-  app.pDetail={p, loading:true}; showDetailModal();
+  app.pDetail={p, loading:true}; app.pDetailTab="season"; showDetailModal();
   const base="https://site.web.api.espn.com/apis/common/v3/sports/football/nfl/athletes/"+p.espnId;
   let data=null, gl=null, sched=[], bye="";
   try{ data=await (await fetch(base+"/overview")).json(); }catch(e){}
   try{ gl=await (await fetch(base+"/gamelog")).json(); }catch(e){}
-  try{ const sd=await (await fetch(ESPN+"/teams/"+p.teamId+"/schedule")).json();
+  try{ // seasontype=2 forces the full regular-season slate — without it ESPN's
+    // schedule endpoint only returns a rolling window around "now", which
+    // misidentifies whatever week that window happens to start at as the bye.
+    const sd=await (await fetch(ESPN+"/teams/"+p.teamId+"/schedule?seasontype=2")).json();
     const weeks=new Set();
     (sd.events||[]).forEach(e=>{ const w=e.week&&e.week.number; if(w)weeks.add(w);
       const c=(e.competitions&&e.competitions[0])||{}; const comps=c.competitors||[];
@@ -1490,7 +1514,7 @@ function showDetailModal(){
     const bio=[p.age?("Age "+p.age):"", p.exp!=null?(p.exp+" yr exp"):"", p.college||"", (p.injury&&p.injury!=="ACTIVE")?("⚠ "+p.injury):""].filter(Boolean).join(" · ");
     const sp=(st.splits&&st.splits[0]&&st.splits[0].stats)||null, labels=st.labels||[];
     let lastHtml="";
-    if(sp) lastHtml=sec("Last Season")+`<div style="overflow-x:auto"><table class="std"><tr>${labels.slice(0,8).map(l=>`<th>${l}</th>`).join("")}</tr><tr>${sp.slice(0,8).map(v=>`<td>${v}</td>`).join("")}</tr></table></div>`;
+    if(sp) lastHtml=`<div style="overflow-x:auto"><table class="std"><tr>${labels.slice(0,8).map(l=>`<th>${l}</th>`).join("")}</tr><tr>${sp.slice(0,8).map(v=>`<td>${v}</td>`).join("")}</tr></table></div>`;
     let wkHtml=""; const wk=gamelogWeekly(D.gl);
     if(wk && wk.rows.length){
       const groups=statGroups(wk.names);
@@ -1502,18 +1526,30 @@ function showDetailModal(){
         `<div style="overflow-x:auto"><table class="std"><tr><th>Wk</th><th>Opp</th><th style="color:var(--gold)">FP</th>${idxs.map(i=>`<th>${wk.labels[i]||""}</th>`).join("")}</tr>`+
         wk.rows.map(r=>`<tr><td>${r.wk||""}</td><td>${r.opp||""}</td><td style="color:var(--gold);font-weight:700">${r.fp}</td>${idxs.map(i=>`<td>${r.stats[i]||""}</td>`).join("")}</tr>`).join("")+`</table></div>`;
     }
-    let schHtml=""; const up=(D.sched||[]).filter(g=>!g.done && g.wk).slice(0,6);
-    if(up.length) schHtml=sec("Upcoming Schedule")+up.map(g=>`<div class="schrow"><span class="wk">Wk ${g.wk}</span><span style="flex:1">${g.opp?"vs "+g.opp:"—"}</span></div>`).join("");
+    const byWk={}; (D.sched||[]).forEach(g=>{ if(g.wk) byWk[g.wk]=g; });
+    const seasonRows=[]; for(let w=1;w<=18;w++){
+      if(w===D.bye){ seasonRows.push(`<tr><td>${w}</td><td class="muted" colspan="2">BYE</td></tr>`); continue; }
+      const g=byWk[w]; const oppTxt=g&&g.opp?("vs "+g.opp):"—";
+      let scoreTxt='<span class="muted">—</span>';
+      if(app.realLeague && p.id){ const sc=playerWeekScore(p.id,w); if(sc!=null) scoreTxt=`<b style="color:var(--gold)">${sc.toFixed(1)}</b>`; }
+      seasonRows.push(`<tr><td>${w}</td><td>${oppTxt}</td><td>${scoreTxt}</td></tr>`);
+    }
+    const seasonHtml=`<div style="overflow-x:auto;max-height:44vh;overflow-y:auto"><table class="std"><tr><th>Wk</th><th>Opp</th><th>FP</th></tr>${seasonRows.join("")}</table></div>`;
+    const dTab=app.pDetailTab==="last" ? "last" : "season";
+    const detailTabs=`<div class="chips" id="pDetailTabs">
+      <div class="chip${dTab==="season"?' on':''}" data-t="season">This Season</div>
+      <div class="chip${dTab==="last"?' on':''}" data-t="last">Last Season</div></div>`;
+    const tabBody = dTab==="season" ? seasonHtml : (lastHtml+wkHtml || '<div class="muted" style="font-size:12px">No prior-season stats available.</div>');
     body=`${bio?`<div style="font-size:12px;margin-top:10px">${bio}</div>`:""}
       ${D.bye?`<div class="muted" style="font-size:12px;margin-top:4px">Bye: <b style="color:var(--txt)">Week ${D.bye}</b></div>`:""}
       ${(f.draftRank||f.positionRank)?`<div style="font-size:12px;margin-top:6px">ESPN draft #${f.draftRank||"—"} · ${p.pos}${f.positionRank||"—"} · ${f.percentOwned||0}% rostered</div>`:""}
-      ${lastHtml}${wkHtml}
+      ${detailTabs}${tabBody}
       ${f.projection?sec("Outlook")+`<div style="font-size:12px;line-height:1.5">${f.projection}</div>`:""}
-      ${schHtml}
       ${ro.headline?sec("Latest News")+`<div style="font-size:12px;line-height:1.5"><b>${ro.headline}</b>${ro.story?`<br><span class="muted">${ro.story}</span>`:""}</div>`:""}`;
   }
   ov.innerHTML=`<div class="modal"><div class="box" style="max-width:430px;text-align:left;max-height:88vh;overflow:auto">${head}${body}<button class="btn sec" id="pdClose" style="width:100%;margin-top:16px">Close</button></div></div>`;
   ov.querySelector("#pdClose").onclick=()=>{ app.pDetail=null; ov.innerHTML=""; };
+  const dt=ov.querySelector("#pDetailTabs"); if(dt) dt.querySelectorAll(".chip").forEach(b=> b.onclick=()=>{ app.pDetailTab=b.dataset.t; showDetailModal(); });
   const tw=ov.querySelector("#statTabs"); if(tw) tw.querySelectorAll(".chip").forEach(b=> b.onclick=()=>{ app.pStatTab=b.dataset.t; showDetailModal(); });
 }
 function posChips(s){
@@ -1528,15 +1564,6 @@ function sortControl(s){
   const wrap=el("div","chips"); wrap.style.marginBottom="10px";
   wrap.appendChild(el("span","muted",`<span style="font-size:10px;align-self:center;margin-right:4px">Sort:</span>`));
   const c=el("div","chip on"); c.textContent="Rankings"; wrap.appendChild(c);
-  s.appendChild(wrap);
-}
-function playersSortControl(s){
-  const wrap=el("div","chips"); wrap.style.marginBottom="10px";
-  wrap.appendChild(el("span","muted",`<span style="font-size:10px;align-self:center;margin-right:4px">Sort:</span>`));
-  [["rank","Rank"],["pos","Position"],["name","Name"]].forEach(([id,lab])=>{
-    const c=el("div","chip"+(( app.pSort||"rank")===id?" on":"")); c.textContent=lab;
-    c.onclick=()=>{ app.pSort=id; renderPlayersList(); }; wrap.appendChild(c);
-  });
   s.appendChild(wrap);
 }
 function sortPool(list){
@@ -1600,7 +1627,7 @@ function renderPlayers(){
   allBtn.onclick=()=>{ app.pShowAll=!app.pShowAll; renderPlayers(); };
   filterRow.appendChild(allBtn);
   s.appendChild(filterRow);
-  posChips(s); playersSortControl(s);
+  posChips(s);
   const listAnchor=el("div"); listAnchor.id="playersList"; s.appendChild(listAnchor);
   renderPlayersList();
   setTimeout(()=>search.focus(), 0);
