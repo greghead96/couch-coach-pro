@@ -9,6 +9,10 @@
 -- ============================================================
 
 alter table public.trades add column if not exists review_mode text;
+-- When review started — lets the background job (poll-scores.js) force a
+-- resolution 48h later if the league vote never reaches a decisive
+-- majority in time (see resolveExpiredTradeReviews there).
+alter table public.trades add column if not exists review_started_at timestamptz;
 
 -- Anyone in the league needs to be able to SEE a trade once it's up for a
 -- league vote (not just the two parties), so they can actually vote on it.
@@ -97,7 +101,7 @@ begin
   if mode is null or mode = 'No review' then
     perform public.execute_trade(tid);
   else
-    update public.trades set status='pending_review', review_mode=mode where id=tid;
+    update public.trades set status='pending_review', review_mode=mode, review_started_at=now() where id=tid;
   end if;
 end; $$;
 

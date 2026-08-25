@@ -412,6 +412,58 @@ async function processWaivers() {
   }
 }
 
+// ============================ TRADE REVIEW TIMEOUT ============================
+// A trade under "Commissioner" or "League vote" review can otherwise sit
+// forever if nobody acts — a 48h safety valve force-resolves it. Approves
+// by default (silence = no objections) unless a strict majority of votes
+// actually CAST are against it; a commissioner override (review_trade) or
+// a vote reaching decisive majority of all eligible voters (vote_trade)
+// can still resolve it earlier — this is only the fallback for what's left
+// stuck at the 48h mark.
+const TRADE_REVIEW_HOURS = 48;
+async function resolveExpiredTradeReviews() {
+  const cutoff = new Date(Date.now() - TRADE_REVIEW_HOURS * 60 * 60 * 1000).toISOString();
+  let trades;
+  try { trades = await sb(`trades?select=*&status=eq.pending_review&review_started_at=lt.${cutoff}`); }
+  catch (e) { console.error("trade review timeout: fetch failed:", e.message); return; }
+
+  for (const t of trades) {
+    try {
+      const votes = await sb(`trade_votes?select=approve&trade_id=eq.${t.id}`);
+      const votesFor = votes.filter((v) => v.approve).length;
+      const votesAgainst = votes.filter((v) => !v.approve).length;
+      if (votesAgainst > votesFor) {
+        await sb(`trades?id=eq.${t.id}`, { method: "PATCH", body: JSON.stringify({ status: "rejected" }) });
+        console.log(`trade ${t.id}: review window expired, rejected (${votesAgainst} against vs ${votesFor} for)`);
+        continue;
+      }
+      const offerIds = t.offer || [], requestIds = t.request || [];
+      const fromPicks = await sb(`draft_picks?select=player_id&league_id=eq.${t.league_id}&user_id=eq.${t.from_user}`);
+      const toPicks = await sb(`draft_picks?select=player_id&league_id=eq.${t.league_id}&user_id=eq.${t.to_user}`);
+      const fromIds = new Set(fromPicks.map((p) => p.player_id)), toIds = new Set(toPicks.map((p) => p.player_id));
+      const stillValid = offerIds.every((id) => fromIds.has(id)) && requestIds.every((id) => toIds.has(id));
+      if (!stillValid) {
+        await sb(`trades?id=eq.${t.id}`, { method: "PATCH", body: JSON.stringify({ status: "rejected" }) });
+        console.log(`trade ${t.id}: review window expired, but rosters changed since — rejected`);
+        continue;
+      }
+      for (const pid of offerIds) {
+        await sb(`draft_picks?league_id=eq.${t.league_id}&user_id=eq.${t.from_user}&player_id=eq.${encodeURIComponent(pid)}`,
+          { method: "PATCH", body: JSON.stringify({ user_id: t.to_user }) });
+      }
+      for (const pid of requestIds) {
+        await sb(`draft_picks?league_id=eq.${t.league_id}&user_id=eq.${t.to_user}&player_id=eq.${encodeURIComponent(pid)}`,
+          { method: "PATCH", body: JSON.stringify({ user_id: t.from_user }) });
+      }
+      await sb(`trades?id=eq.${t.id}`, { method: "PATCH", body: JSON.stringify({ status: "accepted" }) });
+      await sb("transactions", { method: "POST", body: JSON.stringify([{ league_id: t.league_id, kind: "trade", detail: "Trade completed (review window expired, auto-approved)", actor: t.to_user }]) });
+      console.log(`trade ${t.id}: review window expired, auto-approved (${votesFor} for vs ${votesAgainst} against)`);
+    } catch (e) {
+      console.error(`trade ${t.id}: resolution failed:`, e.message);
+    }
+  }
+}
+
 // The GitHub Actions trigger only fires every 5 minutes (its own minimum), but
 // each run loops internally every ~20s for its own ~4.5-minute window before
 // exiting — so the next scheduled run picks up right as this one finishes,
@@ -426,6 +478,7 @@ const POLL_INTERVAL_MS = 20_000;
 async function main() {
   await autoAdvanceWeeks();
   await processWaivers();
+  await resolveExpiredTradeReviews();
 
   let live;
   try { live = await anyGameLiveOrStartingSoon(); }

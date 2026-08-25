@@ -219,7 +219,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260825d";
+const BUILD_ID = "20260825e";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -2189,6 +2189,15 @@ async function voteTrade(id, approve){
   catch(e){ toast(e.message||"Failed"); }
 }
 function tradeNames(ids){ return (ids||[]).map(playerNameOf).join(", ")||"—"; }
+// A pending_review trade auto-resolves 48h after review started if nobody
+// (a commissioner override, or a decisive vote majority) settles it sooner —
+// see resolveExpiredTradeReviews in scripts/poll-scores.js.
+function reviewDeadlineLabel(startedAtIso){
+  const deadline=new Date(startedAtIso).getTime()+48*60*60*1000;
+  const hoursLeft=(deadline-Date.now())/3600000;
+  if(hoursLeft<=0) return "auto-resolving any moment";
+  return `auto-approves in ~${Math.max(1,Math.round(hoursLeft))}h if not settled sooner`;
+}
 function renderTrades(s){
   const meId=app.user.id;
   const incoming=app.trades.filter(t=>t.to_user===meId && t.status==="pending");
@@ -2217,7 +2226,7 @@ function renderTrades(s){
     c.innerHTML=`<div style="font-size:12px;font-weight:700">${teamNameOf(t.from_user)} ↔ ${teamNameOf(t.to_user)}</div>
       <div style="font-size:13px;margin-top:6px"><span class="muted">${teamNameOf(t.from_user)} gives:</span> ${tradeNames(t.offer)}</div>
       <div style="font-size:13px;margin-top:2px"><span class="muted">${teamNameOf(t.to_user)} gives:</span> ${tradeNames(t.request)}</div>
-      <div class="muted" style="font-size:11px;margin-top:6px">Review: <b style="color:var(--gold)">${t.review_mode||"Commissioner"}</b></div>`;
+      <div class="muted" style="font-size:11px;margin-top:6px">Review: <b style="color:var(--gold)">${t.review_mode||"Commissioner"}</b>${t.review_started_at?" · "+reviewDeadlineLabel(t.review_started_at):""}</div>`;
     if(t.review_mode==="League vote"){
       const votes=(app.tradeVotes||[]).filter(v=>v.trade_id===t.id);
       const forN=votes.filter(v=>v.approve).length, againstN=votes.filter(v=>!v.approve).length;
