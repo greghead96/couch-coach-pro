@@ -69,3 +69,32 @@ begin
       where league_id = lid;
   end if;
 end; $$;
+
+-- Enforces the "Number of teams" commish setting (previously informational
+-- only). Rejoining/renaming (already a member) is never blocked by the cap
+-- — only a genuinely NEW member counts against it. No cap is enforced if
+-- the commissioner never set "Number of teams" (settings->league->teams
+-- is null), matching how the setting behaved before.
+create or replace function public.join_league(code text, team text)
+returns uuid language plpgsql security definer set search_path = public as $$
+declare lid uuid; cap int; cnt int; already_member boolean;
+begin
+  select id into lid from public.leagues where join_code = upper(code);
+  if lid is null then raise exception 'League not found for code %', code; end if;
+
+  select exists(select 1 from public.league_members where league_id=lid and user_id=auth.uid()) into already_member;
+  if not already_member then
+    select (settings->'league'->>'teams')::int into cap from public.leagues where id=lid;
+    if cap is not null then
+      select count(*) into cnt from public.league_members where league_id=lid;
+      if cnt >= cap then
+        raise exception 'This league is full (% teams) — create a new league or try a different join code', cap;
+      end if;
+    end if;
+  end if;
+
+  insert into public.league_members (league_id, user_id, team_name)
+    values (lid, auth.uid(), team)
+    on conflict (league_id, user_id) do update set team_name = excluded.team_name;
+  return lid;
+end; $$;

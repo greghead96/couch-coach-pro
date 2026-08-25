@@ -219,7 +219,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260825e";
+const BUILD_ID = "20260825f";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -423,7 +423,6 @@ let app = {
     league:{ teams:10, rosterSize:16, waiver:"Reverse standings",
              tradeDeadline:"Week 11", tradeReview:"Commissioner", regSeasonWeeks:14,
              playoffTeams:6, playoffWeeks:"15-17", playoffWeeksPerRound:1, testPreseason:false },
-    powerups:{ enabled:true, weeklyCap:4, rareOdds:25, rankedMode:false },
   },
 };
 function freshSim(){
@@ -888,7 +887,7 @@ async function loadLeagueData(){
     }catch(e){ app.profiles={}; }
     // load persisted league settings
     try{ const { data:lg } = await sb.from("leagues").select("settings, last_waiver_process, waiver_priority, standings_cache").eq("id", app.sbLeagueId).maybeSingle();
-      if(lg && lg.settings){ ["scoring","league","powerups"].forEach(k=>{ if(lg.settings[k]) app.settings[k]={...app.settings[k], ...lg.settings[k]}; }); }
+      if(lg && lg.settings){ ["scoring","league"].forEach(k=>{ if(lg.settings[k]) app.settings[k]={...app.settings[k], ...lg.settings[k]}; }); }
       if(app.settings.league.waiver==="FAAB") app.settings.league.waiver="Reverse standings"; // FAAB retired
       if(lg){ app.leagueLastWaiverProcess=lg.last_waiver_process?new Date(lg.last_waiver_process).getTime():0;
         app.leagueWaiverPriority=lg.waiver_priority||[]; app.leagueStandingsCache=lg.standings_cache||[]; }
@@ -3578,7 +3577,7 @@ function cToggle(current, onpick){
 }
 function renderCommish(){
   const s=$("screen"); if(!s) return; s.innerHTML="";
-  const sc=app.settings.scoring, lg=app.settings.league, pu=app.settings.powerups;
+  const sc=app.settings.scoring, lg=app.settings.league;
 
   const intro=el("div","card");
   intro.innerHTML=`<h2 class="title">⚙️ Commissioner — League Settings</h2>
@@ -3692,17 +3691,6 @@ function renderCommish(){
     cRow("Weeks per round","matchups can span 1 or 2 weeks each", cSeg([[1,"1 week"],[2,"2 weeks"]], lg.playoffWeeksPerRound||1, v=>{lg.playoffWeeksPerRound=v;renderCommish();})),
   );
   s.appendChild(sch);
-
-  // Power-up rules (our unique layer)
-  const pwr=el("div","card"); pwr.appendChild(el("h2","title","⚡ Power-Up Rules"));
-  pwr.append(
-    cRow("Power-ups enabled","turn the whole feature on/off", cToggle(pu.enabled, v=>{pu.enabled=v;renderCommish();})),
-    cRow("Weekly earn cap","ad-earned per manager", cNum(pu.weeklyCap,1,v=>pu.weeklyCap=v)),
-    cRow("Rare drop odds %","chance of a rare per pull", cNum(pu.rareOdds,1,v=>pu.rareOdds=v)),
-    cRow("Ranked mode","everyone gets the SAME fixed set — no ads, pure skill", cToggle(pu.rankedMode, v=>{pu.rankedMode=v;renderCommish();})),
-  );
-  if(pu.rankedMode) pwr.appendChild(el("div","muted","<div style='font-size:11px;margin-top:8px;color:var(--gold)'>Ranked mode on: ad-earning is disabled and every manager gets an identical power-up loadout each week.</div>"));
-  s.appendChild(pwr);
 
   const save=el("button","btn"); save.style.width="100%"; save.style.marginBottom="20px"; save.textContent="Save League Settings";
   save.onclick=async ()=>{
