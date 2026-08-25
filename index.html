@@ -219,7 +219,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260825c";
+const BUILD_ID = "20260825d";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -412,7 +412,7 @@ let app = {
   leagueMatchup:null, schedTeam:"Your Team", pFilter:"ALL", pTeam:"ALL", pShowAll:false, pSearch:"", pSort:"rank", pView:"players", drafted:[], pStatTab:null,
   myTeam:"Your Team", oppTeam:"Burrow Bandits", realLeague:false,
   draft:null, draftChannel:null, isCommish:false, members:[], queue:[], draftView:"board", commishMode:false, lineup:null, lineupEdit:false, trades:[], tradeBuilder:null, transactions:[], teamTab:"lineup", txFilter:"all",
-  schedule:[], currentWeek:1, lineupsByUser:{}, waiverWire:[], waiverClaims:[], profiles:{},
+  schedule:[], currentWeek:1, lineupsByUser:{}, waiverWire:[], waiverClaims:[], profiles:{}, playoffMatchups:[], tradeVotes:[],
   powerupPicks:[], playerWeekStats:{}, playerGameState:{}, weeklyLineups:{}, statsPollId:null,
   pool:null, poolLoading:false, poolError:null, pDetail:null,
   nfl:{ games:null, loading:false, error:null, selected:null, gamecast:null, view:"plays", pollId:null, pollFor:null },
@@ -420,7 +420,7 @@ let app = {
     scoring:{ passYdsPerPt:25, passTD:4, passInt:-2, rushYdsPerPt:10, rushTD:6,
               ppr:0.5, recYdsPerPt:10, recTD:6, fumLost:-2, twoPt:2,
               sack:1, defInt:2, defTD:6 },
-    league:{ teams:10, rosterSize:16, divisions:2, waiver:"Reverse standings",
+    league:{ teams:10, rosterSize:16, waiver:"Reverse standings",
              tradeDeadline:"Week 11", tradeReview:"Commissioner", regSeasonWeeks:14,
              playoffTeams:6, playoffWeeks:"15-17", playoffWeeksPerRound:1, testPreseason:false },
     powerups:{ enabled:true, weeklyCap:4, rareOdds:25, rankedMode:false },
@@ -902,7 +902,7 @@ function copyCode(code){
 }
 async function enterLeague(id, name, code){
   app.connectedLeague=name; app.sbLeagueId=id; app.leagueCode=code||null;
-  await loadLeagueData(); await loadDraft(); await loadLineup(); await loadAllLineups(); await loadSchedule(); await loadTrades(); await loadTransactions(); await loadWaivers(); loadQueue(); subscribeDraft();
+  await loadLeagueData(); await loadDraft(); await loadLineup(); await loadAllLineups(); await loadSchedule(); await loadTrades(); await loadTransactions(); await loadWaivers(); await loadPlayoffMatchups(); loadQueue(); subscribeDraft();
   if(app.realLeague){ await loadAllRealScoringData(); setupRealMatchup(); refreshRealInv(); }
   app.sim=freshSim(); app.tab="home"; render();
 }
@@ -1956,6 +1956,8 @@ function subscribeDraft(){
   const refreshSchedule=async ()=>{ await loadSchedule(); await loadLeagueData(); if(app.realLeague) setupRealMatchup();
     if(!app.showConfirm && app.user && app.connectedLeague) render(); };
   const refreshWaivers=async ()=>{ await loadWaivers(); if(!app.showConfirm && app.user && app.connectedLeague) render(); };
+  const refreshPlayoffs=async ()=>{ await loadPlayoffMatchups(); if(!app.showConfirm && app.user && app.connectedLeague) render(); };
+  const refreshTradeVotes=async ()=>{ await loadTrades(); if(!app.showConfirm && app.user && app.connectedLeague) render(); };
   const refreshScoring=async ()=>{ if(!app.realLeague) return; await loadAllRealScoringData(); refreshRealInv();
     if(!app.showConfirm && app.user && app.connectedLeague) render(); };
   const refreshLineups=async ()=>{ if(!app.realLeague) return; await loadLineup(); await loadAllLineups();
@@ -1973,6 +1975,8 @@ function subscribeDraft(){
     .on("postgres_changes",{event:"*",schema:"public",table:"player_week_stats"}, refreshScoring)
     .on("postgres_changes",{event:"*",schema:"public",table:"waiver_claims",filter:"league_id=eq."+lid}, refreshWaivers)
     .on("postgres_changes",{event:"*",schema:"public",table:"waiver_wire",filter:"league_id=eq."+lid}, refreshWaivers)
+    .on("postgres_changes",{event:"*",schema:"public",table:"playoff_matchups",filter:"league_id=eq."+lid}, refreshPlayoffs)
+    .on("postgres_changes",{event:"*",schema:"public",table:"trade_votes"}, refreshTradeVotes)
     .subscribe();
 }
 function unsubscribeDraft(){ if(app.draftChannel){ try{ sb.removeChannel(app.draftChannel); }catch(e){} app.draftChannel=null; } }
@@ -2045,9 +2049,14 @@ function playerActionModal(pick){
   ov.querySelector("#paCancel").onclick=()=>{ ov.innerHTML=""; };
 }
 async function loadTrades(){
-  if(!app.sbLeagueId){ app.trades=[]; return; }
+  if(!app.sbLeagueId){ app.trades=[]; app.tradeVotes=[]; return; }
   try{ const {data}=await sb.from("trades").select("*").eq("league_id",app.sbLeagueId).order("created_at",{ascending:false}); app.trades=data||[]; }
   catch(e){ app.trades=[]; }
+  const reviewIds=app.trades.filter(t=>t.status==="pending_review").map(t=>t.id);
+  if(reviewIds.length){
+    try{ const {data}=await sb.from("trade_votes").select("*").in("trade_id",reviewIds); app.tradeVotes=data||[]; }
+    catch(e){ app.tradeVotes=[]; }
+  } else app.tradeVotes=[];
 }
 async function loadTransactions(){
   if(!app.sbLeagueId){ app.transactions=[]; return; }
@@ -2060,6 +2069,11 @@ async function loadWaivers(){
   catch(e){ app.waiverWire=[]; }
   try{ const {data}=await sb.from("waiver_claims").select("*").eq("league_id",app.sbLeagueId).order("priority",{ascending:true}); app.waiverClaims=data||[]; }
   catch(e){ app.waiverClaims=[]; }
+}
+async function loadPlayoffMatchups(){
+  if(!app.sbLeagueId){ app.playoffMatchups=[]; return; }
+  try{ const {data}=await sb.from("playoff_matchups").select("*").eq("league_id",app.sbLeagueId); app.playoffMatchups=data||[]; }
+  catch(e){ app.playoffMatchups=[]; }
 }
 function isOnWaivers(pid){
   const w=(app.waiverWire||[]).find(x=>x.player_id===pid); if(!w) return false;
@@ -2156,25 +2170,37 @@ function renderTradeBuilder(){
 }
 async function respondTrade(id, accept){
   try{ const {error}=await sb.rpc("respond_trade",{ tid:id, accept }); if(error) throw error;
-    await loadTrades(); await loadDraft(); await loadLineup(); await loadTransactions(); toast(accept?"Trade accepted! ✅":"Trade rejected"); render(); }
+    await loadTrades(); await loadDraft(); await loadLineup(); await loadTransactions();
+    toast(!accept?"Trade rejected":(app.trades.find(t=>t.id===id)||{}).status==="pending_review"?"Accepted — now awaiting review":"Trade accepted! ✅"); render(); }
   catch(e){ toast(e.message||"Failed"); }
 }
 async function cancelTrade(id){
   try{ const {error}=await sb.rpc("cancel_trade",{ tid:id }); if(error) throw error; await loadTrades(); toast("Trade cancelled"); render(); }
   catch(e){ toast(e.message||"Failed"); }
 }
+async function reviewTrade(id, approve){
+  try{ const {error}=await sb.rpc("review_trade",{ tid:id, approve }); if(error) throw error;
+    await loadTrades(); await loadDraft(); await loadLineup(); await loadTransactions(); toast(approve?"Trade approved ✅":"Trade rejected"); render(); }
+  catch(e){ toast(e.message||"Failed"); }
+}
+async function voteTrade(id, approve){
+  try{ const {error}=await sb.rpc("vote_trade",{ tid:id, approve }); if(error) throw error;
+    await loadTrades(); await loadDraft(); await loadLineup(); await loadTransactions(); toast("Vote recorded"); render(); }
+  catch(e){ toast(e.message||"Failed"); }
+}
+function tradeNames(ids){ return (ids||[]).map(playerNameOf).join(", ")||"—"; }
 function renderTrades(s){
   const meId=app.user.id;
   const incoming=app.trades.filter(t=>t.to_user===meId && t.status==="pending");
   const outgoing=app.trades.filter(t=>t.from_user===meId && t.status==="pending");
-  const history=app.trades.filter(t=>t.status!=="pending").slice(0,8);
-  const names=(ids)=>(ids||[]).map(playerNameOf).join(", ")||"—";
+  const review=app.trades.filter(t=>t.status==="pending_review");
+  const history=app.trades.filter(t=>t.status!=="pending" && t.status!=="pending_review").slice(0,8);
   s.appendChild(el("div","card","<div class='muted' style='font-size:12px'>Start a trade from <b style='color:var(--txt)'>My Team</b> or <b style='color:var(--txt)'>Players</b> → tap a player → <b style='color:var(--txt)'>Offer in Trade</b>.</div>"));
   const tradeCard=(t,kind)=>{
     const c=el("div","card");
     c.innerHTML=`<div style="font-size:12px;font-weight:700">${kind==="in"?("From "+teamNameOf(t.from_user)):("To "+teamNameOf(t.to_user))}</div>
-      <div style="font-size:13px;margin-top:6px"><span class="muted">You get:</span> ${kind==="in"?names(t.offer):names(t.request)}</div>
-      <div style="font-size:13px;margin-top:2px"><span class="muted">You give:</span> ${kind==="in"?names(t.request):names(t.offer)}</div>`;
+      <div style="font-size:13px;margin-top:6px"><span class="muted">You get:</span> ${kind==="in"?tradeNames(t.offer):tradeNames(t.request)}</div>
+      <div style="font-size:13px;margin-top:2px"><span class="muted">You give:</span> ${kind==="in"?tradeNames(t.request):tradeNames(t.offer)}</div>`;
     if(kind==="in"){
       const row=el("div","row"); row.style.marginTop="10px";
       const a=el("button","btn"); a.style.flex="1"; a.textContent="Accept"; a.onclick=()=>respondTrade(t.id,true);
@@ -2185,9 +2211,44 @@ function renderTrades(s){
     }
     return c;
   };
+  const reviewCard=(t)=>{
+    const isParty=t.from_user===meId || t.to_user===meId;
+    const c=el("div","card");
+    c.innerHTML=`<div style="font-size:12px;font-weight:700">${teamNameOf(t.from_user)} ↔ ${teamNameOf(t.to_user)}</div>
+      <div style="font-size:13px;margin-top:6px"><span class="muted">${teamNameOf(t.from_user)} gives:</span> ${tradeNames(t.offer)}</div>
+      <div style="font-size:13px;margin-top:2px"><span class="muted">${teamNameOf(t.to_user)} gives:</span> ${tradeNames(t.request)}</div>
+      <div class="muted" style="font-size:11px;margin-top:6px">Review: <b style="color:var(--gold)">${t.review_mode||"Commissioner"}</b></div>`;
+    if(t.review_mode==="League vote"){
+      const votes=(app.tradeVotes||[]).filter(v=>v.trade_id===t.id);
+      const forN=votes.filter(v=>v.approve).length, againstN=votes.filter(v=>!v.approve).length;
+      const eligible=(app.members||[]).filter(m=>m.user_id!==t.from_user && m.user_id!==t.to_user).length;
+      c.appendChild(el("div","muted",`<div style="font-size:12px;margin-top:6px">${forN} for · ${againstN} against · needs more than ${Math.floor(eligible/2)} of ${eligible} eligible votes</div>`));
+      if(!isParty){
+        const mine=votes.find(v=>v.user_id===meId);
+        const row=el("div","row"); row.style.marginTop="8px";
+        const a=el("button","btn"+(mine&&mine.approve?"":" sec")); a.style.flex="1"; a.textContent="👍 Approve"; a.onclick=()=>voteTrade(t.id,true);
+        const r=el("button","btn"+(mine&&!mine.approve?"":" sec")); r.style.flex="1"; r.textContent="👎 Reject"; r.onclick=()=>voteTrade(t.id,false);
+        row.append(a,r); c.appendChild(row);
+      }
+    } else if(!app.isCommish){
+      c.appendChild(el("div","muted","<div style='font-size:12px;margin-top:6px'>Waiting on the commissioner to review this one.</div>"));
+    }
+    if(app.isCommish){
+      const row2=el("div","row"); row2.style.marginTop="8px";
+      const lab=t.review_mode==="League vote"?"Override":"";
+      const a2=el("button","btn sec"); a2.style.flex="1"; a2.textContent=(lab?lab+": ":"")+"Approve"; a2.onclick=()=>reviewTrade(t.id,true);
+      const r2=el("button","btn sec"); r2.style.flex="1"; r2.textContent=(lab?lab+": ":"")+"Reject"; r2.onclick=()=>reviewTrade(t.id,false);
+      row2.append(a2,r2); c.appendChild(row2);
+    }
+    if(t.from_user===meId){
+      const cx=el("button","btn sec"); cx.style.width="100%"; cx.style.marginTop="8px"; cx.textContent="Cancel Offer"; cx.onclick=()=>cancelTrade(t.id); c.appendChild(cx);
+    }
+    return c;
+  };
+  if(review.length){ s.appendChild(el("h2","title","🗳️ Needs Review ("+review.length+")")); review.forEach(t=>s.appendChild(reviewCard(t))); }
   if(incoming.length){ s.appendChild(el("h2","title","📨 Incoming ("+incoming.length+")")); incoming.forEach(t=>s.appendChild(tradeCard(t,"in"))); }
   if(outgoing.length){ s.appendChild(el("h2","title","📤 Sent")); outgoing.forEach(t=>s.appendChild(tradeCard(t,"out"))); }
-  if(!incoming.length && !outgoing.length) s.appendChild(el("div","card","<div class='muted' style='font-size:13px'>No pending trades.</div>"));
+  if(!incoming.length && !outgoing.length && !review.length) s.appendChild(el("div","card","<div class='muted' style='font-size:13px'>No pending trades.</div>"));
   if(history.length){ const h=el("div","card"); h.appendChild(el("h2","title","History"));
     history.forEach(t=>{ const mine=t.from_user===meId; h.appendChild(el("div","",`<div style="padding:7px 0;border-top:1px solid var(--line);font-size:12px"><b>${t.status}</b> · ${mine?"you → "+teamNameOf(t.to_user):teamNameOf(t.from_user)+" → you"}</div>`)); });
     s.appendChild(h); }
@@ -2275,9 +2336,21 @@ function startersForUser(uid, starterIds){
   const bench=picks.filter(p=>!startedSet.has(p.player_id)).map(simPlayer);
   return {startersOut, bench};
 }
+// Regular-season pairings live in `schedule`; playoff pairings live in the
+// separate `playoff_matchups` table (see phase7 SQL) since who plays whom
+// depends on real bracket results, not a precomputed round robin. This
+// merges both into the same {week,home_user,away_user} shape so
+// weekOpponent()/realOtherMatchups() don't need to care which one it is.
+function matchupsForWeek(wk){
+  const reg=(app.schedule||[]).filter(g=>g.week===wk);
+  const playoff=(app.playoffMatchups||[])
+    .filter(m=>m.home_user && m.away_user && !m.is_bye && wk>=m.start_week && wk<=m.end_week)
+    .map(m=>({week:wk, home_user:m.home_user, away_user:m.away_user}));
+  return [...reg, ...playoff];
+}
 function weekOpponent(){
   const wk=app.currentWeek||1;
-  const g=(app.schedule||[]).find(x=>x.week===wk && (x.home_user===app.user.id||x.away_user===app.user.id));
+  const g=matchupsForWeek(wk).find(x=>x.home_user===app.user.id||x.away_user===app.user.id);
   return g ? (g.home_user===app.user.id?g.away_user:g.home_user) : null;
 }
 // Rebuild the matchup roster whenever the underlying data actually changes
@@ -2513,7 +2586,7 @@ function dvpBadge(pos, opp){
 }
 function realOtherMatchups(wk){
   const me=app.user&&app.user.id;
-  return (app.schedule||[]).filter(g=>g.week===wk && g.home_user && g.away_user && g.home_user!==me && g.away_user!==me)
+  return matchupsForWeek(wk).filter(g=>g.home_user && g.away_user && g.home_user!==me && g.away_user!==me)
     .map(g=>({ a:teamNameOf(g.home_user), as:computeRealTeamScore(g.home_user,wk), uidA:g.home_user,
                b:teamNameOf(g.away_user), bs:computeRealTeamScore(g.away_user,wk), uidB:g.away_user }));
 }
@@ -2783,10 +2856,15 @@ function syncRealPointsToPlayers(){
   const wk=app.currentWeek||1;
   [...myStarters,...myBench,...oppStarters,...oppBench].forEach(p=>{ if(p.id && !p.id.startsWith("e_")) p.pts=realPlayerAdjustedTotal(p.id, wk); });
 }
-function getRealStandings(){
+// wkCap lets playoff seeding ask for standings frozen at the end of the
+// regular season (regSeasonWeeks+1) even after currentWeek has moved on
+// into the playoffs — every other caller just omits it and gets "as of
+// right now", same as before.
+function getRealStandings(wkCap){
+  const cap = wkCap!=null ? wkCap : (app.currentWeek||1);
   const rows=(app.members||[]).map(m=>({team:m.team_name||"Team", w:0,l:0,t:0, pf:0, pa:0, me:m.user_id===(app.user&&app.user.id), uid:m.user_id}));
   const byUid={}; rows.forEach(r=>byUid[r.uid]=r);
-  for(let wk=1; wk<(app.currentWeek||1); wk++){
+  for(let wk=1; wk<cap; wk++){
     app.schedule.filter(g=>g.week===wk).forEach(g=>{
       const H=byUid[g.home_user], A=byUid[g.away_user]; if(!H||!A) return;
       const hs=computeRealTeamScore(g.home_user,wk), as=computeRealTeamScore(g.away_user,wk);
@@ -2799,7 +2877,7 @@ function getRealStandings(){
   // low-scoring games shouldn't out-rank one that's actually outscoring
   // opponents by more, at the same record.
   const sorted=rows.sort((a,b)=>b.w-a.w||(b.pf-b.pa)-(a.pf-a.pa));
-  syncStandingsCache(sorted);
+  if(wkCap==null) syncStandingsCache(sorted); // only the "as of right now" view feeds the shared waiver-priority cache
   return sorted;
 }
 // Waiver processing (background job) has no access to the power-up-adjusted
@@ -3159,7 +3237,10 @@ function roundLabel(idx, total, hasByes){
   if(fromEnd===2) return "Quarterfinals";
   return "Round of "+Math.pow(2,fromEnd+1);
 }
-function renderPlayoffs(s){
+// Before the regular season ends, there's no real bracket to advance yet —
+// show a projected seeding preview (top N by CURRENT record) so managers
+// can see roughly where they'd stand if the season ended today.
+function renderPlayoffPreview(s){
   const lg=app.settings.league;
   const n=Math.max(2, lg.playoffTeams||6);
   const wpr=lg.playoffWeeksPerRound||1;
@@ -3178,7 +3259,7 @@ function renderPlayoffs(s){
   };
 
   s.appendChild(el("div","card",`<h2 class="title">🏆 Playoffs</h2>
-    <div class="muted" style="font-size:12px">Top <b style="color:var(--txt)">${n}</b> seeds by <b style="color:var(--gold)">CCF</b> record. Weeks ${start}–${start+span-1} (${wpr} wk/round).${hasByes?" Top seeds get a first-round bye.":""} Power-ups stay live all the way through.</div>`));
+    <div class="muted" style="font-size:12px">Projected — top <b style="color:var(--txt)">${n}</b> seeds by <b style="color:var(--gold)">CCF</b> record if the season ended today. Weeks ${start}–${start+span-1} (${wpr} wk/round).${hasByes?" Top seeds get a first-round bye.":""} Locks in once the regular season ends.</div>`));
 
   // visual bracket
   const br=el("div","card"); br.appendChild(el("h2","title","Bracket"));
@@ -3231,8 +3312,164 @@ function renderPlayoffs(s){
     s.appendChild(c);
   });
 }
-
 function bmatchEl(lines){ const d=el("div","bmatch"); d.innerHTML=lines.join(""); return d; }
+
+// ============================ PLAYOFFS: REAL, AUTO-ADVANCING ============================
+function sumScore(uid, wkStart, wkEnd){
+  let t=0; for(let w=wkStart; w<=wkEnd; w++) t+=computeRealTeamScore(uid, w);
+  return Math.round(t*10)/10;
+}
+function playoffConfig(){
+  const lg=app.settings.league;
+  const regEnd=lg.regSeasonWeeks||14;
+  const wpr=lg.playoffWeeksPerRound||1;
+  const m=(lg.playoffWeeks||"15-17").match(/\d+/);
+  const startWeek=m?parseInt(m[0],10):regEnd+1;
+  const nMain=Math.max(2, lg.playoffTeams||6);
+  return {regEnd, wpr, startWeek, nMain};
+}
+// Pure function of (ordered seed list, timing, current week) → the full
+// desired state of one bracket. Deterministic and idempotent — any client
+// can recompute this from scratch and it converges to the same answer,
+// same philosophy as syncStandingsCache. Byes resolve immediately; a real
+// matchup only gets a winner once its weeks have actually completed
+// (currentWeek past end_week). Ties (astronomically unlikely with decimal
+// scoring) go to the better seed.
+function computeBracketState(bracketName, seeds, startWeek, wpr, wk){
+  const n=seeds.length;
+  if(n<2) return [];
+  const rounds=buildBracket(n);
+  const totalRounds=rounds.length;
+  const slotWinnerUid=[], slotWinnerSeed=[];
+  const out=[];
+  for(let ri=0; ri<totalRounds; ri++){
+    const roundStart=startWeek+ri*wpr, roundEnd=roundStart+wpr-1;
+    slotWinnerUid[ri]=[]; slotWinnerSeed[ri]=[];
+    const count=rounds[ri].length;
+    for(let slot=0; slot<count; slot++){
+      let seedA,seedB,uidA,uidB;
+      if(ri===0){
+        const p=rounds[0][slot];
+        seedA=p.a; seedB=p.b;
+        uidA = seedA ? (seeds[seedA-1]&&seeds[seedA-1].uid) : null;
+        uidB = seedB ? (seeds[seedB-1]&&seeds[seedB-1].uid) : null;
+      } else {
+        seedA=slotWinnerSeed[ri-1][slot*2]||null; seedB=slotWinnerSeed[ri-1][slot*2+1]||null;
+        uidA=slotWinnerUid[ri-1][slot*2]||null; uidB=slotWinnerUid[ri-1][slot*2+1]||null;
+      }
+      // Lower seed number = better = "home", for display and as the tie-break winner.
+      let homeSeed=seedA, awaySeed=seedB, homeUser=uidA, awayUser=uidB;
+      if(seedA!=null && seedB!=null && seedB<seedA){ homeSeed=seedB; awaySeed=seedA; homeUser=uidB; awayUser=uidA; }
+      const isBye = !!homeUser !== !!awayUser;
+      let winnerUid=null, winnerSeed=null;
+      if(isBye){ winnerUid=homeUser||awayUser; winnerSeed=homeSeed!=null?homeSeed:awaySeed; }
+      else if(homeUser && awayUser && wk>roundEnd){
+        const hs=sumScore(homeUser,roundStart,roundEnd), as=sumScore(awayUser,roundStart,roundEnd);
+        if(hs>as){ winnerUid=homeUser; winnerSeed=homeSeed; }
+        else if(as>hs){ winnerUid=awayUser; winnerSeed=awaySeed; }
+        else { winnerUid=homeSeed<=awaySeed?homeUser:awayUser; winnerSeed=homeSeed<=awaySeed?homeSeed:awaySeed; }
+      }
+      slotWinnerUid[ri][slot]=winnerUid; slotWinnerSeed[ri][slot]=winnerSeed;
+      out.push({bracket:bracketName, round:ri, slot, home_user:homeUser||"", away_user:awayUser||"",
+        home_seed:homeSeed, away_seed:awaySeed, start_week:roundStart, end_week:roundEnd,
+        winner_user:winnerUid||"", is_bye:isBye});
+    }
+  }
+  return out;
+}
+// Runs whenever a real-league client views the League/Playoffs tab (once
+// the regular season is over). Recomputes the whole bracket from scratch
+// and syncs it — cheap no-op if nothing's changed since the last sync.
+// Returns true if anything actually changed (caller may want to re-render).
+async function ensurePlayoffBracket(){
+  if(!app.realLeague || app._playoffSyncInFlight) return false;
+  const {regEnd, wpr, startWeek, nMain}=playoffConfig();
+  const wk=app.currentWeek||1;
+  if(wk<=regEnd) return false;
+  const memberIds=(app.members||[]).map(m=>m.user_id);
+  if(memberIds.length<2) return false;
+
+  const finalStandings=getRealStandings(regEnd+1);
+  const mainSeeds=finalStandings.slice(0,nMain);
+  const consSeeds=finalStandings.slice(nMain);
+
+  const toSync=computeBracketState('main', mainSeeds, startWeek, wpr, wk);
+  if(consSeeds.length>=2) toSync.push(...computeBracketState('consolation', consSeeds, startWeek, wpr, wk));
+  if(!toSync.length) return false;
+
+  const key=JSON.stringify(toSync);
+  if(app._lastPlayoffSync===key) return false;
+  app._playoffSyncInFlight=true;
+  try{
+    const {error}=await sb.rpc("sync_playoff_bracket",{lid:app.sbLeagueId, matchups:toSync});
+    if(error){ app._playoffSyncInFlight=false; return false; }
+    app._lastPlayoffSync=key;
+    await loadPlayoffMatchups();
+  } finally { app._playoffSyncInFlight=false; }
+  return true;
+}
+function bracketRoundsFor(name){
+  const rows=(app.playoffMatchups||[]).filter(m=>m.bracket===name);
+  const maxRound=rows.reduce((mx,r)=>Math.max(mx,r.round),-1);
+  const rounds=[];
+  for(let ri=0; ri<=maxRound; ri++) rounds.push(rows.filter(r=>r.round===ri).sort((a,b)=>a.slot-b.slot));
+  return rounds;
+}
+function renderOneBracket(s, title, name, wpr){
+  const rounds=bracketRoundsFor(name);
+  if(!rounds.length) return;
+  const totalRounds=rounds.length;
+  const hasByes=rounds[0].some(r=>r.is_bye);
+  const card=el("div","card"); card.appendChild(el("h2","title",title));
+  const bwrap=el("div","bracket");
+  rounds.forEach((round,ri)=>{
+    const rd=el("div","bround"); rd.innerHTML=`<h4>${roundLabel(ri,totalRounds,hasByes)}</h4>`;
+    round.forEach(m=>{
+      const line=(uid,won)=> uid?`<div class="bt${uid===(app.user&&app.user.id)?' me':''}">${teamNameOf(uid)}${won?' <span class="muted" style="font-size:9px">✓ won</span>':''}${m.is_bye&&uid?' <span class="muted" style="font-size:9px">bye</span>':''}</div>`:`<div class="bt muted">TBD</div>`;
+      rd.appendChild(bmatchEl([line(m.home_user, m.winner_user&&m.winner_user===m.home_user), m.is_bye?"":line(m.away_user, m.winner_user&&m.winner_user===m.away_user)]));
+    });
+    bwrap.appendChild(rd);
+  });
+  card.appendChild(bwrap); s.appendChild(card);
+
+  rounds.forEach((round,ri)=>{
+    const wkLabel = wpr>1 ? `Wk ${round[0].start_week}-${round[0].end_week}` : `Wk ${round[0].start_week}`;
+    const c=el("div","card"); c.appendChild(el("h2","title",`${roundLabel(ri,totalRounds,hasByes)} · ${wkLabel}`));
+    round.forEach(m=>{
+      const nameOf=(uid)=>{ const un=usernameOf(uid); return `<b style="color:${uid===(app.user&&app.user.id)?'var(--you)':'var(--txt)'}">${teamNameOf(uid)}</b>${un?` <span class="muted" style="font-size:11px">(${un})</span>`:""}`; };
+      if(m.is_bye){
+        const who=m.home_user||m.away_user;
+        c.appendChild(el("div","",`<div style="padding:9px 0;border-top:1px solid var(--line);font-size:13px"><div>${nameOf(who)}</div><div class="muted" style="font-size:10px;margin:3px 0">bye — advances automatically</div></div>`));
+        return;
+      }
+      if(!m.home_user || !m.away_user){
+        c.appendChild(el("div","",`<div style="padding:9px 0;border-top:1px solid var(--line);font-size:13px"><div><span class="muted">TBD</span></div><div class="muted" style="font-size:10px;margin:3px 0">vs</div><div><span class="muted">TBD</span></div></div>`));
+        return;
+      }
+      const done=!!m.winner_user;
+      const hs=done?sumScore(m.home_user,m.start_week,m.end_week):null, as=done?sumScore(m.away_user,m.start_week,m.end_week):null;
+      const homeTxt=`${nameOf(m.home_user)}${done?` <b style="color:var(--gold)">${hs.toFixed(1)}</b>`:""}${m.winner_user===m.home_user?" 🏆":""}`;
+      const awayTxt=`${nameOf(m.away_user)}${done?` <b style="color:var(--gold)">${as.toFixed(1)}</b>`:""}${m.winner_user===m.away_user?" 🏆":""}`;
+      c.appendChild(el("div","",`<div style="padding:9px 0;border-top:1px solid var(--line);font-size:13px"><div>${homeTxt}</div><div class="muted" style="font-size:10px;margin:3px 0">${ri===totalRounds-1?"🏆 for it all":"vs"}</div><div>${awayTxt}</div></div>`));
+    });
+    s.appendChild(c);
+  });
+}
+function renderPlayoffBracketReal(s, wpr){
+  const mainRounds=bracketRoundsFor('main');
+  const champRound=mainRounds[mainRounds.length-1];
+  const champ=champRound && champRound[0] && champRound[0].winner_user ? teamNameOf(champRound[0].winner_user) : null;
+  s.appendChild(el("div","card",`<h2 class="title">🏆 Playoffs</h2>
+    <div class="muted" style="font-size:12px">${champ?`<b style="color:var(--gold)">${champ}</b> wins the championship! 🎉`:"Bracket locked in from final regular-season standings. Power-ups stay live all the way through."}</div>`));
+  renderOneBracket(s, "Championship Bracket", "main", wpr);
+  if(bracketRoundsFor("consolation").length) renderOneBracket(s, "🥈 Consolation Bracket", "consolation", wpr);
+}
+function renderPlayoffs(s){
+  const wpr=app.settings.league.playoffWeeksPerRound||1;
+  ensurePlayoffBracket().then(changed=>{ if(changed && app.tab==="league" && app.leagueTab==="playoffs") renderLeague(); });
+  if((app.playoffMatchups||[]).length) renderPlayoffBracketReal(s, wpr);
+  else renderPlayoffPreview(s);
+}
 function renderMatchupDetail(s,m){
   const back=el("button","btn sec"); back.style.width="100%"; back.style.marginBottom="12px"; back.textContent="← All matchups";
   back.onclick=()=>{ app.leagueMatchup=null; renderLeague(); }; s.appendChild(back);
@@ -3422,7 +3659,6 @@ function renderCommish(){
   setup.append(
     cRow("Number of teams","8–16", cNum(lg.teams,1,v=>lg.teams=v)),
     cRow("Roster size","spots per team", cNum(lg.rosterSize,1,v=>lg.rosterSize=v)),
-    cRow("Divisions","0 for none", cNum(lg.divisions,1,v=>lg.divisions=v)),
   );
   s.appendChild(setup);
 
