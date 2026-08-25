@@ -219,7 +219,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260825b";
+const BUILD_ID = "20260825c";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -392,11 +392,6 @@ function genSchedule(team){
   });
 }
 
-const CHAT_SEED=[
-  {who:"Gridiron Goblins", text:"good luck this week, you'll need it 😂", time:"9:12a"},
-  {who:"Burrow Bandits", text:"freeze my Mahomes and it's over between us", time:"9:31a"},
-  {who:"Kelce's Angels", text:"who dropped Dobbins?? grabbing him", time:"10:04a"},
-];
 const ACTIVITY=[
   {ic:"🏥", txt:"<b>P. Nacua</b> listed Questionable (hamstring)", time:"22 min ago"},
   {ic:"🔁", txt:"<b>Kelce's Angels</b> claimed J. Dobbins off waivers", time:"1 hr ago"},
@@ -411,7 +406,7 @@ let app = {
   user:null, connectedLeague:null, sbLeagueId:null, leagueCode:null, myLeagues:[], authMode:"login", authBusy:false, authErr:"", authMsg:"", showConfirm:false, showReset:false,
   tab:"home", leagueTab:"scoreboard",
   inv:{ double:1, freeze:1, sub:1, hotstart:1 },
-  realData:false, chat:CHAT_SEED.slice(),
+  realData:false,
   leagueId:null, leagueData:null, sleeperUserId:null,
   sim:null, armed:null, matchupIdx:0,
   leagueMatchup:null, schedTeam:"Your Team", pFilter:"ALL", pTeam:"ALL", pShowAll:false, pSearch:"", pSort:"rank", pView:"players", drafted:[], pStatTab:null,
@@ -427,7 +422,7 @@ let app = {
               sack:1, defInt:2, defTD:6 },
     league:{ teams:10, rosterSize:16, divisions:2, waiver:"Reverse standings",
              tradeDeadline:"Week 11", tradeReview:"Commissioner", regSeasonWeeks:14,
-             playoffTeams:6, playoffWeeks:"15-17", keepers:false, testPreseason:false },
+             playoffTeams:6, playoffWeeks:"15-17", playoffWeeksPerRound:1, testPreseason:false },
     powerups:{ enabled:true, weeklyCap:4, rareOdds:25, rankedMode:false },
   },
 };
@@ -3051,7 +3046,7 @@ function renderDraft(){
 function renderLeague(){
   const s=$("screen"); s.innerHTML="";
   const ts=el("div","tabset");
-  [["scoreboard","Scores"],["standings","Standings"],["waivers","Waivers"],["playoffs","Playoffs"],["transactions","Transactions"],["schedule","Schedule"],["chat","Chat"]].forEach(([id,lab])=>{
+  [["scoreboard","Scores"],["standings","Standings"],["waivers","Waivers"],["playoffs","Playoffs"],["transactions","Transactions"],["schedule","Schedule"]].forEach(([id,lab])=>{
     const b=el("button",app.leagueTab===id?"on":"",lab); b.onclick=()=>{app.leagueTab=id;app.leagueMatchup=null;renderLeague();}; ts.appendChild(b);
   });
   s.appendChild(ts);
@@ -3121,77 +3116,120 @@ function renderLeague(){
       });
     }
     s.appendChild(c);
-  } else {
-    const c=el("div","card"); c.appendChild(el("h2","title","League Chat"));
-    const box=el("div"); box.style.maxHeight="46vh"; box.style.overflowY="auto"; box.style.marginBottom="4px";
-    app.chat.forEach(m=>{
-      box.appendChild(el("div","",`<div style="margin-bottom:12px">
-        <b style="color:${m.me?'var(--you)':'var(--gold)'};font-size:13px">${m.who}</b>
-        <span class="muted" style="font-size:11px;margin-left:6px">${m.time}</span>
-        <div style="font-size:14px;margin-top:2px">${m.text}</div></div>`));
-    });
-    c.appendChild(box); s.appendChild(c);
-    const rowi=el("div","row");
-    const i=el("input","input"); i.placeholder="Talk some trash…"; i.style.margin="0";
-    const send=el("button","btn"); send.textContent="Send";
-    const fire=()=>{ const v=i.value.trim(); if(!v)return; app.chat.push({who:"You",me:true,text:v,time:"now"}); renderLeague(); };
-    send.onclick=fire; i.addEventListener("keydown",e=>{ if(e.key==="Enter")fire(); });
-    rowi.append(i,send); s.appendChild(rowi);
-    i.focus();
   }
 }
 
 // ============================ PLAYOFFS BRACKET ============================
+// Standard single-elimination seeding order (like the NCAA tournament): for
+// a bracket of `size` slots, returns the seed numbers in bracket-slot order
+// so that adjacent pairs are the round-1 matchups — e.g. size=8 gives
+// [1,8,4,5,2,7,3,6] → (1v8),(4v5),(2v7),(3v6). Byes fall out naturally: any
+// "seed" beyond the real team count is a phantom, so its pairing partner
+// gets a bye instead of a round-1 game.
+function seedOrder(size){
+  if(size<=1) return [1];
+  const prev=seedOrder(size/2);
+  const out=[];
+  prev.forEach(x=>{ out.push(x); out.push(size+1-x); });
+  return out;
+}
+// Builds every round from a real team count `n` — round 1 pairs seeds per
+// seedOrder (nulls = bye), then each later round is just "TBD vs TBD"
+// slots since who actually advances depends on real results as the season
+// plays out (this bracket is a seeded preview, not an auto-scored one).
+function buildBracket(n){
+  const rounds=Math.max(1, Math.ceil(Math.log2(Math.max(n,2))));
+  const size=Math.pow(2,rounds);
+  const order=seedOrder(size);
+  const round1=[];
+  for(let i=0;i<order.length;i+=2){
+    const a=order[i], b=order[i+1];
+    round1.push({a: a<=n?a:null, b: b<=n?b:null});
+  }
+  const roundsOut=[round1];
+  let count=round1.length;
+  while(count>1){ count=count/2; roundsOut.push(new Array(count).fill(null)); }
+  return roundsOut; // roundsOut[0] = round 1 (seed pairs), later rounds = empty TBD slots
+}
+function roundLabel(idx, total, hasByes){
+  const fromEnd=total-1-idx;
+  if(fromEnd===0) return "Championship";
+  if(fromEnd===1) return "Semifinals";
+  if(idx===0 && hasByes) return "Wild Card";
+  if(fromEnd===2) return "Quarterfinals";
+  return "Round of "+Math.pow(2,fromEnd+1);
+}
 function renderPlayoffs(s){
   const lg=app.settings.league;
-  const n=lg.playoffTeams||6;
+  const n=Math.max(2, lg.playoffTeams||6);
+  const wpr=lg.playoffWeeksPerRound||1;
   const seeds=getStandings().slice(0,n);
-  const start=parseInt((lg.playoffWeeks||"15-17").split("-")[0],10)||15;
+  const m=(lg.playoffWeeks||"15-17").match(/\d+/);
+  const start=m?parseInt(m[0],10):15;
+  const bracket=buildBracket(n);
+  const totalRounds=bracket.length;
+  const hasByes=bracket[0].some(p=>p.a==null||p.b==null);
+  const span=totalRounds*wpr;
   const tl=(seed)=> seed
     ? `<b style="color:${seed.me?'var(--you)':'var(--txt)'}">${seed.team}</b> <span class="muted" style="font-size:11px">(${seed.w}-${seed.l})</span>`
     : '<span class="muted">TBD</span>';
+  const byeSeed=(i)=>{ // which seed # gets the round-1 bye at slot pair i (if any)
+    const p=bracket[0][i]; if(p.a && !p.b) return p.a; if(p.b && !p.a) return p.b; return null;
+  };
 
   s.appendChild(el("div","card",`<h2 class="title">🏆 Playoffs</h2>
-    <div class="muted" style="font-size:12px">Top <b style="color:var(--txt)">${n}</b> seeds by <b style="color:var(--gold)">CCF</b> record. Weeks ${start}–${start+2}. Seeds 1–2 get a first-round bye. Power-ups stay live all the way through.</div>`));
+    <div class="muted" style="font-size:12px">Top <b style="color:var(--txt)">${n}</b> seeds by <b style="color:var(--gold)">CCF</b> record. Weeks ${start}–${start+span-1} (${wpr} wk/round).${hasByes?" Top seeds get a first-round bye.":""} Power-ups stay live all the way through.</div>`));
 
   // visual bracket
   const br=el("div","card"); br.appendChild(el("h2","title","Bracket"));
-  const bt=(seed,note)=> seed?`<div class="bt${seed.me?' me':''}">${seed.team}${note?` <span class="muted" style="font-size:9px">${note}</span>`:""}</div>`:`<div class="bt muted">TBD</div>`;
+  const bt=(seedNum,note)=>{ const seed=seedNum?seeds[seedNum-1]:null;
+    return seed?`<div class="bt${seed.me?' me':''}">${seed.team}${note?` <span class="muted" style="font-size:9px">${note}</span>`:""}</div>`:`<div class="bt muted">TBD</div>`; };
   const bwrap=el("div","bracket");
-  const wc=el("div","bround"); wc.innerHTML="<h4>Wild Card</h4>";
-  wc.appendChild(bmatchEl([bt(seeds[2]),bt(seeds[5])]));
-  wc.appendChild(bmatchEl([bt(seeds[3]),bt(seeds[4])]));
-  const sf=el("div","bround"); sf.innerHTML="<h4>Semifinals</h4>";
-  sf.appendChild(bmatchEl([bt(seeds[0],"#1 bye"),'<div class="bt muted">WC winner</div>']));
-  sf.appendChild(bmatchEl([bt(seeds[1],"#2 bye"),'<div class="bt muted">WC winner</div>']));
-  const fin=el("div","bround"); fin.innerHTML="<h4>Championship</h4>";
-  fin.appendChild(bmatchEl(['<div class="bt muted">SF winner</div>','<div class="bt muted">SF winner</div>']));
-  bwrap.append(wc,sf,fin); br.appendChild(bwrap); s.appendChild(br);
+  bracket.forEach((round,ri)=>{
+    const rd=el("div","bround"); rd.innerHTML=`<h4>${roundLabel(ri,totalRounds,hasByes)}</h4>`;
+    if(ri===0){
+      round.forEach((p,i)=>{
+        const byeNum=byeSeed(i);
+        rd.appendChild(bmatchEl([bt(p.a, p.a===byeNum?"bye":null), bt(p.b, p.b===byeNum?"bye":null)]));
+      });
+    } else {
+      round.forEach(()=> rd.appendChild(bmatchEl(['<div class="bt muted">TBD</div>','<div class="bt muted">TBD</div>'])));
+    }
+    bwrap.appendChild(rd);
+  });
+  br.appendChild(bwrap); s.appendChild(br);
 
   const sd=el("div","card"); sd.appendChild(el("h2","title","Seeds"));
-  seeds.forEach((t,i)=> sd.appendChild(el("div","schrow",
-    `<span class="wk">#${i+1}</span><span style="flex:1">${tl(t)}</span>
-     <span class="muted" style="font-size:11px">${i<2?'BYE':''}</span>`)));
+  seeds.forEach((t,i)=>{
+    const seedNum=i+1;
+    const isBye=bracket[0].some(p=> (p.a===seedNum && !p.b) || (p.b===seedNum && !p.a));
+    sd.appendChild(el("div","schrow", `<span class="wk">#${seedNum}</span><span style="flex:1">${tl(t)}</span>
+     <span class="muted" style="font-size:11px">${isBye?'BYE':''}</span>`));
+  });
   s.appendChild(sd);
 
-  const round=(title,wk,pairs)=>{
-    const c=el("div","card"); c.appendChild(el("h2","title",`${title} · Wk ${wk}`));
-    pairs.forEach(([x,y,lab])=> c.appendChild(el("div","",
-      `<div style="padding:9px 0;border-top:1px solid var(--line);font-size:13px">
-        <div>${x}</div><div class="muted" style="font-size:10px;margin:3px 0">${lab||'vs'}</div><div>${y}</div></div>`)));
-    return c;
-  };
-  s.appendChild(round("Wild Card", start, [
-    [tl(seeds[2]), tl(seeds[5])],
-    [tl(seeds[3]), tl(seeds[4])],
-  ]));
-  s.appendChild(round("Semifinals", start+1, [
-    [tl(seeds[0])+' <span class="muted" style="font-size:11px">· bye</span>', '<span class="muted">Lowest Wild Card winner</span>'],
-    [tl(seeds[1])+' <span class="muted" style="font-size:11px">· bye</span>', '<span class="muted">Highest Wild Card winner</span>'],
-  ]));
-  s.appendChild(round("Championship", start+2, [
-    ['<span class="muted">Semifinal winner</span>', '<span class="muted">Semifinal winner</span>', '🏆 for it all'],
-  ]));
+  bracket.forEach((round,ri)=>{
+    const wk=start+ri*wpr;
+    const wkLabel = wpr>1 ? `Wk ${wk}-${wk+wpr-1}` : `Wk ${wk}`;
+    const c=el("div","card"); c.appendChild(el("h2","title",`${roundLabel(ri,totalRounds,hasByes)} · ${wkLabel}`));
+    round.forEach((p,i)=>{
+      if(ri===0){
+        const byeNum=byeSeed(i);
+        if(byeNum){
+          c.appendChild(el("div","",`<div style="padding:9px 0;border-top:1px solid var(--line);font-size:13px">
+            <div>${tl(seeds[byeNum-1])}</div><div class="muted" style="font-size:10px;margin:3px 0">bye — advances automatically</div></div>`));
+          return;
+        }
+        c.appendChild(el("div","",`<div style="padding:9px 0;border-top:1px solid var(--line);font-size:13px">
+          <div>${tl(seeds[p.a-1])}</div><div class="muted" style="font-size:10px;margin:3px 0">vs</div><div>${tl(seeds[p.b-1])}</div></div>`));
+      } else {
+        const lab = ri===totalRounds-1 ? "🏆 for it all" : "vs";
+        c.appendChild(el("div","",`<div style="padding:9px 0;border-top:1px solid var(--line);font-size:13px">
+          <div><span class="muted">TBD</span></div><div class="muted" style="font-size:10px;margin:3px 0">${lab}</div><div><span class="muted">TBD</span></div></div>`));
+      }
+    });
+    s.appendChild(c);
+  });
 }
 
 function bmatchEl(lines){ const d=el("div","bmatch"); d.innerHTML=lines.join(""); return d; }
@@ -3404,9 +3442,9 @@ function renderCommish(){
   const sch=el("div","card"); sch.appendChild(el("h2","title","Schedule & Playoffs"));
   sch.append(
     cRow("Regular season weeks","", cNum(lg.regSeasonWeeks,1,v=>lg.regSeasonWeeks=v)),
-    cRow("Playoff teams","", cNum(lg.playoffTeams,1,v=>lg.playoffTeams=v)),
-    cRow("Playoff weeks","", cSel(["14-16","15-17","16-18"], lg.playoffWeeks, v=>{lg.playoffWeeks=v;renderCommish();})),
-    cRow("Keeper / dynasty","carry players year to year", cToggle(lg.keepers, v=>{lg.keepers=v;renderCommish();})),
+    cRow("Playoff teams","bracket auto-sizes to this, with byes for the top seeds as needed", cNum(lg.playoffTeams,1,v=>{lg.playoffTeams=Math.max(2,v);renderCommish();})),
+    cRow("Playoffs start","", cSel(["14-16","15-17","16-18"], lg.playoffWeeks, v=>{lg.playoffWeeks=v;renderCommish();})),
+    cRow("Weeks per round","matchups can span 1 or 2 weeks each", cSeg([[1,"1 week"],[2,"2 weeks"]], lg.playoffWeeksPerRound||1, v=>{lg.playoffWeeksPerRound=v;renderCommish();})),
   );
   s.appendChild(sch);
 
