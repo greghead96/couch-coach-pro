@@ -74,6 +74,46 @@ function boxAthleteRaw(groupName, labels, stats) {
   if (groupName === "fumbles") return { fumLost: gi("LOST") };
   return {};
 }
+function parseMadeAttempted(str) {
+  const m = /^(\d+)\s*\/\s*(\d+)$/.exec(String(str || "").trim());
+  return m ? { made: parseInt(m[1], 10), attempted: parseInt(m[2], 10) } : { made: 0, attempted: 0 };
+}
+// The box score's "kicking" group only exposes aggregate FG made/attempted
+// (e.g. "2/3") and the longest make — no per-kick distance. scoringPlays
+// (same summary response, no extra fetch) lists each successful FG with a
+// parseable text description and a clean scoringType flag, which is enough
+// to bucket makes by distance band. Missed FGs never appear as scoring
+// plays at all, so those come from the aggregate made/attempted gap
+// instead — misses aren't distance-banded anyway (flat penalty).
+function fgBandsFromScoringPlays(scoringPlays, teamId, kickerName, aggregateMade) {
+  const bands = { fg0_39: 0, fg40_49: 0, fg50p: 0 };
+  let matched = 0;
+  (scoringPlays || []).forEach((p) => {
+    if (!p.scoringType || p.scoringType.name !== "field-goal") return;
+    if (!p.team || String(p.team.id) !== String(teamId)) return;
+    const m = /^(.+?)\s+(\d+)\s+Yd Field Goal/.exec(p.text || "");
+    if (!m || m[1].trim() !== kickerName) return;
+    matched++;
+    const dist = parseInt(m[2], 10);
+    if (dist >= 50) bands.fg50p++; else if (dist >= 40) bands.fg40_49++; else bands.fg0_39++;
+  });
+  // Never silently drop credit for a make we couldn't classify (e.g. a
+  // name-formatting mismatch) — attribute any leftover makes to the
+  // cheapest band rather than losing the points entirely.
+  bands.fg0_39 += Math.max(0, aggregateMade - matched);
+  return bands;
+}
+function kickerRawFromBox(labels, stats, scoringPlays, teamId, kickerName) {
+  const gi = (lbl) => { const i = labels.indexOf(lbl); return i >= 0 ? String(stats[i] || "0/0") : "0/0"; };
+  const fg = parseMadeAttempted(gi("FG"));
+  const xp = parseMadeAttempted(gi("XP"));
+  const bands = fgBandsFromScoringPlays(scoringPlays, teamId, kickerName, fg.made);
+  return {
+    fgMade0_39: bands.fg0_39, fgMade40_49: bands.fg40_49, fgMade50p: bands.fg50p,
+    fgMissed: Math.max(0, fg.attempted - fg.made),
+    xpMade: xp.made, xpMissed: Math.max(0, xp.attempted - xp.made),
+  };
+}
 function qualifyingTDCount(raw) { return (raw.rushTD || 0) + (raw.recTD || 0); }
 
 function teamDefenseBonusRaw(statGroups) {
@@ -129,6 +169,7 @@ async function fetchGameBox(eventId) {
   // Pregame has no real period — defaulting to 1 would misreport "already
   // in Q1" for a game that hasn't kicked off (same bug fixed client-side).
   const period = final ? 4 : state === "pre" ? 0 : (status.period || 1);
+  const scoringPlays = d.scoringPlays || [];
   const byAthlete = {}, teamStats = {};
   ((d.boxscore && d.boxscore.players) || []).forEach((tm) => {
     const tid = String((tm.team && tm.team.id) || "");
@@ -136,7 +177,10 @@ async function fetchGameBox(eventId) {
     (tm.statistics || []).forEach((g) => {
       (g.athletes || []).forEach((a) => {
         const id = String((a.athlete && a.athlete.id) || ""); if (!id) return;
-        const raw = boxAthleteRaw(g.name, g.labels || [], a.stats || []);
+        const name = (a.athlete && a.athlete.displayName) || "";
+        const raw = g.name === "kicking"
+          ? kickerRawFromBox(g.labels || [], a.stats || [], scoringPlays, tid, name)
+          : boxAthleteRaw(g.name, g.labels || [], a.stats || []);
         if (!byAthlete[id]) byAthlete[id] = { raw: {}, qtd: 0 };
         Object.keys(raw).forEach((k) => { byAthlete[id].raw[k] = (byAthlete[id].raw[k] || 0) + raw[k]; });
         byAthlete[id].qtd += qualifyingTDCount(raw);
@@ -215,7 +259,9 @@ async function pollLeague(league) {
       const curFp = (u.raw.passYds || 0) / 25 + (u.raw.passTD || 0) * 4 + (u.raw.passInt || 0) * -2
         + (u.raw.rushYds || 0) / 10 + (u.raw.rushTD || 0) * 6
         + (u.raw.rec || 0) * 0.5 + (u.raw.recYds || 0) / 10 + (u.raw.recTD || 0) * 6
-        + (u.raw.fumLost || 0) * -2; // informational only
+        + (u.raw.fumLost || 0) * -2
+        + (u.raw.fgMade0_39 || 0) * 3 + (u.raw.fgMade40_49 || 0) * 4 + (u.raw.fgMade50p || 0) * 5
+        + (u.raw.fgMissed || 0) * -1 + (u.raw.xpMade || 0) * 1; // informational only, clients recompute with real settings
       const prevTotal = prev ? (prev.prev_total || 0) : 0;
       const delta = Math.max(0, curFp - prevTotal);
       const tdDelta = Math.max(0, u.qtd - prevQtd);

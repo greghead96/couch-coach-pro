@@ -219,7 +219,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260825h";
+const BUILD_ID = "20260825i";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -419,7 +419,8 @@ let app = {
   settings:{
     scoring:{ passYdsPerPt:25, passTD:4, passInt:-2, rushYdsPerPt:10, rushTD:6,
               ppr:0.5, recYdsPerPt:10, recTD:6, fumLost:-2, twoPt:2,
-              sack:1, defInt:2, defTD:6 },
+              sack:1, defInt:2, defTD:6,
+              fg0_39:3, fg40_49:4, fg50p:5, fgMiss:-1, xp:1, xpMiss:0 },
     league:{ teams:10, rosterSize:16, waiver:"Reverse standings",
              tradeDeadline:"Week 11", tradeReview:"Commissioner", regSeasonWeeks:14,
              playoffTeams:6, playoffWeeks:"15-17", playoffWeeksPerRound:1, testPreseason:false },
@@ -1357,6 +1358,13 @@ function quarterStatLines(pos, stats){
     push(stats.sacks,"sack",`${sc.sack||1}pt each`, stats.sacks*(sc.sack||1));
     push(stats.ints,"INT",`${sc.defInt||2}pts each`, stats.ints*(sc.defInt||2));
     push(stats.defTD,"TD",`${sc.defTD||6}pts each`, stats.defTD*(sc.defTD||6));
+  } else if(pos==="K"){
+    push(stats.fgMade0_39,"FG (0-39yd)",`${sc.fg0_39||3}pts each`, stats.fgMade0_39*(sc.fg0_39||3));
+    push(stats.fgMade40_49,"FG (40-49yd)",`${sc.fg40_49||4}pts each`, stats.fgMade40_49*(sc.fg40_49||4));
+    push(stats.fgMade50p,"FG (50+yd)",`${sc.fg50p||5}pts each`, stats.fgMade50p*(sc.fg50p||5));
+    push(stats.fgMissed,"missed FG",`${sc.fgMiss!=null?sc.fgMiss:-1}pts each`, stats.fgMissed*(sc.fgMiss!=null?sc.fgMiss:-1));
+    push(stats.xpMade,"XP made",`${sc.xp!=null?sc.xp:1}pt each`, stats.xpMade*(sc.xp!=null?sc.xp:1));
+    push(stats.xpMissed,"missed XP",`${sc.xpMiss||0}pts each`, stats.xpMissed*(sc.xpMiss||0));
   } else {
     push(stats.passYds,"pass yd",`1pt/${sc.passYdsPerPt||25}`, stats.passYds/(sc.passYdsPerPt||25));
     push(stats.passTD,"pass TD",`${sc.passTD||4}pts each`, stats.passTD*(sc.passTD||4));
@@ -1553,7 +1561,7 @@ async function openPlayerDetail(p){
   // it comes from the team schedule fetch below, not the /overview or
   // /gamelog athlete endpoints, so it doesn't need (or have) an espnId.
   if(!isDef && !p.espnId){ toast("No profile for "+p.name); return; }
-  app.pDetail={p, loading:true}; app.pDetailTab="season"; showDetailModal();
+  app.pDetail={p, loading:true}; app.pDetailTab="season"; app.pSeasonStatTab=null; showDetailModal();
   let data=null, gl=null, sched=[], bye="";
   // Roster/lineup views only pass {espnId, teamAb, ...} (no teamId) — fall
   // back to the pool-derived ab->id map so the schedule fetch below doesn't
@@ -1657,14 +1665,47 @@ function showDetailModal(){
         wk.rows.map(r=>`<tr><td>${r.wk||""}</td><td>${r.opp||""}</td><td style="color:var(--gold);font-weight:700">${r.fp}</td>${idxs.map(i=>`<td>${r.stats[i]||""}</td>`).join("")}</tr>`).join("")+`</table></div>`;
     }
     const byWk={}; (D.sched||[]).forEach(g=>{ if(g.wk) byWk[g.wk]=g; });
+    // Real underlying stats, not just FP — blank for weeks not played yet,
+    // fills in live as games happen and finalizes once they're over. Same
+    // per-quarter data everything else in the app uses, just summed to a
+    // whole-game total here instead of split by quarter.
+    let seasonCols, seasonTabsHtml="";
+    if(p.pos==="DEF"){
+      seasonCols=[["sacks","SACK"],["ints","INT"],["defTD","TD"]];
+    } else if(p.pos==="K"){
+      seasonCols=[["__fgMade","FG"],["fgMissed","MISS"],["xpMade","XP"]];
+    } else {
+      const tabs=[["passing","Passing"],["rushing","Rushing"],["receiving","Receiving"]];
+      let active=app.pSeasonStatTab;
+      if(!tabs.find(t=>t[0]===active)) active = p.pos==="QB"?"passing":p.pos==="WR"||p.pos==="TE"?"receiving":"rushing";
+      const REAL_STAT_TABS={
+        passing:[["passYds","YDS"],["passTD","TD"],["passInt","INT"]],
+        rushing:[["rushYds","YDS"],["rushTD","TD"]],
+        receiving:[["rec","REC"],["recYds","YDS"],["recTD","TD"]],
+      };
+      seasonCols=REAL_STAT_TABS[active];
+      seasonTabsHtml=`<div class="chips" id="pSeasonStatTabs">${tabs.map(t=>`<div class="chip${t[0]===active?' on':''}" data-t="${t[0]}">${t[1]}</div>`).join("")}</div>`;
+    }
+    const seasonColspan=2+seasonCols.length+(p.pos==="DEF"?1:0);
     const seasonRows=[]; for(let w=1;w<=18;w++){
-      if(w===D.bye){ seasonRows.push(`<tr><td>${w}</td><td class="muted" colspan="2">BYE</td></tr>`); continue; }
+      if(w===D.bye){ seasonRows.push(`<tr><td>${w}</td><td class="muted" colspan="${seasonColspan}">BYE</td></tr>`); continue; }
       const g=byWk[w]; const oppTxt=g&&g.opp?("vs "+g.opp):"—";
       let scoreTxt='<span class="muted">—</span>';
+      const raw = (app.realLeague && p.id) ? realWeekRawStats(p.id,w) : null;
       if(app.realLeague && p.id){ const sc=playerWeekScore(p.id,w); if(sc!=null) scoreTxt=`<b style="color:var(--gold)">${sc.toFixed(1)}</b>`; }
-      seasonRows.push(`<tr><td>${w}</td><td>${oppTxt}</td><td>${scoreTxt}</td></tr>`);
+      const statCells=seasonCols.map(([key])=>{
+        // No row at all for this week yet = not played/not polled = blank.
+        // A row that DOES exist but never accrued this specific stat
+        // (e.g. a RB with zero catches) is a genuine 0, not a blank.
+        if(!raw) return '<td class="muted">—</td>';
+        const v = key==="__fgMade" ? (raw.stats.fgMade0_39||0)+(raw.stats.fgMade40_49||0)+(raw.stats.fgMade50p||0) : (raw.stats[key]||0);
+        return `<td>${v}</td>`;
+      }).join("");
+      const paCell = p.pos==="DEF" ? `<td>${raw && raw.allowed!=null ? raw.allowed : '<span class="muted">—</span>'}</td>` : "";
+      seasonRows.push(`<tr><td>${w}</td><td>${oppTxt}</td><td>${scoreTxt}</td>${statCells}${paCell}</tr>`);
     }
-    const seasonHtml=`<div style="overflow-x:auto;max-height:44vh;overflow-y:auto"><table class="std"><tr><th>Wk</th><th>Opp</th><th>FP</th></tr>${seasonRows.join("")}</table></div>`;
+    const paHeader = p.pos==="DEF" ? "<th>PA</th>" : "";
+    const seasonHtml=`${seasonTabsHtml}<div style="overflow-x:auto;max-height:44vh;overflow-y:auto"><table class="std"><tr><th>Wk</th><th>Opp</th><th>FP</th>${seasonCols.map(([,lbl])=>`<th>${lbl}</th>`).join("")}${paHeader}</tr>${seasonRows.join("")}</table></div>`;
     const dTab=app.pDetailTab==="last" ? "last" : "season";
     const detailTabs=`<div class="chips" id="pDetailTabs">
       <div class="chip${dTab==="season"?' on':''}" data-t="season">This Season</div>
@@ -1684,6 +1725,7 @@ function showDetailModal(){
   ov.querySelector("#pdClose").onclick=()=>{ app.pDetail=null; ov.innerHTML=""; };
   const dt=ov.querySelector("#pDetailTabs"); if(dt) dt.querySelectorAll(".chip").forEach(b=> b.onclick=()=>{ app.pDetailTab=b.dataset.t; showDetailModal(); });
   const tw=ov.querySelector("#statTabs"); if(tw) tw.querySelectorAll(".chip").forEach(b=> b.onclick=()=>{ app.pStatTab=b.dataset.t; showDetailModal(); });
+  const sst=ov.querySelector("#pSeasonStatTabs"); if(sst) sst.querySelectorAll(".chip").forEach(b=> b.onclick=()=>{ app.pSeasonStatTab=b.dataset.t; showDetailModal(); });
 }
 function posChips(s){
   const chips=el("div","chips");
@@ -2418,6 +2460,47 @@ function defBracket(pa){
   if(pa<=0) return 10; if(pa<=6) return 7; if(pa<=13) return 4;
   if(pa<=20) return 1; if(pa<=27) return 0; if(pa<=34) return -1; return -4;
 }
+function parseMadeAttempted(str){
+  const m=/^(\d+)\s*\/\s*(\d+)$/.exec(String(str||"").trim());
+  return m ? {made:parseInt(m[1],10), attempted:parseInt(m[2],10)} : {made:0, attempted:0};
+}
+// The box score's "kicking" group only exposes aggregate FG made/attempted
+// (e.g. "2/3") and the longest make — no per-kick distance. scoringPlays
+// (same summary response, no extra fetch) lists each successful FG with a
+// parseable text description ("Ka'imi Fairbairn 51 Yd Field Goal ") and a
+// clean scoringType flag, which is enough to bucket makes by distance band.
+// Missed FGs never appear as scoring plays at all (nothing scored), so
+// those come from the aggregate made/attempted gap instead — fine, since
+// misses aren't distance-banded anyway (flat penalty).
+function fgBandsFromScoringPlays(scoringPlays, teamId, kickerName, aggregateMade){
+  const bands={fg0_39:0, fg40_49:0, fg50p:0};
+  let matched=0;
+  (scoringPlays||[]).forEach(p=>{
+    if(!p.scoringType || p.scoringType.name!=="field-goal") return;
+    if(!p.team || String(p.team.id)!==String(teamId)) return;
+    const m=/^(.+?)\s+(\d+)\s+Yd Field Goal/.exec(p.text||"");
+    if(!m || m[1].trim()!==kickerName) return;
+    matched++;
+    const dist=parseInt(m[2],10);
+    if(dist>=50) bands.fg50p++; else if(dist>=40) bands.fg40_49++; else bands.fg0_39++;
+  });
+  // Never silently drop credit for a make we couldn't classify (e.g. a
+  // name-formatting mismatch) — attribute any leftover makes to the
+  // cheapest band rather than losing the points entirely.
+  bands.fg0_39 += Math.max(0, aggregateMade-matched);
+  return bands;
+}
+function kickerFP(labels, stats, scoringPlays, teamId, kickerName){
+  const sc=app.settings.scoring;
+  const gi=(lbl)=>{ const i=labels.indexOf(lbl); return i>=0?String(stats[i]||"0/0"):"0/0"; };
+  const fg=parseMadeAttempted(gi("FG")), xp=parseMadeAttempted(gi("XP"));
+  const bands=fgBandsFromScoringPlays(scoringPlays, teamId, kickerName, fg.made);
+  const fgMissed=Math.max(0, fg.attempted-fg.made), xpMissed=Math.max(0, xp.attempted-xp.made);
+  const fp = bands.fg0_39*(sc.fg0_39||3) + bands.fg40_49*(sc.fg40_49||4) + bands.fg50p*(sc.fg50p||5)
+    + fgMissed*(sc.fgMiss!=null?sc.fgMiss:-1) + xp.made*(sc.xp!=null?sc.xp:1) + xpMissed*(sc.xpMiss||0);
+  const raw={ fgMade0_39:bands.fg0_39, fgMade40_49:bands.fg40_49, fgMade50p:bands.fg50p, fgMissed, xpMade:xp.made, xpMissed };
+  return {fp, qtd:0, raw};
+}
 function boxAthleteFP(groupName, labels, stats){
   const sc=app.settings.scoring;
   const gi=(lbl)=>{ const i=labels.indexOf(lbl); return i>=0?(parseFloat(String(stats[i]||"0").replace(/,/g,""))||0):0; };
@@ -2638,6 +2721,7 @@ async function fetchGameBoxFP(eventId){
   // to 1 (as if Q1 were already underway) is what locked Q1 out of the
   // quarter picker for players whose games hadn't started.
   const period= final?4 : state==="pre" ? 0 : (status.period||1);
+  const scoringPlays=d.scoringPlays||[];
   const byAthlete={}, teamStats={};
   ((d.boxscore&&d.boxscore.players)||[]).forEach(tm=>{
     const tid=String((tm.team&&tm.team.id)||"");
@@ -2645,7 +2729,8 @@ async function fetchGameBoxFP(eventId){
     (tm.statistics||[]).forEach(g=>{
       (g.athletes||[]).forEach(a=>{
         const id=String((a.athlete&&a.athlete.id)||""); if(!id) return;
-        const r=boxAthleteFP(g.name, g.labels||[], a.stats||[]);
+        const name=(a.athlete&&a.athlete.displayName)||"";
+        const r = g.name==="kicking" ? kickerFP(g.labels||[], a.stats||[], scoringPlays, tid, name) : boxAthleteFP(g.name, g.labels||[], a.stats||[]);
         if(!byAthlete[id]) byAthlete[id]={fp:0,qtd:0,raw:{}};
         byAthlete[id].fp+=r.fp; byAthlete[id].qtd+=r.qtd;
         Object.keys(r.raw).forEach(k=>{ byAthlete[id].raw[k]=(byAthlete[id].raw[k]||0)+r.raw[k]; });
@@ -2831,6 +2916,21 @@ function realQuarterly(pid, wk){
   }
   const firstQtdAt=row&&row.first_qtd_at?new Date(row.first_qtd_at).getTime():null;
   return {q, qtd, pa, firstQtdAt};
+}
+// Whole-game raw stat totals for one player-week, summed across quarters —
+// for the player card's This Season tab, which shows the actual underlying
+// stats (not just FP) so people can see what's driving the score, live as
+// games are played and finalized once they're over. Returns null if we
+// haven't polled anything for this player-week yet (bye, not yet played,
+// or just not polled), so the UI can render blank instead of a fake zero.
+function realWeekRawStats(pid, wk){
+  const row=app.playerWeekStats[wk] && app.playerWeekStats[wk][pid];
+  if(!row || !row.q_pts) return null;
+  const stats={};
+  for(let q=1;q<=4;q++){ const v=row.q_pts[q]||row.q_pts[String(q)];
+    if(v && v.stats) Object.keys(v.stats).forEach(k=>{ stats[k]=(stats[k]||0)+v.stats[k]; }); }
+  const allowed = row.q_pts.pa ? row.q_pts.pa.allowed : null;
+  return {stats, allowed};
 }
 function slotPlayerIds(uid, wk){
   const picks=(app.draft?app.draft.picks:[]).filter(p=>p.user_id===uid);
@@ -3710,6 +3810,12 @@ function renderCommish(){
     cRow("Defense: sack","points", cNum(sc.sack,1,v=>sc.sack=v)),
     cRow("Defense: interception","points", cNum(sc.defInt,1,v=>sc.defInt=v)),
     cRow("Defense/return TD","points", cNum(sc.defTD,1,v=>sc.defTD=v)),
+    cRow("Field goal 0-39 yd","points", cNum(sc.fg0_39,1,v=>sc.fg0_39=v)),
+    cRow("Field goal 40-49 yd","points", cNum(sc.fg40_49,1,v=>sc.fg40_49=v)),
+    cRow("Field goal 50+ yd","points", cNum(sc.fg50p,1,v=>sc.fg50p=v)),
+    cRow("Missed field goal","points (usually negative)", cNum(sc.fgMiss,1,v=>sc.fgMiss=v)),
+    cRow("Extra point made","points", cNum(sc.xp,1,v=>sc.xp=v)),
+    cRow("Missed extra point","points", cNum(sc.xpMiss,1,v=>sc.xpMiss=v)),
   );
   s.appendChild(scoring);
 
