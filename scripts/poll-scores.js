@@ -174,6 +174,7 @@ async function pollLeague(league) {
     const qpts = (prev && prev.q_pts) ? { ...prev.q_pts } : {};
     const prevStats = (prev && prev.prev_stats) ? prev.prev_stats : {};
     let prevQtd = prev ? (prev.prev_qtd || 0) : 0, prevBonus = prev ? (prev.prev_bonus || 0) : 0, newPrevStats = prevStats, prevTotalOut = 0;
+    const hadQtdBefore = prevQtd > 0; // captured before prevQtd gets reused below to hold the new cumulative total
     if (u.isDef) {
       qpts.pa = { allowed: u.totalAllowed, fp: defBracket(u.totalAllowed) };
       const curBonusFp = u.bonus.sacks + u.bonus.ints * 2 + u.bonus.td * 6; // informational only, clients recompute with real settings
@@ -206,9 +207,18 @@ async function pollLeague(league) {
       prevQtd = u.qtd; prevBonus = 0; newPrevStats = u.raw;
       prevTotalOut = curFp; // true cumulative fp-to-date, needed for next run's delta calc
     }
+    // Hot Start needs real chronological order across DIFFERENT games (a Q1
+    // score in the 8pm game happens later in real time than a Q4 score in a
+    // 1pm game), which quarter number alone can't express. Stamped once,
+    // the first time this player's cumulative qualifying-TD count goes from
+    // zero to nonzero — close enough given the ~20s live poll cadence — and
+    // never overwritten after that.
+    const firstQtdAt = (prev && prev.first_qtd_at) ? prev.first_qtd_at
+      : (!hadQtdBefore && prevQtd > 0) ? new Date().toISOString() : null;
     return {
       athlete_id: u.athleteId, week: wk, season: 2026, q_pts: qpts,
       prev_total: u.isDef ? 0 : prevTotalOut, prev_qtd: prevQtd, prev_bonus: prevBonus, prev_stats: newPrevStats,
+      first_qtd_at: firstQtdAt,
     };
   });
 

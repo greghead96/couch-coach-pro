@@ -219,7 +219,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260824z";
+const BUILD_ID = "20260825a";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -1018,9 +1018,11 @@ function accountModal(){
     <div class="muted" style="font-size:12px;margin-top:4px">League: ${app.connectedLeague}${lg?" · "+(lg.team_name||""):""}</div>
     <div style="font-size:13px;margin-top:8px">Invite code: <b style="color:var(--gold);letter-spacing:2px">${code}</b></div>
     <button class="btn sec" id="copyCodeBtn" style="width:100%;margin-top:10px">📋 Copy invite code</button>
+    ${app.realLeague?`<button class="btn sec" id="renameBtn" style="width:100%;margin-top:8px">✏️ Rename Team</button>`:""}
     <button class="btn sec" id="switchLg" style="width:100%;margin-top:8px">Switch / Join League</button>
     <button class="btn sec" id="signOutBtn" style="width:100%;margin-top:8px">Sign Out</button></div></div>`;
   ov.querySelector("#copyCodeBtn").onclick=()=>copyCode(code);
+  const renameBtn=ov.querySelector("#renameBtn"); if(renameBtn) renameBtn.onclick=()=>openRenameTeamModal();
   ov.querySelector("#switchLg").onclick=()=>{ ov.innerHTML=""; unsubscribeDraft(); app.draft=null; app.realLeague=false; app.connectedLeague=null; app.sbLeagueId=null; render(); };
   ov.querySelector("#signOutBtn").onclick=()=>{ ov.innerHTML=""; signOut(); };
   ov.querySelector("#acctClose").onclick=()=>{ ov.innerHTML=""; };
@@ -1394,7 +1396,11 @@ function renderTeam(){
     if(app.teamTab==="trades"){ renderTrades(s); return; }
     const myPicks=myDraftPicks();
     if(!myPicks.length){
-      s.appendChild(el("div","card","<h2 class='title'>My Team</h2><div class='muted' style='font-size:13px'>You haven't drafted yet — head to the 🐍 <b style='color:var(--txt)'>Draft</b> tab to build your roster.</div>"));
+      const empty=el("div","card");
+      empty.innerHTML=`<h2 class='title'>${app.myTeam} <span id="rtBtn2" style="cursor:pointer;font-size:14px" title="Rename team">✏️</span></h2>
+        <div class='muted' style='font-size:13px'>You haven't drafted yet — head to the 🐍 <b style='color:var(--txt)'>Draft</b> tab to build your roster.</div>`;
+      empty.querySelector("#rtBtn2").onclick=(e)=>{ e.stopPropagation(); openRenameTeamModal(); };
+      s.appendChild(empty);
       return;
     }
     // ensure a valid lineup exists (default if none), and drop any stale ids
@@ -2578,6 +2584,7 @@ async function pollRealStats(){
     const prevStats=(prev&&prev.prev_stats)?prev.prev_stats:{};
     let prevQtd=prev?(prev.prev_qtd||0):0, prevBonus=prev?(prev.prev_bonus||0):0;
     let newPrevStats=prevStats;
+    const hadQtdBefore=prevQtd>0; // captured before prevQtd is reused below to hold the new cumulative total
     if(u.isDef){
       // Points allowed is a WHOLE-GAME stat in standard fantasy scoring (evaluated
       // once off the final/current total, never per-quarter) — stored separately
@@ -2605,7 +2612,13 @@ async function pollRealStats(){
       prevQtd=u.curQtd;
       newPrevStats=u.curRaw||{};
     }
-    return { athlete_id:u.athlete_id, week:wk, season:2026, q_pts:qpts, prev_total:u.curFp, prev_qtd:prevQtd, prev_bonus:prevBonus, prev_stats:newPrevStats };
+    // See poll-scores.js's identical comment: Hot Start needs real
+    // chronological order across different games (a Q1 score in the 8pm
+    // game is later in real time than a Q4 score in a 1pm game), which
+    // quarter number can't express on its own. Stamped once, the first
+    // time this player's cumulative qualifying-TD count leaves zero.
+    const firstQtdAt=(prev&&prev.first_qtd_at)?prev.first_qtd_at:(!hadQtdBefore&&prevQtd>0)?new Date().toISOString():null;
+    return { athlete_id:u.athlete_id, week:wk, season:2026, q_pts:qpts, prev_total:u.curFp, prev_qtd:prevQtd, prev_bonus:prevBonus, prev_stats:newPrevStats, first_qtd_at:firstQtdAt };
   });
   const {error:upsertErr}=await sb.from("player_week_stats").upsert(rows);
   if(upsertErr){
@@ -2682,7 +2695,8 @@ function realQuarterly(pid, wk){
     for(let i=1;i<=4;i++){ const v=row.q_pts[i]||row.q_pts[String(i)]; if(v){ q[i]=quarterFpFromStats(pos, v.stats); qtd[i]=v.qtd||0; } }
     if(row.q_pts.pa) pa={allowed:row.q_pts.pa.allowed||0, fp:defBracket(row.q_pts.pa.allowed||0)};
   }
-  return {q, qtd, pa};
+  const firstQtdAt=row&&row.first_qtd_at?new Date(row.first_qtd_at).getTime():null;
+  return {q, qtd, pa, firstQtdAt};
 }
 function slotPlayerIds(uid, wk){
   const picks=(app.draft?app.draft.picks:[]).filter(p=>p.user_id===uid);
@@ -2711,7 +2725,16 @@ function computeRealTeamScore(uid, wk){
       if(pu && Number(pu.quarter)===q){ if(pu.powerup_key==="double") fp*=2; else if(pu.powerup_key==="freeze") fp=0; }
       total+=fp;
       if(q===1 && rq.pa) total+=rq.pa.fp; // whole-game DEF component, added once (not per-quarter, not power-up eligible)
-      if(rq.qtd[q]>0 && (!bestTD || q<bestTD.q)) bestTD={q,pid:contributor};
+      // "First" means real chronological order across the WHOLE week, not
+      // quarter number — a Q1 score in the 8pm game happens later in real
+      // time than a Q4 score in a 1pm game. Order by firstQtdAt (the actual
+      // moment we detected it live) when available; a missing timestamp
+      // (older data from before this was tracked) falls back to quarter
+      // number and always loses to anything with a real timestamp.
+      if(rq.qtd[q]>0){
+        const key = rq.firstQtdAt!=null ? rq.firstQtdAt : (1e15+q);
+        if(!bestTD || key<bestTD.key) bestTD={key,pid:contributor};
+      }
     }
   });
   if(hotStartPick && bestTD && bestTD.pid===hotStartPick.player_id) total+=2*(app.settings.scoring.rushTD||6);

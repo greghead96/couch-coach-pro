@@ -87,6 +87,12 @@ create table if not exists public.player_week_stats (
 );
 alter table public.player_week_stats add column if not exists prev_bonus numeric not null default 0;
 alter table public.player_week_stats add column if not exists prev_stats jsonb not null default '{}'::jsonb;
+-- Real-world moment this player's cumulative qualifying-TD count first left
+-- zero this week — used by Hot Start to find the true chronological first
+-- qualifying TD across the whole week's games, not just the lowest quarter
+-- number (which breaks across games in different time slots). Set once by
+-- the poller (client + background job), never overwritten after that.
+alter table public.player_week_stats add column if not exists first_qtd_at timestamptz;
 alter table public.player_week_stats enable row level security;
 drop policy if exists "read player stats" on public.player_week_stats;
 create policy "read player stats" on public.player_week_stats for select to authenticated using (true);
