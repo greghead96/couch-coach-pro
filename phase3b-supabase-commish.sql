@@ -3,12 +3,21 @@
 -- Run in Supabase SQL Editor AFTER phase3-supabase-schema.sql.
 -- ============================================================
 
--- Reset the draft back to "not started" (clears all picks). Commissioner only.
--- Also clears powerup_picks: those rows reference player_ids from the picks
--- just deleted, and inventory (refreshRealInv in index.html) is derived
--- entirely from powerup_picks for the current week — leaving them behind
--- after a reset permanently "uses up" that week's Double/Freeze/etc. for
--- players that no longer exist on anyone's roster.
+-- Resets the WHOLE league for a fresh season, not just the draft — this
+-- grew from "clear picks so we can redraft" into "wipe everything from
+-- testing" on purpose, since a fresh draft with old power-up/waiver/trade/
+-- score history lying around left several ways for stale test data to
+-- collide with real results (see phase4f's season_type column comment for
+-- the sharpest example: preseason and regular season reuse the same week
+-- numbers, so a leftover preseason stat row can silently suppress real
+-- scoring later at that same week number).
+--
+-- Depends on tables from phase5 (waivers), phase6 (trade review), phase7
+-- (playoffs), and phase4f's season_type column — run this file AFTER
+-- those, or re-run it again afterward, if you haven't already.
+--
+-- The client shows a strong confirmation before calling this — it is NOT
+-- recoverable.
 create or replace function public.reset_draft(lid uuid)
 returns void language plpgsql security definer set search_path = public as $$
 begin
@@ -17,6 +26,20 @@ begin
   end if;
   delete from public.draft_picks where league_id = lid;
   delete from public.powerup_picks where league_id = lid;
+  delete from public.weekly_lineups where league_id = lid;
+  delete from public.waiver_claims where league_id = lid;
+  delete from public.waiver_wire where league_id = lid;
+  delete from public.trades where league_id = lid; -- cascades to trade_votes
+  delete from public.playoff_matchups where league_id = lid;
+  delete from public.transactions where league_id = lid;
+  -- Global, not league-scoped (player_week_stats has no league_id — see
+  -- phase4f) — safe because 'preseason' rows are test data everywhere,
+  -- by definition, regardless of which league drafted that player.
+  -- Real ('regular') rows for any league already in its actual season
+  -- are never touched.
+  delete from public.player_week_stats where season_type = 'preseason';
+  update public.leagues set current_week = 1, last_waiver_process = now(),
+    waiver_priority = '[]'::jsonb, standings_cache = '[]'::jsonb where id = lid;
   update public.drafts set status='pre', updated_at=now() where league_id = lid;
 end; $$;
 

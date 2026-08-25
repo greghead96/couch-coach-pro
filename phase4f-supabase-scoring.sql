@@ -93,6 +93,18 @@ alter table public.player_week_stats add column if not exists prev_stats jsonb n
 -- number (which breaks across games in different time slots). Set once by
 -- the poller (client + background job), never overwritten after that.
 alter table public.player_week_stats add column if not exists first_qtd_at timestamptz;
+-- This table is shared across ALL leagues (it's real ESPN truth, not
+-- league-scoped) and preseason/regular season reuse the same week numbers
+-- (week 5 of preseason and week 5 of the real season are the SAME primary
+-- key here) — so preseason test data left in place would silently corrupt
+-- real scoring later (the delta math would use a leftover preseason
+-- prev_total as its baseline and suppress real points until real stats
+-- exceed it). Tagging every row lets a season reset safely delete only
+-- confirmed-preseason rows, globally, without touching anyone's real data.
+-- Existing rows all predate this column and are, in fact, all preseason
+-- test data as of when this migration runs — the default backfills them
+-- correctly.
+alter table public.player_week_stats add column if not exists season_type text not null default 'preseason';
 alter table public.player_week_stats enable row level security;
 drop policy if exists "read player stats" on public.player_week_stats;
 create policy "read player stats" on public.player_week_stats for select to authenticated using (true);

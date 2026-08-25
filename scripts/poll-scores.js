@@ -25,6 +25,27 @@ const TEAM_ID_BY_AB = {
   BAL:33, HOU:34,
 };
 
+// Mirrors index.html's SLOTS/defaultStarters exactly — used only to build a
+// week-close snapshot for a manager who never opened the Team tab that
+// week (so has no row in `lineups` at all) at the one moment it's
+// guaranteed accurate: the instant the week actually closes.
+const SLOTS = [
+  { pos: ["QB"] }, { pos: ["RB"] }, { pos: ["RB"] }, { pos: ["WR"] }, { pos: ["WR"] },
+  { pos: ["TE"] }, { pos: ["RB", "WR", "TE"] }, { pos: ["K"] }, { pos: ["DEF"] },
+];
+function defaultStartersFor(picks) {
+  const assign = SLOTS.map(() => null); const used = new Set();
+  SLOTS.forEach((slot, i) => {
+    if (slot.pos.length > 1) return; // FLEX filled last, below
+    const p = picks.find((x) => !used.has(x.player_id) && slot.pos.includes(x.pos));
+    if (p) { assign[i] = p.player_id; used.add(p.player_id); }
+  });
+  const fi = SLOTS.findIndex((s) => s.pos.length > 1);
+  const p = picks.find((x) => !used.has(x.player_id) && SLOTS[fi].pos.includes(x.pos));
+  if (p) { assign[fi] = p.player_id; used.add(p.player_id); }
+  return assign;
+}
+
 async function sb(path, opts) {
   const r = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
     ...opts,
@@ -218,7 +239,7 @@ async function pollLeague(league) {
     return {
       athlete_id: u.athleteId, week: wk, season: 2026, q_pts: qpts,
       prev_total: u.isDef ? 0 : prevTotalOut, prev_qtd: prevQtd, prev_bonus: prevBonus, prev_stats: newPrevStats,
-      first_qtd_at: firstQtdAt,
+      first_qtd_at: firstQtdAt, season_type: testPreseason ? "preseason" : "regular",
     };
   });
 
@@ -267,8 +288,25 @@ async function autoAdvanceWeeks() {
     if (!(espnWk > league.current_week)) continue;
     try {
       const lineups = await sb(`lineups?select=user_id,starters&league_id=eq.${league.id}`);
-      if (lineups.length) {
-        const rows = lineups.map((l) => ({ league_id: league.id, week: league.current_week, user_id: l.user_id, starters: l.starters }));
+      const rows = lineups.map((l) => ({ league_id: league.id, week: league.current_week, user_id: l.user_id, starters: l.starters }));
+      // A manager who never opened the Team tab this week has no row in
+      // `lineups` at all — without this, they'd get no snapshot, and
+      // retroactive scoring (getRealStandings) would fall back to
+      // computing a default lineup from CURRENT draft_picks at query time,
+      // which is wrong if their roster changed since (a trade/waiver) this
+      // week actually happened. Computing their default HERE, at the exact
+      // moment the week closes, is the only point it's guaranteed accurate.
+      const snapshotted = new Set(lineups.map((l) => l.user_id));
+      const members = await sb(`league_members?select=user_id&league_id=eq.${league.id}`);
+      const missing = members.filter((m) => !snapshotted.has(m.user_id));
+      if (missing.length) {
+        const picks = await sb(`draft_picks?select=user_id,player_id,pos&league_id=eq.${league.id}&order=pick_no.asc`);
+        for (const m of missing) {
+          const mine = picks.filter((p) => p.user_id === m.user_id);
+          if (mine.length) rows.push({ league_id: league.id, week: league.current_week, user_id: m.user_id, starters: defaultStartersFor(mine) });
+        }
+      }
+      if (rows.length) {
         await sb("weekly_lineups", { method: "POST", headers: { Prefer: "resolution=merge-duplicates" }, body: JSON.stringify(rows) });
       }
       await sb(`leagues?id=eq.${league.id}`, { method: "PATCH", body: JSON.stringify({ current_week: espnWk }) });

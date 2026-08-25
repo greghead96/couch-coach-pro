@@ -219,7 +219,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260825g";
+const BUILD_ID = "20260825h";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -2751,7 +2751,8 @@ async function pollRealStats(){
     // quarter number can't express on its own. Stamped once, the first
     // time this player's cumulative qualifying-TD count leaves zero.
     const firstQtdAt=(prev&&prev.first_qtd_at)?prev.first_qtd_at:(!hadQtdBefore&&prevQtd>0)?new Date().toISOString():null;
-    return { athlete_id:u.athlete_id, week:wk, season:2026, q_pts:qpts, prev_total:u.curFp, prev_qtd:prevQtd, prev_bonus:prevBonus, prev_stats:newPrevStats, first_qtd_at:firstQtdAt };
+    return { athlete_id:u.athlete_id, week:wk, season:2026, q_pts:qpts, prev_total:u.curFp, prev_qtd:prevQtd, prev_bonus:prevBonus, prev_stats:newPrevStats, first_qtd_at:firstQtdAt,
+      season_type: (app.settings.league&&app.settings.league.testPreseason)?"preseason":"regular" };
   });
   const {error:upsertErr}=await sb.from("player_week_stats").upsert(rows);
   if(upsertErr){
@@ -3087,9 +3088,24 @@ function renderDraft(){
   board.appendChild(grid); s.appendChild(board);
 
   if(app.isCommish && (live||done)){
-    const rb=el("button","btn sec"); rb.style.width="100%"; rb.style.margin="4px 0 12px"; rb.textContent="↺ Reset Draft (commissioner)";
-    rb.onclick=async ()=>{ if(!confirm("Reset the draft? This clears every pick.")) return;
-      try{ const {error}=await sb.rpc("reset_draft",{lid:app.sbLeagueId}); if(error) throw error; app.queue=[]; saveQueue(); await loadDraft(); renderDraft(); toast("Draft reset"); }
+    const rb=el("button","btn sec"); rb.style.width="100%"; rb.style.margin="4px 0 12px"; rb.textContent="⚠️ Reset League for New Season (commissioner)";
+    rb.onclick=async ()=>{
+      const warn="⚠️ This resets the ENTIRE league, not just the draft:\n\n"
+        +"• Every draft pick — everyone's roster goes to zero\n"
+        +"• All power-up usage and history\n"
+        +"• Saved lineups\n"
+        +"• Waiver claims and waiver history\n"
+        +"• Trades and votes\n"
+        +"• The playoff bracket\n"
+        +"• The transaction log\n"
+        +"• Current week resets back to 1\n"
+        +"• Preseason test stats (real-season stats already in progress for other leagues are untouched)\n\n"
+        +"This cannot be undone. Everyone will need to redraft. Continue?";
+      if(!confirm(warn)) return;
+      try{ const {error}=await sb.rpc("reset_draft",{lid:app.sbLeagueId}); if(error) throw error;
+        app.queue=[]; saveQueue();
+        await Promise.all([loadDraft(), loadLeagueData(), loadWaivers(), loadTrades(), loadPlayoffMatchups(), loadTransactions(), loadSchedule()]);
+        toast("League reset — ready for a fresh draft"); render(); }
       catch(e){ toast(e.message||"Reset failed"); } };
     s.appendChild(rb);
   }
