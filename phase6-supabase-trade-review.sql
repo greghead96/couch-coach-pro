@@ -14,12 +14,6 @@ alter table public.trades add column if not exists review_mode text;
 -- majority in time (see resolveExpiredTradeReviews there).
 alter table public.trades add column if not exists review_started_at timestamptz;
 
--- Anyone in the league needs to be able to SEE a trade once it's up for a
--- league vote (not just the two parties), so they can actually vote on it.
-drop policy if exists "read my trades" on public.trades;
-create policy "read my trades" on public.trades for select to authenticated
-  using (public.is_member(league_id) and (from_user = auth.uid() or to_user = auth.uid() or status = 'pending_review'));
-
 create table if not exists public.trade_votes (
   trade_id bigint references public.trades on delete cascade,
   user_id  uuid references auth.users not null,
@@ -33,11 +27,40 @@ create policy "read trade votes" on public.trade_votes for select to authenticat
   using (exists (select 1 from public.trades t where t.id = trade_id and public.is_member(t.league_id)));
 -- writes only via vote_trade() below
 
+-- Anyone in the league needs to be able to SEE a trade once it's up for a
+-- league vote (not just the two parties), so they can actually vote on it —
+-- and anyone who actually voted keeps visibility after it resolves (this
+-- used to only expose it while status='pending_review', so a voter's copy
+-- of the trade would vanish the moment it resolved, with no way to see the
+-- outcome of something they voted on).
+drop policy if exists "read my trades" on public.trades;
+create policy "read my trades" on public.trades for select to authenticated
+  using (public.is_member(league_id) and (
+    from_user = auth.uid() or to_user = auth.uid() or status = 'pending_review'
+    or exists (select 1 from public.trade_votes v where v.trade_id = id and v.user_id = auth.uid())
+  ));
+
 -- Internal only — actually moves the players. Called by respond_trade
--- (no-review path), review_trade (commissioner approval), and vote_trade
--- (majority reached). Not meant to be called directly by a client: no
--- authorization check of its own beyond "is this trade actually awaiting
--- execution", so EXECUTE is revoked from client roles below.
+-- (no-review path), review_trade (commissioner approval), vote_trade
+-- (majority reached), and poll-scores.js's 48h timeout resolver. Not meant
+-- to be called directly by a client: no authorization check of its own
+-- beyond "is this trade actually awaiting execution", so EXECUTE is
+-- explicitly revoked from anon/authenticated below — revoking from
+-- `public` alone is NOT sufficient, since Supabase grants EXECUTE on new
+-- public-schema functions to anon/authenticated directly (independent of
+-- the PUBLIC pseudo-role) via a default-privileges rule, so leaving those
+-- two off the revoke list would leave this callable by any signed-in user,
+-- bypassing review/voting entirely.
+--
+-- IMPORTANT: when the offer/request is no longer valid, this marks the
+-- trade 'rejected' and RETURNS NORMALLY instead of raising — an unhandled
+-- exception in plpgsql rolls back everything the function did in this
+-- invocation, INCLUDING that same UPDATE, so raising here would silently
+-- undo the "mark it rejected" and leave the trade stuck in
+-- pending/pending_review forever. Callers (respond_trade/review_trade/
+-- vote_trade) don't raise after calling this either, for the same reason —
+-- the client re-fetches the trade afterward and checks its resulting
+-- status rather than relying on a thrown error.
 create or replace function public.execute_trade(tid bigint)
 returns void language plpgsql security definer set search_path = public as $$
 declare t public.trades;
@@ -47,10 +70,12 @@ begin
   if t.status not in ('pending','pending_review') then raise exception 'Trade is not awaiting execution'; end if;
   if exists (select 1 from jsonb_array_elements_text(t.offer) x
              where not exists (select 1 from public.draft_picks where league_id=t.league_id and player_id=x and user_id=t.from_user))
-    then update public.trades set status='rejected' where id=tid; raise exception 'Offer is no longer valid'; end if;
-  if exists (select 1 from jsonb_array_elements_text(t.request) x
+     or exists (select 1 from jsonb_array_elements_text(t.request) x
              where not exists (select 1 from public.draft_picks where league_id=t.league_id and player_id=x and user_id=t.to_user))
-    then update public.trades set status='rejected' where id=tid; raise exception 'Request is no longer valid'; end if;
+  then
+    update public.trades set status='rejected' where id=tid;
+    return;
+  end if;
   update public.draft_picks set user_id=t.to_user
     where league_id=t.league_id and user_id=t.from_user and player_id in (select jsonb_array_elements_text(t.offer));
   update public.draft_picks set user_id=t.from_user
@@ -58,7 +83,7 @@ begin
   update public.trades set status='accepted' where id=tid;
   insert into public.transactions(league_id, kind, detail, actor) values (t.league_id, 'trade', 'Trade completed', t.to_user);
 end; $$;
-revoke execute on function public.execute_trade(bigint) from public;
+revoke execute on function public.execute_trade(bigint) from public, anon, authenticated;
 
 -- Trade deadline check added; everything else unchanged from phase4c.
 create or replace function public.propose_trade(lid uuid, target uuid, offer jsonb, request jsonb)

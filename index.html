@@ -219,7 +219,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260825f";
+const BUILD_ID = "20260825g";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -2167,10 +2167,20 @@ function renderTradeBuilder(){
   }
   const cancel=el("button","btn sec"); cancel.style.width="100%"; cancel.style.marginTop="8px"; cancel.textContent="Cancel"; cancel.onclick=()=>{ app.tradeBuilder=null; ov.innerHTML=""; }; box.appendChild(cancel);
 }
+// execute_trade (called internally when there's no review) marks a trade
+// 'rejected' and returns normally — rather than throwing — if the offer/
+// request is no longer valid by the time it actually runs, so a successful
+// RPC call here does NOT guarantee the trade was accepted. Check the
+// resulting status instead of assuming success from accept=true.
 async function respondTrade(id, accept){
   try{ const {error}=await sb.rpc("respond_trade",{ tid:id, accept }); if(error) throw error;
     await loadTrades(); await loadDraft(); await loadLineup(); await loadTransactions();
-    toast(!accept?"Trade rejected":(app.trades.find(t=>t.id===id)||{}).status==="pending_review"?"Accepted — now awaiting review":"Trade accepted! ✅"); render(); }
+    const st=(app.trades.find(t=>t.id===id)||{}).status;
+    const msg = !accept ? "Trade rejected"
+      : st==="pending_review" ? "Accepted — now awaiting review"
+      : st==="rejected" ? "Accepted, but a player's no longer available — trade rejected"
+      : "Trade accepted! ✅";
+    toast(msg); render(); }
   catch(e){ toast(e.message||"Failed"); }
 }
 async function cancelTrade(id){
@@ -2179,12 +2189,22 @@ async function cancelTrade(id){
 }
 async function reviewTrade(id, approve){
   try{ const {error}=await sb.rpc("review_trade",{ tid:id, approve }); if(error) throw error;
-    await loadTrades(); await loadDraft(); await loadLineup(); await loadTransactions(); toast(approve?"Trade approved ✅":"Trade rejected"); render(); }
+    await loadTrades(); await loadDraft(); await loadLineup(); await loadTransactions();
+    const st=(app.trades.find(t=>t.id===id)||{}).status;
+    const msg = !approve ? "Trade rejected"
+      : st==="rejected" ? "Approved, but a player's no longer available — trade rejected"
+      : "Trade approved ✅";
+    toast(msg); render(); }
   catch(e){ toast(e.message||"Failed"); }
 }
 async function voteTrade(id, approve){
   try{ const {error}=await sb.rpc("vote_trade",{ tid:id, approve }); if(error) throw error;
-    await loadTrades(); await loadDraft(); await loadLineup(); await loadTransactions(); toast("Vote recorded"); render(); }
+    await loadTrades(); await loadDraft(); await loadLineup(); await loadTransactions();
+    const st=(app.trades.find(t=>t.id===id)||{}).status;
+    const msg = st==="accepted" ? "Vote recorded — majority reached, trade executed! ✅"
+      : st==="rejected" ? "Vote recorded — trade rejected"
+      : "Vote recorded";
+    toast(msg); render(); }
   catch(e){ toast(e.message||"Failed"); }
 }
 function tradeNames(ids){ return (ids||[]).map(playerNameOf).join(", ")||"—"; }
@@ -2350,11 +2370,16 @@ function startersForUser(uid, starterIds){
 // merges both into the same {week,home_user,away_user} shape so
 // weekOpponent()/realOtherMatchups() don't need to care which one it is.
 function matchupsForWeek(wk){
-  const reg=(app.schedule||[]).filter(g=>g.week===wk);
   const playoff=(app.playoffMatchups||[])
     .filter(m=>m.home_user && m.away_user && !m.is_bye && wk>=m.start_week && wk<=m.end_week)
     .map(m=>({week:wk, home_user:m.home_user, away_user:m.away_user}));
-  return [...reg, ...playoff];
+  // Playoff pairings take priority if both exist for this week — shouldn't
+  // normally overlap, but a commissioner setting regSeasonWeeks/playoffWeeks
+  // inconsistently (or lowering regSeasonWeeks after generating a longer
+  // schedule) could otherwise double-book a manager into two "games" the
+  // same week with no dedup.
+  if(playoff.length) return playoff;
+  return (app.schedule||[]).filter(g=>g.week===wk);
 }
 function weekOpponent(){
   const wk=app.currentWeek||1;
@@ -3368,7 +3393,13 @@ function computeBracketState(bracketName, seeds, startWeek, wpr, wk){
       // Lower seed number = better = "home", for display and as the tie-break winner.
       let homeSeed=seedA, awaySeed=seedB, homeUser=uidA, awayUser=uidB;
       if(seedA!=null && seedB!=null && seedB<seedA){ homeSeed=seedB; awaySeed=seedA; homeUser=uidB; awayUser=uidA; }
-      const isBye = !!homeUser !== !!awayUser;
+      // Byes are a STRUCTURAL round-1-only thing (a phantom seed with no
+      // real opponent at all). For round>0, "one side present" just means
+      // the other round's feeder match hasn't finished yet — treating that
+      // as a bye would crown the known side a winner before their actual
+      // opponent is even decided, for every bracket size that isn't a
+      // power of 2 (i.e. almost every real league).
+      const isBye = ri===0 && (!!homeUser !== !!awayUser);
       let winnerUid=null, winnerSeed=null;
       if(isBye){ winnerUid=homeUser||awayUser; winnerSeed=homeSeed!=null?homeSeed:awaySeed; }
       else if(homeUser && awayUser && wk>roundEnd){
@@ -3451,7 +3482,11 @@ function renderOneBracket(s, title, name, wpr){
         return;
       }
       if(!m.home_user || !m.away_user){
-        c.appendChild(el("div","",`<div style="padding:9px 0;border-top:1px solid var(--line);font-size:13px"><div><span class="muted">TBD</span></div><div class="muted" style="font-size:10px;margin:3px 0">vs</div><div><span class="muted">TBD</span></div></div>`));
+        // One side may already be known (advanced from an earlier round)
+        // while the other is still waiting on its own match to finish.
+        const homeSide=m.home_user?nameOf(m.home_user):'<span class="muted">TBD</span>';
+        const awaySide=m.away_user?nameOf(m.away_user):'<span class="muted">TBD</span>';
+        c.appendChild(el("div","",`<div style="padding:9px 0;border-top:1px solid var(--line);font-size:13px"><div>${homeSide}</div><div class="muted" style="font-size:10px;margin:3px 0">vs</div><div>${awaySide}</div></div>`));
         return;
       }
       const done=!!m.winner_user;

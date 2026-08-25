@@ -299,42 +299,25 @@ function isWaiverDue(lastIso) {
   return day === 3 || day === 4 || day === 5 || day === 6 || day === 0 || day === 1;
 }
 
-// One attempt at one claim against the league's current in-memory roster
-// state (claimedThisRun / rosterCounts) — mutates both on success so later
-// claims in the same run see an up-to-date picture without re-querying.
-async function tryClaim(claim, league, cap, rosterCounts, claimedThisRun, ownedIds) {
-  if (ownedIds.has(claim.add_player_id) || claimedThisRun.has(claim.add_player_id)) {
-    return { status: "failed", fail_reason: "Player was claimed by another manager first" };
+// One attempt at one claim — delegates the whole check-then-execute
+// sequence to process_one_waiver_claim (single atomic Postgres transaction,
+// row-locked on the claim). This used to be done here via several separate
+// REST round-trips (drop, insert, status patch), which meant: a pick_no
+// collision against a live user's concurrent make_pick/add_free_agent call
+// threw all the way up and aborted the rest of the run; a cancel_waiver_claim
+// call could race the swap already being in flight; and two of a manager's
+// own pending claims dropping the same player could both "succeed" against
+// stale in-memory bookkeeping even though the roster only actually had room
+// for one. Locking + doing it all in one transaction server-side closes
+// all three at once.
+async function tryClaim(claim) {
+  try {
+    const rows = await sb("rpc/process_one_waiver_claim", { method: "POST", body: JSON.stringify({ cid: claim.id }) });
+    const r = (rows && rows[0]) || {};
+    return { status: r.result_status || "failed", fail_reason: r.result_reason || "No result from processing" };
+  } catch (e) {
+    return { status: "failed", fail_reason: `Processing error: ${e.message}` };
   }
-  const cnt = rosterCounts[claim.user_id] || 0;
-  if (cnt >= cap && !claim.drop_player_id) {
-    return { status: "failed", fail_reason: "Roster full and no drop selected" };
-  }
-  if (claim.drop_player_id) {
-    await sb(`draft_picks?league_id=eq.${league.id}&user_id=eq.${claim.user_id}&player_id=eq.${claim.drop_player_id}`, { method: "DELETE" });
-    await sb("waiver_wire", {
-      method: "POST", headers: { Prefer: "resolution=merge-duplicates" },
-      body: JSON.stringify([{ league_id: league.id, player_id: claim.drop_player_id, player_name: claim.drop_player_name, dropped_at: new Date().toISOString() }]),
-    });
-    rosterCounts[claim.user_id] = cnt - 1;
-  }
-  const nextPick = await sb(`draft_picks?select=pick_no&league_id=eq.${league.id}&order=pick_no.desc&limit=1`);
-  const pickNo = (nextPick[0] ? nextPick[0].pick_no : 0) + 1;
-  await sb("draft_picks", {
-    method: "POST",
-    body: JSON.stringify([{ league_id: league.id, pick_no: pickNo, round: 0, user_id: claim.user_id,
-      player_id: claim.add_player_id, player_name: claim.add_player_name, pos: claim.add_pos, team: claim.add_team, headshot: claim.add_headshot }]),
-  });
-  rosterCounts[claim.user_id] = (rosterCounts[claim.user_id] || 0) + 1;
-  claimedThisRun.add(claim.add_player_id);
-  const teamName = (league.memberNames && league.memberNames[claim.user_id]) || "A team";
-  await sb("transactions", {
-    method: "POST",
-    body: JSON.stringify([{ league_id: league.id, kind: "add",
-      detail: `${teamName} won a waiver claim on ${claim.add_player_name}${claim.drop_player_id ? ` (dropped ${claim.drop_player_name})` : ""}`,
-      actor: claim.user_id }]),
-  });
-  return { status: "successful", fail_reason: null };
 }
 
 // Reverse Standings: worst record (then worst point differential) picks
@@ -368,11 +351,6 @@ async function processLeagueWaivers(league) {
   const { method, order } = buildPriorityOrder(league, memberIds);
 
   if (claims.length) {
-    const cap = (league.settings && league.settings.league && league.settings.league.rosterSize) || 16;
-    const picks = await sb(`draft_picks?select=user_id,player_id&league_id=eq.${league.id}`);
-    const rosterCounts = {}; const ownedIds = new Set();
-    picks.forEach((p) => { rosterCounts[p.user_id] = (rosterCounts[p.user_id] || 0) + 1; ownedIds.add(p.player_id); });
-    const claimedThisRun = new Set();
     const queues = {}; claims.forEach((c) => { (queues[c.user_id] = queues[c.user_id] || []).push(c); });
 
     let currentOrder = order.slice();
@@ -384,11 +362,7 @@ async function processLeagueWaivers(league) {
         const queue = queues[uid];
         if (!queue || !queue.length) continue;
         const claim = queue.shift();
-        const outcome = await tryClaim(claim, league, cap, rosterCounts, claimedThisRun, ownedIds);
-        await sb(`waiver_claims?id=eq.${claim.id}`, {
-          method: "PATCH",
-          body: JSON.stringify({ status: outcome.status, fail_reason: outcome.fail_reason, processed_at: new Date().toISOString() }),
-        });
+        const outcome = await tryClaim(claim); // status + fail_reason already persisted by the RPC itself
         progressed = true;
         if (outcome.status === "successful") { currentOrder.splice(i, 1); currentOrder.push(uid); }
         break; // order changed (or a claim was consumed) — restart the scan
@@ -433,31 +407,23 @@ async function resolveExpiredTradeReviews() {
       const votesFor = votes.filter((v) => v.approve).length;
       const votesAgainst = votes.filter((v) => !v.approve).length;
       if (votesAgainst > votesFor) {
-        await sb(`trades?id=eq.${t.id}`, { method: "PATCH", body: JSON.stringify({ status: "rejected" }) });
+        // Guarded by status=eq.pending_review: if a vote or commissioner
+        // action already resolved this trade in the gap between our SELECT
+        // above and now, this PATCH just matches zero rows instead of
+        // stomping an already-decided outcome back to "rejected".
+        await sb(`trades?id=eq.${t.id}&status=eq.pending_review`, { method: "PATCH", body: JSON.stringify({ status: "rejected" }) });
         console.log(`trade ${t.id}: review window expired, rejected (${votesAgainst} against vs ${votesFor} for)`);
         continue;
       }
-      const offerIds = t.offer || [], requestIds = t.request || [];
-      const fromPicks = await sb(`draft_picks?select=player_id&league_id=eq.${t.league_id}&user_id=eq.${t.from_user}`);
-      const toPicks = await sb(`draft_picks?select=player_id&league_id=eq.${t.league_id}&user_id=eq.${t.to_user}`);
-      const fromIds = new Set(fromPicks.map((p) => p.player_id)), toIds = new Set(toPicks.map((p) => p.player_id));
-      const stillValid = offerIds.every((id) => fromIds.has(id)) && requestIds.every((id) => toIds.has(id));
-      if (!stillValid) {
-        await sb(`trades?id=eq.${t.id}`, { method: "PATCH", body: JSON.stringify({ status: "rejected" }) });
-        console.log(`trade ${t.id}: review window expired, but rosters changed since — rejected`);
-        continue;
-      }
-      for (const pid of offerIds) {
-        await sb(`draft_picks?league_id=eq.${t.league_id}&user_id=eq.${t.from_user}&player_id=eq.${encodeURIComponent(pid)}`,
-          { method: "PATCH", body: JSON.stringify({ user_id: t.to_user }) });
-      }
-      for (const pid of requestIds) {
-        await sb(`draft_picks?league_id=eq.${t.league_id}&user_id=eq.${t.to_user}&player_id=eq.${encodeURIComponent(pid)}`,
-          { method: "PATCH", body: JSON.stringify({ user_id: t.from_user }) });
-      }
-      await sb(`trades?id=eq.${t.id}`, { method: "PATCH", body: JSON.stringify({ status: "accepted" }) });
-      await sb("transactions", { method: "POST", body: JSON.stringify([{ league_id: t.league_id, kind: "trade", detail: "Trade completed (review window expired, auto-approved)", actor: t.to_user }]) });
-      console.log(`trade ${t.id}: review window expired, auto-approved (${votesFor} for vs ${votesAgainst} against)`);
+      // Auto-approve path delegates to the same execute_trade() every other
+      // approval path uses (respond_trade/review_trade/vote_trade) — one
+      // atomic Postgres transaction instead of separate REST calls per
+      // player, so a mid-swap failure can't leave rosters half-swapped.
+      // It also re-validates status/ownership itself, so the race above
+      // is covered here too (raises "not awaiting execution" harmlessly
+      // if something else already resolved it, caught below).
+      await sb("rpc/execute_trade", { method: "POST", body: JSON.stringify({ tid: t.id }) });
+      console.log(`trade ${t.id}: review window expired, auto-approve attempted (${votesFor} for vs ${votesAgainst} against)`);
     } catch (e) {
       console.error(`trade ${t.id}: resolution failed:`, e.message);
     }
