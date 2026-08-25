@@ -219,7 +219,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260824y";
+const BUILD_ID = "20260824z";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -653,7 +653,13 @@ function confirmPUTarget(k,p,onConfirm){
 function usePUConfirmed(k,p){
   const cfg=POWERUPS[k];
   if(k==="hotstart"){
-    if(app.sim.gameSec>0 || app.sim.running){ toast("Set Hot Start before kickoff"); return; }
+    // "Pregame" for a real league means THIS player's own game hasn't
+    // kicked off yet (realCurrentQuarterFor returns 0) — the simulated-mode
+    // clock fields below are inert once app.realLeague is true (the
+    // simulated kickoff/pause/reset controls aren't shown for real leagues),
+    // so checking them here never actually blocked a live real player.
+    const started = app.realLeague ? realCurrentQuarterFor(p)>0 : (app.sim.gameSec>0 || app.sim.running);
+    if(started){ toast("Set Hot Start before "+p.name+"'s game kicks off"); return; }
     if(playerAssigned(p.id)){ toast(p.name+" already has a power-up this week"); return; }
     app.inv.hotstart--; app.sim.hotStart=p.id; app.armed=null;
     logPU("me","hotstart",p.name,false,1);
