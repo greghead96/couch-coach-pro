@@ -219,7 +219,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260824x";
+const BUILD_ID = "20260824y";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -417,7 +417,7 @@ let app = {
   leagueMatchup:null, schedTeam:"Your Team", pFilter:"ALL", pTeam:"ALL", pShowAll:false, pSearch:"", pSort:"rank", pView:"players", drafted:[], pStatTab:null,
   myTeam:"Your Team", oppTeam:"Burrow Bandits", realLeague:false,
   draft:null, draftChannel:null, isCommish:false, members:[], queue:[], draftView:"board", commishMode:false, lineup:null, lineupEdit:false, trades:[], tradeBuilder:null, transactions:[], teamTab:"lineup", txFilter:"all",
-  schedule:[], currentWeek:1, lineupsByUser:{}, waiverWire:[], waiverClaims:[],
+  schedule:[], currentWeek:1, lineupsByUser:{}, waiverWire:[], waiverClaims:[], profiles:{},
   powerupPicks:[], playerWeekStats:{}, playerGameState:{}, weeklyLineups:{}, statsPollId:null,
   pool:null, poolLoading:false, poolError:null, pDetail:null,
   nfl:{ games:null, loading:false, error:null, selected:null, gamecast:null, view:"plays", pollId:null, pollFor:null },
@@ -880,6 +880,11 @@ async function loadLeagueData(){
     app.oppTeam=others.length ? (others[0].team_name||"Opponent") : "(waiting for opponents)";
     LEAGUE.length=0;
     members.forEach(m=> LEAGUE.push({ team:m.team_name||"Team", w:0, l:0, pf:0, pa:0, streak:"—", pu:0, me:m.user_id===app.user.id }));
+    // Usernames — shown alongside team names (Standings, Matchup) since a
+    // team name rarely tells you who you're actually playing.
+    try{ const { data:profs } = await sb.from("profiles").select("id, display_name").in("id", members.map(m=>m.user_id));
+      app.profiles={}; (profs||[]).forEach(p=>{ app.profiles[p.id]=p.display_name; });
+    }catch(e){ app.profiles={}; }
     // load persisted league settings
     try{ const { data:lg } = await sb.from("leagues").select("settings, last_waiver_process, waiver_priority, standings_cache").eq("id", app.sbLeagueId).maybeSingle();
       if(lg && lg.settings){ ["scoring","league","powerups"].forEach(k=>{ if(lg.settings[k]) app.settings[k]={...app.settings[k], ...lg.settings[k]}; }); }
@@ -1138,7 +1143,7 @@ function renderMatchup(){
   syncRealPointsToPlayers();
   const s=$("screen"); if(!s) return; s.innerHTML="";
   const others = app.realLeague ? realOtherMatchups(app.currentWeek||1) : (app.sim.others||[]);
-  const all = [{your:true, a:app.myTeam, b:app.oppTeam}, ...others.map(m=>({your:false, ...m}))];
+  const all = [{your:true, a:app.myTeam, b:app.oppTeam, uidA:app.user&&app.user.id, uidB:weekOpponent()}, ...others.map(m=>({your:false, ...m}))];
   if(app.matchupIdx>=all.length) app.matchupIdx=0;
   const idx=app.matchupIdx; const m=all[idx];
   const done=app.sim.gameSec>=4*QSEC;
@@ -1170,10 +1175,12 @@ function renderMatchup(){
     : `<div class="q">${app.sim.gameSec===0&&!app.sim.running?"PREGAME":done?"FINAL":"Q"+q}</div>
        <div class="tt">${done?"0:00":fmt(rem)}</div>
        <div class="st">${done?"Final":app.sim.running?(m.your&&app.armed?"⚠ pick target":"LIVE"):"Paused"}</div>`;
+  const unameA = (app.realLeague && m.uidA) ? usernameOf(m.uidA) : "";
+  const unameB = (app.realLeague && m.uidB) ? usernameOf(m.uidB) : "";
   sb.innerHTML=`<div class="scoreboard">
-    <div class="ts me"><div class="nm">${m.a}</div><div class="pts">${lp.toFixed(1)}</div></div>
+    <div class="ts me"><div class="nm">${m.a}${unameA?` <span class="muted" style="font-size:11px">(${unameA})</span>`:""}</div><div class="pts">${lp.toFixed(1)}</div></div>
     <div class="clock">${clockHtml}</div>
-    <div class="ts op"><div class="nm">${m.b}</div><div class="pts">${rp.toFixed(1)}</div></div>
+    <div class="ts op"><div class="nm">${m.b}${unameB?` <span class="muted" style="font-size:11px">(${unameB})</span>`:""}</div><div class="pts">${rp.toFixed(1)}</div></div>
   </div>`;
   s.appendChild(sb);
 
@@ -1403,8 +1410,9 @@ function renderTeam(){
     };
 
     const hd=el("div","card");
-    hd.innerHTML=`<h2 class='title'>${app.myTeam} · Lineup</h2>
+    hd.innerHTML=`<h2 class='title'>${app.myTeam} · Lineup <span id="rtBtn" style="cursor:pointer;font-size:14px" title="Rename team">✏️</span></h2>
       <div class='muted' style='font-size:12px'>${edit?"Editing — tap a starter slot or a bench player to move them.":"Tap any player for options — info, trade, or drop."}</div>`;
+    hd.querySelector("#rtBtn").onclick=(e)=>{ e.stopPropagation(); openRenameTeamModal(); };
     const tg=el("button","btn"+(edit?"":" sec")); tg.style.width="100%"; tg.style.marginTop="10px"; tg.textContent=edit?"✓ Done Editing":"✏️ Set Lineup";
     tg.onclick=()=>{ app.lineupEdit=!app.lineupEdit; renderTeam(); };
     hd.appendChild(tg); s.appendChild(hd);
@@ -2033,6 +2041,30 @@ function renderTransactions(s){
   s.appendChild(c);
 }
 function teamNameOf(uid){ const m=app.members.find(x=>x.user_id===uid); return m?(m.team_name||"Team"):"Team"; }
+function usernameOf(uid){ return (app.profiles&&app.profiles[uid])||""; }
+function openRenameTeamModal(){
+  const ov=$("overlay");
+  const esc=(s)=>String(s||"").replace(/"/g,"&quot;");
+  ov.innerHTML=`<div class="modal"><div class="box" style="max-width:340px">
+    <div class="modal-x" id="rtClose">✕</div>
+    <div style="font-weight:800">Rename Your Team</div>
+    <div class="muted" style="font-size:12px;margin-top:4px">Change this anytime — it updates everywhere instantly.</div>
+    <input class="input" id="rtName" placeholder="Team name" value="${esc(app.myTeam)}" style="margin-top:10px"/>
+    <button class="btn" id="rtSave" style="width:100%;margin-top:10px">Save</button>
+  </div></div>`;
+  ov.querySelector("#rtClose").onclick=()=>{ ov.innerHTML=""; };
+  ov.querySelector("#rtSave").onclick=async ()=>{
+    const name=(ov.querySelector("#rtName").value||"").trim();
+    if(!name){ toast("Team name required"); return; }
+    const btn=ov.querySelector("#rtSave"); btn.disabled=true; btn.textContent="Saving…";
+    try{
+      const {error}=await sb.from("league_members").update({team_name:name}).eq("league_id",app.sbLeagueId).eq("user_id",app.user.id);
+      if(error) throw error;
+      app.myTeam=name; ov.innerHTML=""; toast("Team renamed!");
+      await loadLeagueData(); render();
+    }catch(e){ toast(e.message||"Rename failed"); btn.disabled=false; btn.textContent="Save"; }
+  };
+}
 function playerNameOf(pid){ const p=(app.draft?app.draft.picks:[]).find(x=>x.player_id===pid); return p?p.player_name:"player"; }
 function openTradeBuilder(pick){
   const others=app.members.filter(m=>m.user_id!==app.user.id);
@@ -2752,7 +2784,8 @@ function renderWaiversTab(s){
   c.appendChild(el("div","muted",`<div style="font-size:12px;margin-bottom:8px">Method: <b style="color:var(--gold)">${method}</b> · ${method==="Reverse standings"?"resets every week from current standings — worst record picks first":"persists — only a successful claim sends you to the back"}</div>`));
   order.forEach((uid,i)=>{
     const m=(app.members||[]).find(x=>x.user_id===uid);
-    const row=el("div","",`<div style="padding:8px 0;border-top:1px solid var(--line);font-size:13px">${i+1}. ${(m&&m.team_name)||"Team"}${uid===(app.user&&app.user.id)?' <span class="muted" style="font-size:11px">(you)</span>':''}</div>`);
+    const uname=usernameOf(uid);
+    const row=el("div","",`<div style="padding:8px 0;border-top:1px solid var(--line);font-size:13px">${i+1}. ${(m&&m.team_name)||"Team"}${uname?` <span class="muted" style="font-size:11px">(${uname})</span>`:""}${uid===(app.user&&app.user.id)?' <span class="muted" style="font-size:11px">(you)</span>':''}</div>`);
     c.appendChild(row);
   });
   const last=app.leagueLastWaiverProcess?new Date(app.leagueLastWaiverProcess):null;
@@ -2963,7 +2996,7 @@ function renderLeague(){
   s.appendChild(ts);
 
   if(app.leagueTab==="scoreboard"){
-    const matchups=[{a:app.myTeam,b:app.oppTeam,as:myTeamScore(),bs:oppTeamScore(),me:true}, ...(app.realLeague?realOtherMatchups(app.currentWeek||1):OTHER_MATCHUPS)];
+    const matchups=[{a:app.myTeam,b:app.oppTeam,as:myTeamScore(),bs:oppTeamScore(),me:true,uidA:app.user&&app.user.id,uidB:weekOpponent()}, ...(app.realLeague?realOtherMatchups(app.currentWeek||1):OTHER_MATCHUPS)];
     if(app.leagueMatchup!=null && matchups[app.leagueMatchup]){
       renderMatchupDetail(s, matchups[app.leagueMatchup]);
     } else {
@@ -2971,8 +3004,9 @@ function renderLeague(){
       if(app.realLeague && !app.schedule.length) s.appendChild(el("div","muted","<div style='font-size:11px;margin-bottom:10px;text-align:center'>Weekly matchups + scores populate once your commissioner generates the schedule.</div>"));
       matchups.forEach((m,i)=>{
         const c=el("div","card"); c.style.cursor="pointer";
-        c.innerHTML=`<div class="row"><div><b style="color:${m.me?'var(--you)':'var(--txt)'}">${m.a}</b></div><b>${(+m.as).toFixed(1)}</b></div>
-          <div class="row" style="margin-top:6px"><div><b style="color:${m.me?'var(--opp)':'var(--txt)'}">${m.b}</b></div><b>${(+m.bs).toFixed(1)}</b></div>
+        const unA=(app.realLeague && m.uidA)?usernameOf(m.uidA):"", unB=(app.realLeague && m.uidB)?usernameOf(m.uidB):"";
+        c.innerHTML=`<div class="row"><div><b style="color:${m.me?'var(--you)':'var(--txt)'}">${m.a}</b>${unA?` <span class="muted" style="font-size:11px">(${unA})</span>`:""}</div><b>${(+m.as).toFixed(1)}</b></div>
+          <div class="row" style="margin-top:6px"><div><b style="color:${m.me?'var(--opp)':'var(--txt)'}">${m.b}</b>${unB?` <span class="muted" style="font-size:11px">(${unB})</span>`:""}</div><b>${(+m.bs).toFixed(1)}</b></div>
           <div class="muted" style="font-size:10px;text-align:right;margin-top:4px">tap for lineups →</div>`;
         c.onclick=()=>{ app.leagueMatchup=i; renderLeague(); };
         s.appendChild(c);
@@ -2987,11 +3021,12 @@ function renderLeague(){
     if(app.realLeague) c.appendChild(el("div","muted","<div style='font-size:11px;margin-bottom:8px;color:var(--you)'>✓ Your real league members. Records fill in once games are scored.</div>"));
     c.appendChild(el("div","muted","<div style='font-size:11px;margin-bottom:8px'>💡 <b style='color:var(--gold)'>Coach Eff</b> = net fantasy points swung by power-ups this season (points gained + prevented). Higher = better power-up management.</div>"));
     const wrap=el("div"); wrap.style.overflowX="auto";
-    let html=`<table class="std"><tr><th>#</th><th>Team</th><th>W-L</th><th>PF</th><th>PA</th><th>Strk</th><th>Coach&nbsp;Eff</th></tr>`;
+    let html=`<table class="std"><tr><th>#</th><th>Team</th>${app.realLeague?"<th>Manager</th>":""}<th>W-L</th><th>PF</th><th>PA</th><th>Strk</th><th>Coach&nbsp;Eff</th></tr>`;
     getStandings().forEach((t,i)=>{
       const st=t.streak||""; const sc= st[0]==="W"?"var(--you)":st[0]==="L"?"var(--opp)":"var(--muted)";
       const pu=(t.pu!=null)?("+"+t.pu.toFixed(1)):"—";
-      html+=`<tr class="${t.me?'me':''}"><td>${i+1}</td><td>${t.team}</td><td>${t.w}-${t.l}</td><td>${t.pf}</td><td>${t.pa||"—"}</td><td style="color:${sc};font-weight:700">${st||"—"}</td><td style="color:var(--gold);font-weight:700;white-space:nowrap">${pu}</td></tr>`;
+      const mgrTd = app.realLeague ? `<td class="muted" style="font-size:12px">${usernameOf(t.uid)||"—"}</td>` : "";
+      html+=`<tr class="${t.me?'me':''}"><td>${i+1}</td><td>${t.team}</td>${mgrTd}<td>${t.w}-${t.l}</td><td>${t.pf}</td><td>${t.pa||"—"}</td><td style="color:${sc};font-weight:700">${st||"—"}</td><td style="color:var(--gold);font-weight:700;white-space:nowrap">${pu}</td></tr>`;
     });
     html+=`</table>`; wrap.innerHTML=html; c.appendChild(wrap); s.appendChild(c);
   } else if(app.leagueTab==="waivers"){
@@ -3115,10 +3150,11 @@ function renderMatchupDetail(s,m){
     aRost=m.me?myStarters:genRoster(m.a); bRost=m.me?oppStarters:genRoster(m.b);
   }
   const aScore=m.me?myTeamScore():(+m.as), bScore=m.me?oppTeamScore():(+m.bs);
+  const unA=(app.realLeague && m.uidA)?usernameOf(m.uidA):"", unB=(app.realLeague && m.uidB)?usernameOf(m.uidB):"";
   s.appendChild(el("div","card",`<div class="scoreboard">
-    <div class="ts me"><div class="nm">${m.a}</div><div class="pts">${aScore.toFixed(1)}</div></div>
+    <div class="ts me"><div class="nm">${m.a}${unA?` <span class="muted" style="font-size:11px">(${unA})</span>`:""}</div><div class="pts">${aScore.toFixed(1)}</div></div>
     <div class="clock"><div class="q">${app.realLeague?"WK "+(app.currentWeek||1):"WK 11"}</div><div class="st">${m.me?'your game':'league game'}</div></div>
-    <div class="ts op"><div class="nm">${m.b}</div><div class="pts">${bScore.toFixed(1)}</div></div></div>`));
+    <div class="ts op"><div class="nm">${m.b}${unB?` <span class="muted" style="font-size:11px">(${unB})</span>`:""}</div><div class="pts">${bScore.toFixed(1)}</div></div></div>`));
   const c=el("div","card");
   const head=el("div","row"); head.style.marginBottom="4px";
   head.innerHTML=`<span style="color:var(--you);font-size:12px;font-weight:700">${m.a}</span><span class="muted" style="font-size:10px">vs</span><span style="color:var(--opp);font-size:12px;font-weight:700">${m.b}</span>`;
