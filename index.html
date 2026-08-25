@@ -219,7 +219,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260825a";
+const BUILD_ID = "20260825b";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -1011,10 +1011,16 @@ function renderLeaguePicker(){
 function accountModal(){
   const ov=$("overlay"); const lg=app.myLeagues.find(m=>m.league_id===app.sbLeagueId);
   const code=app.leagueCode||(lg&&lg.leagues&&lg.leagues.join_code)||"";
+  // Falls back to auth signup metadata if profiles hasn't loaded yet (e.g.
+  // this modal opened before entering a league) — cosmetic only, the
+  // profiles table (not this) is the source of truth once you save.
+  const myUsername=(app.profiles&&app.profiles[app.user.id])
+    || (app.user.user_metadata&&app.user.user_metadata.display_name) || "";
   ov.innerHTML=`<div class="modal"><div class="box" style="max-width:340px">
     <div class="modal-x" id="acctClose">✕</div>
     <div style="font-size:34px">👤</div>
     <div style="font-weight:800;margin-top:6px">${app.user.email}</div>
+    <div class="muted" style="font-size:12px;margin-top:2px">Username: <b style="color:var(--txt)">${myUsername||"(not set)"}</b> <span id="unBtn" style="cursor:pointer" title="Edit username">✏️</span></div>
     <div class="muted" style="font-size:12px;margin-top:4px">League: ${app.connectedLeague}${lg?" · "+(lg.team_name||""):""}</div>
     <div style="font-size:13px;margin-top:8px">Invite code: <b style="color:var(--gold);letter-spacing:2px">${code}</b></div>
     <button class="btn sec" id="copyCodeBtn" style="width:100%;margin-top:10px">📋 Copy invite code</button>
@@ -1022,10 +1028,36 @@ function accountModal(){
     <button class="btn sec" id="switchLg" style="width:100%;margin-top:8px">Switch / Join League</button>
     <button class="btn sec" id="signOutBtn" style="width:100%;margin-top:8px">Sign Out</button></div></div>`;
   ov.querySelector("#copyCodeBtn").onclick=()=>copyCode(code);
+  ov.querySelector("#unBtn").onclick=()=>openRenameUsernameModal();
   const renameBtn=ov.querySelector("#renameBtn"); if(renameBtn) renameBtn.onclick=()=>openRenameTeamModal();
   ov.querySelector("#switchLg").onclick=()=>{ ov.innerHTML=""; unsubscribeDraft(); app.draft=null; app.realLeague=false; app.connectedLeague=null; app.sbLeagueId=null; render(); };
   ov.querySelector("#signOutBtn").onclick=()=>{ ov.innerHTML=""; signOut(); };
   ov.querySelector("#acctClose").onclick=()=>{ ov.innerHTML=""; };
+}
+function openRenameUsernameModal(){
+  const ov=$("overlay");
+  const esc=(s)=>String(s||"").replace(/"/g,"&quot;");
+  const cur=(app.profiles&&app.profiles[app.user.id])
+    || (app.user.user_metadata&&app.user.user_metadata.display_name) || "";
+  ov.innerHTML=`<div class="modal"><div class="box" style="max-width:340px">
+    <div class="modal-x" id="unClose">✕</div>
+    <div style="font-weight:800">Change Username</div>
+    <div class="muted" style="font-size:12px;margin-top:4px">Shown to other league members next to your team name, for transparency.</div>
+    <input class="input" id="unName" placeholder="Username" value="${esc(cur)}" style="margin-top:10px"/>
+    <button class="btn" id="unSave" style="width:100%;margin-top:10px">Save</button>
+  </div></div>`;
+  ov.querySelector("#unClose").onclick=()=>{ ov.innerHTML=""; };
+  ov.querySelector("#unSave").onclick=async ()=>{
+    const name=(ov.querySelector("#unName").value||"").trim();
+    if(!name){ toast("Username required"); return; }
+    const btn=ov.querySelector("#unSave"); btn.disabled=true; btn.textContent="Saving…";
+    try{
+      const {error}=await sb.from("profiles").update({display_name:name}).eq("id",app.user.id);
+      if(error) throw error;
+      app.profiles=app.profiles||{}; app.profiles[app.user.id]=name;
+      ov.innerHTML=""; toast("Username updated!"); render();
+    }catch(e){ toast(e.message||"Update failed"); btn.disabled=false; btn.textContent="Save"; }
+  };
 }
 async function signOut(){
   try{ await sb.auth.signOut(); }catch(e){}
