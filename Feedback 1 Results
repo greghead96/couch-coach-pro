@@ -18,3 +18,18 @@ Trades not landing — fixed (see above)
 Forgot-password wrong URL — not a code bug, see below
 Past-week points breakdown on player cards — now clickable
 Defensive scoring — reworked to ESPN's real values from your screenshots
+
+
+trades?select=*&league_id=eq.acd3d811-bb37-48eb-92c7-0af37e86c149&order=created_at.desc:1  Failed to load resource: the server responded with a status of 500 ()
+supabase-js@2:13  GET https://qonkkpsgjlhinzknpckw.supabase.co/rest/v1/trades?select=*&league_id=eq.acd3d811-bb37-48eb-92c7-0af37e86c149&order=created_at.desc 500 (Internal Server Error)
+(anonymous) @ supabase-js@2:13
+(anonymous) @ supabase-js@2:13
+await in (anonymous)
+(anonymous) @ supabase-js@2:7
+then @ supabase-js@2:7
+supabase-js@2:13  GET https://qonkkpsgjlhinzknpckw.supabase.co/rest/v1/trades?select=*&league_id=eq.acd3d811-bb37-48eb-92c7-0af37e86c149&order=created_at.desc 500 (Internal Server Error)
+(anonymous) @ supabase-js@2:13
+(anonymous) @ supabase-js@2:13
+await in (anonymous)
+(anonymous) @ supabase-js@2:7
+then @ supabase-js@2:7
