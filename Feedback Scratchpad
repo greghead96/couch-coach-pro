@@ -1,3 +1,14 @@
-I have to refresh every time the commish starts the draft or does something. As the draft is going and people make their picks I should be able to see it as it goes. While testing everyone had to refresh every time someone made a pick to see it and to show it was their turn.
-Also every time I type in the search bar it gets one letter and makes me click back in to the search bar...big issue there
+I have to refresh every time the commish starts the draft or does something. As the draft is going and people make their picks I should be able to see it as it goes. While testing everyone had to refresh every time someone made a pick to see it and to show it was their turn. 
+This will need to be across all pages. If someone picks up a player in the players tab I should not have to refresh to see it. If someone applies a powerup I should not have to refresh to see it. Any time a click is done it should be clear to everyone.
+
+Also every time I type in the search bar it gets one letter and makes me click back in to the search bar...big issue there if you are typing it shoould let you until you click out
+
 Every time we refresh the page it takes you out to the pick league page if you are in two leagues. When you refresh it should stay on the page you were last on.
+
+Need a place on your my team page to hold your waivers and be able to reorder priority as needed. 
+You should also be able to attempt to claim as many different players but choose the same drop and depedning on priority it will drop the player if you get the first guy you want and the 2nd claim will disappear but if your first claim doesn't go through because of priority then hopefully your second player gets claimed. 
+If niether are able to be claimed then you keep the player you were going to drop  
+
+Move the reset the draft button into the commish tab so it is not accidentally hit on the draft page
+
+Move the My Claims section from the league tab to the my teams tab next to trades
