@@ -102,6 +102,37 @@ begin
   return tid;
 end; $$;
 
+-- respond_trade: League-vote trades now post to League Activity the moment
+-- they enter review, since eligible voters (everyone except the two
+-- parties) need to actually find out a vote is open — Commissioner-review
+-- trades deliberately do NOT post here, only once execute_trade actually
+-- runs them (already the case, unchanged) — the rest of the league doesn't
+-- need advance notice of something only the commissioner acts on.
+create or replace function public.respond_trade(tid bigint, accept boolean)
+returns void language plpgsql security definer set search_path = public as $$
+declare t public.trades; mode text;
+begin
+  select * into t from public.trades where id = tid;
+  if not found then raise exception 'Trade not found'; end if;
+  if t.to_user <> auth.uid() then raise exception 'Only the recipient can respond'; end if;
+  if t.status <> 'pending' then raise exception 'Trade is no longer pending'; end if;
+  if not accept then update public.trades set status='rejected' where id=tid; return; end if;
+  select coalesce(l.settings->'league'->>'tradeReview','No review') into mode from public.leagues l where l.id=t.league_id;
+  if mode is null or mode = 'No review' then
+    perform public.execute_trade(tid);
+  else
+    update public.trades set status='pending_review', review_mode=mode, review_started_at=now() where id=tid;
+    if mode = 'League vote' then
+      insert into public.transactions(league_id, kind, detail, actor)
+        values (t.league_id, 'trade',
+          coalesce((select team_name from public.league_members where league_id=t.league_id and user_id=t.from_user), 'A team')
+          || ' ↔ ' || coalesce((select team_name from public.league_members where league_id=t.league_id and user_id=t.to_user), 'a team')
+          || ' trade is up for a league vote — tap to review and vote.',
+          t.from_user);
+    end if;
+  end if;
+end; $$;
+
 -- Marks which week the persisted waiver_priority reflects. Reverse
 -- Standings now persists its post-processing order too (previously only
 -- Rolling priority did) so a manager who skips claims while managers ahead

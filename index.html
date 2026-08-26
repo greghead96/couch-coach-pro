@@ -219,7 +219,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260825j";
+const BUILD_ID = "20260826a";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -1177,7 +1177,9 @@ function renderHome(){
     const tx=(app.transactions||[]).slice(0,8);
     if(!tx.length) act.appendChild(el("div","muted","<div style='font-size:13px'>No league activity yet — trades and drops show up here.</div>"));
     tx.forEach(t=>{ const ic=t.kind==="trade"?"🔁":t.kind==="drop"?"🗑️":"➕";
-      act.appendChild(el("div","",`<div style="padding:9px 0;border-top:1px solid var(--line);font-size:13px"><span style="margin-right:7px">${ic}</span>${t.detail}</div>`)); });
+      const row=el("div","",`<div style="padding:9px 0;border-top:1px solid var(--line);font-size:13px${t.kind==="trade"?";cursor:pointer":""}"><span style="margin-right:7px">${ic}</span>${t.detail}${t.kind==="trade"?' <span class="muted" style="font-size:11px">· tap to view →</span>':""}</div>`);
+      if(t.kind==="trade") row.onclick=()=>{ app.tab="team"; app.teamTab="trades"; render(); };
+      act.appendChild(row); });
   } else {
     ACTIVITY.forEach(a=> act.appendChild(el("div","",
       `<div style="padding:9px 0;border-top:1px solid var(--line);font-size:13px">
@@ -2256,7 +2258,13 @@ function renderTransactions(s){
   if(!rows.length) c.appendChild(el("div","muted","<div style='font-size:13px'>No transactions yet.</div>"));
   rows.slice(0,60).forEach(t=>{
     const ic = t.kind==="trade"?"🔁":t.kind==="drop"?"🗑️":"➕";
-    c.appendChild(el("div","",`<div style="padding:9px 0;border-top:1px solid var(--line);font-size:13px"><span style="margin-right:7px">${ic}</span>${t.detail}</div>`));
+    // Trade-kind entries (including "up for a league vote") link through to
+    // My Team → Trades, where the Needs Review section lists it — lets
+    // eligible voters jump straight there from the activity feed instead
+    // of hunting for it.
+    const row=el("div","",`<div style="padding:9px 0;border-top:1px solid var(--line);font-size:13px${t.kind==="trade"?";cursor:pointer":""}"><span style="margin-right:7px">${ic}</span>${t.detail}${t.kind==="trade"?' <span class="muted" style="font-size:11px">· tap to view →</span>':""}</div>`);
+    if(t.kind==="trade") row.onclick=()=>{ app.tab="team"; app.teamTab="trades"; render(); };
+    c.appendChild(row);
   });
   s.appendChild(c);
 }
