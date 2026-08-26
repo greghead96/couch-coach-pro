@@ -411,18 +411,35 @@ async function tryClaim(claim) {
 // a claim sends that manager to the back of the order for their remaining
 // claims (so one favorable position can't sweep every top target) — the
 // next week's Reverse Standings run still starts over from fresh standings.
-function buildPriorityOrder(league, memberIds) {
+function buildPriorityOrder(league, memberIds, draftOrder) {
   const method = (league.settings && league.settings.league && league.settings.league.waiver) || "Reverse standings";
-  if (method === "Rolling priority") {
+  // Reverse Standings normally recomputes fresh every run from current
+  // standings — EXCEPT within the same week: the whole point of "you moved
+  // up because managers ahead of you didn't claim" is that it STICKS for
+  // the rest of that week instead of sliding back the moment the next run
+  // recomputes from standings. waiver_priority_week marks which week the
+  // persisted waiver_priority reflects — matches league.current_week means
+  // "carry forward what last run ended with", a mismatch means "new week,
+  // recompute fresh" (handled below).
+  const sameWeek = league.waiver_priority_week != null && league.waiver_priority_week === league.current_week;
+  if (method === "Rolling priority" || sameWeek) {
     const saved = Array.isArray(league.waiver_priority) ? league.waiver_priority.filter((u) => memberIds.includes(u)) : [];
     const missing = memberIds.filter((u) => !saved.includes(u));
     return { method, order: [...saved, ...missing] };
   }
   const cache = Array.isArray(league.standings_cache) ? league.standings_cache : [];
   const byUid = {}; cache.forEach((r) => { byUid[r.uid] = r; });
+  // Before any real week has been played every team is tied 0-0-0 in the
+  // cache — with no further tiebreak, sorting an all-tied array "worst
+  // first" comes out identical to "best first", so Reverse Standings
+  // looked exactly like regular standings during preseason testing. Falls
+  // back to reversed original draft order for ties (last drafter picks
+  // first pre-Week-1), mirrored from index.html's computeWaiverOrder.
+  const order_ = Array.isArray(draftOrder) ? draftOrder : [];
+  const draftIdx = (uid) => { const i = order_.indexOf(uid); return i < 0 ? order_.length : i; };
   const order = memberIds.slice().sort((a, b) => {
     const ra = byUid[a] || { w: 0, pf: 0, pa: 0 }, rb = byUid[b] || { w: 0, pf: 0, pa: 0 };
-    return (ra.w - rb.w) || ((ra.pf - ra.pa) - (rb.pf - rb.pa)); // fewest wins / worst diff picks first
+    return (ra.w - rb.w) || ((ra.pf - ra.pa) - (rb.pf - rb.pa)) || (draftIdx(b) - draftIdx(a));
   });
   return { method, order };
 }
@@ -432,12 +449,14 @@ async function processLeagueWaivers(league) {
   const members = await sb(`league_members?select=user_id,team_name&league_id=eq.${league.id}`);
   const memberIds = members.map((m) => m.user_id);
   league.memberNames = {}; members.forEach((m) => { league.memberNames[m.user_id] = m.team_name || "A team"; });
-  const { method, order } = buildPriorityOrder(league, memberIds);
+  const drafts = await sb(`drafts?select=member_order&league_id=eq.${league.id}`);
+  const draftOrder = (drafts[0] && drafts[0].member_order) || [];
+  const { method, order } = buildPriorityOrder(league, memberIds, draftOrder);
 
+  let currentOrder = order.slice();
   if (claims.length) {
     const queues = {}; claims.forEach((c) => { (queues[c.user_id] = queues[c.user_id] || []).push(c); });
 
-    let currentOrder = order.slice();
     let progressed = true;
     while (progressed) {
       progressed = false;
@@ -452,17 +471,20 @@ async function processLeagueWaivers(league) {
         break; // order changed (or a claim was consumed) — restart the scan
       }
     }
-    if (method === "Rolling priority") {
-      await sb(`leagues?id=eq.${league.id}`, { method: "PATCH", body: JSON.stringify({ waiver_priority: currentOrder }) });
-    }
   }
-
-  await sb(`leagues?id=eq.${league.id}`, { method: "PATCH", body: JSON.stringify({ last_waiver_process: new Date().toISOString() }) });
+  // Persisted unconditionally (both methods, even a zero-claim run) — a
+  // Reverse Standings league needs this week's "effective order" on record
+  // even when nobody claimed, so a manager who skipped this run while
+  // others ahead claimed shows correctly bumped up for the REST of the
+  // week, not just for the instant this run finished.
+  await sb(`leagues?id=eq.${league.id}`, { method: "PATCH", body: JSON.stringify({
+    waiver_priority: currentOrder, waiver_priority_week: league.current_week,
+    last_waiver_process: new Date().toISOString() }) });
   console.log(`waivers: league ${league.id} processed (${method}), ${claims.length} claim(s)`);
 }
 
 async function processWaivers() {
-  const leagues = await sb("leagues?select=id,settings,waiver_priority,standings_cache,last_waiver_process");
+  const leagues = await sb("leagues?select=id,settings,waiver_priority,waiver_priority_week,current_week,standings_cache,last_waiver_process");
   for (const league of leagues) {
     if (!FORCE_WAIVERS && !isWaiverDue(league.last_waiver_process)) continue;
     try { await processLeagueWaivers(league); }

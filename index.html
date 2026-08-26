@@ -219,7 +219,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260825i";
+const BUILD_ID = "20260825j";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -419,7 +419,11 @@ let app = {
   settings:{
     scoring:{ passYdsPerPt:25, passTD:4, passInt:-2, rushYdsPerPt:10, rushTD:6,
               ppr:0.5, recYdsPerPt:10, recTD:6, fumLost:-2, twoPt:2,
-              sack:1, defInt:2, defTD:6,
+              sack:1, defInt:2, defTD:6, fumRec:2, defSafety:2, blockedKick:2, defTwoPtRet:2,
+              // Points-allowed bands — ESPN's real default values (source: DEF1.png/
+              // DEF2.png). 22-27 has no field: ESPN awards 0 there, matching what
+              // defBracket() falls through to when no band below matches.
+              pa0:10, pa1_6:8, pa7_13:6, pa14_17:4, pa18_21:2, pa28_34:-2, pa35_45:-6, pa46p:-8,
               fg0_39:3, fg40_49:4, fg50p:5, fgMiss:-1, xp:1, xpMiss:0 },
     league:{ teams:10, rosterSize:16, waiver:"Reverse standings",
              tradeDeadline:"Week 11", tradeReview:"Commissioner", regSeasonWeeks:14,
@@ -735,6 +739,24 @@ function render(){
   if(app.showConfirm){ renderConfirm(); return; }
   if(!app.user){ renderAuth(); return; }
   if(!app.connectedLeague){ renderLeaguePicker(); return; }
+  // Persist which league/tab you're on so a page refresh (or the mid-draft
+  // auto-update reload) drops you back where you were instead of always
+  // back at the league picker — matters most for anyone in 2+ leagues,
+  // since autoEnterIfSingle() only auto-rejoins when there's exactly one.
+  try{ localStorage.setItem("ccf_lastSession", JSON.stringify({
+    leagueId:app.sbLeagueId, name:app.connectedLeague, code:app.leagueCode,
+    tab:app.tab, teamTab:app.teamTab })); }catch(e){}
+  // render() is a full teardown/rebuild of the whole app div, and realtime
+  // events (live scoring, other managers' actions) call it from anywhere,
+  // including mid-keystroke in a search box — without this, a background
+  // score update while typing silently drops focus after every letter.
+  // Only text inputs with a stable id (search boxes below) are restorable;
+  // untouched otherwise.
+  const activeEl=document.activeElement;
+  const appEl=$("app");
+  const focusId = (activeEl && activeEl.id && appEl && appEl.contains(activeEl)) ? activeEl.id : null;
+  const selStart = focusId && activeEl.selectionStart!=null ? activeEl.selectionStart : null;
+  const selEnd = focusId && activeEl.selectionEnd!=null ? activeEl.selectionEnd : null;
   $("app").innerHTML="";
   const top=el("header","topbar");
   top.innerHTML=`<div class="brand">🛋️ Couch Coach</div>
@@ -751,6 +773,11 @@ function render(){
   if(app.tab!=="nfl") stopPoll();
   renderTab();
   renderNav();
+  if(focusId){
+    const restored=document.getElementById(focusId);
+    if(restored && restored.focus){ restored.focus();
+      if(selStart!=null && restored.setSelectionRange){ try{ restored.setSelectionRange(selStart, selEnd); }catch(e){} } }
+  }
 }
 function renderNav(){
   const tabs=[["home","Home","🏟️"],["nfl","NFL Live","🏈"],["matchup","Matchup","🥊"],["team","My Team","📋"],
@@ -783,6 +810,7 @@ function renderTab(){
   else if(app.tab==="draft"){ ensurePool(); renderDraft(); }
   else if(app.tab==="league") renderLeague();
   else if(app.tab==="store") renderStore();
+  else if(app.tab==="viewteam") renderViewTeam();
   else if(app.tab==="commish"){ if(app.isCommish) renderCommish(); else { app.tab="home"; renderHome(); } }
 }
 
@@ -887,11 +915,12 @@ async function loadLeagueData(){
       app.profiles={}; (profs||[]).forEach(p=>{ app.profiles[p.id]=p.display_name; });
     }catch(e){ app.profiles={}; }
     // load persisted league settings
-    try{ const { data:lg } = await sb.from("leagues").select("settings, last_waiver_process, waiver_priority, standings_cache").eq("id", app.sbLeagueId).maybeSingle();
+    try{ const { data:lg } = await sb.from("leagues").select("settings, last_waiver_process, waiver_priority, waiver_priority_week, current_week, standings_cache").eq("id", app.sbLeagueId).maybeSingle();
       if(lg && lg.settings){ ["scoring","league"].forEach(k=>{ if(lg.settings[k]) app.settings[k]={...app.settings[k], ...lg.settings[k]}; }); }
       if(app.settings.league.waiver==="FAAB") app.settings.league.waiver="Reverse standings"; // FAAB retired
       if(lg){ app.leagueLastWaiverProcess=lg.last_waiver_process?new Date(lg.last_waiver_process).getTime():0;
-        app.leagueWaiverPriority=lg.waiver_priority||[]; app.leagueStandingsCache=lg.standings_cache||[]; }
+        app.leagueWaiverPriority=lg.waiver_priority||[]; app.leagueStandingsCache=lg.standings_cache||[];
+        app.leagueWaiverPriorityWeek=lg.waiver_priority_week; app.leagueCurrentWeek=lg.current_week; }
     }catch(e){}
     app.realLeague=true;
   }catch(e){ app.realLeague=false; }
@@ -1025,7 +1054,7 @@ function accountModal(){
   ov.querySelector("#copyCodeBtn").onclick=()=>copyCode(code);
   ov.querySelector("#unBtn").onclick=()=>openRenameUsernameModal();
   const renameBtn=ov.querySelector("#renameBtn"); if(renameBtn) renameBtn.onclick=()=>openRenameTeamModal();
-  ov.querySelector("#switchLg").onclick=()=>{ ov.innerHTML=""; unsubscribeDraft(); app.draft=null; app.realLeague=false; app.connectedLeague=null; app.sbLeagueId=null; render(); };
+  ov.querySelector("#switchLg").onclick=()=>{ ov.innerHTML=""; unsubscribeDraft(); app.draft=null; app.realLeague=false; app.connectedLeague=null; app.sbLeagueId=null; try{localStorage.removeItem("ccf_lastSession");}catch(e){} render(); };
   ov.querySelector("#signOutBtn").onclick=()=>{ ov.innerHTML=""; signOut(); };
   ov.querySelector("#acctClose").onclick=()=>{ ov.innerHTML=""; };
 }
@@ -1057,6 +1086,7 @@ function openRenameUsernameModal(){
 async function signOut(){
   try{ await sb.auth.signOut(); }catch(e){}
   unsubscribeDraft();
+  try{localStorage.removeItem("ccf_lastSession");}catch(e){}
   app.user=null; app.connectedLeague=null; app.sbLeagueId=null; app.myLeagues=[]; app.draft=null; app.realLeague=false; app.authMode="login"; app.authErr=""; render();
 }
 
@@ -1212,11 +1242,15 @@ function renderMatchup(){
        <div class="st">${done?"Final":app.sim.running?(m.your&&app.armed?"⚠ pick target":"LIVE"):"Paused"}</div>`;
   const unameA = (app.realLeague && m.uidA) ? usernameOf(m.uidA) : "";
   const unameB = (app.realLeague && m.uidB) ? usernameOf(m.uidB) : "";
+  const meUid=app.user&&app.user.id;
+  const nmA = (app.realLeague && m.uidA && m.uidA!==meUid) ? `<span data-uid="${m.uidA}" style="cursor:pointer;text-decoration:underline dotted">${m.a}</span>` : m.a;
+  const nmB = (app.realLeague && m.uidB && m.uidB!==meUid) ? `<span data-uid="${m.uidB}" style="cursor:pointer;text-decoration:underline dotted">${m.b}</span>` : m.b;
   sb.innerHTML=`<div class="scoreboard">
-    <div class="ts me"><div class="nm">${m.a}${unameA?` <span class="muted" style="font-size:11px">(${unameA})</span>`:""}</div><div class="pts">${lp.toFixed(1)}</div></div>
+    <div class="ts me"><div class="nm">${nmA}${unameA?` <span class="muted" style="font-size:11px">(${unameA})</span>`:""}</div><div class="pts">${lp.toFixed(1)}</div></div>
     <div class="clock">${clockHtml}</div>
-    <div class="ts op"><div class="nm">${m.b}${unameB?` <span class="muted" style="font-size:11px">(${unameB})</span>`:""}</div><div class="pts">${rp.toFixed(1)}</div></div>
+    <div class="ts op"><div class="nm">${nmB}${unameB?` <span class="muted" style="font-size:11px">(${unameB})</span>`:""}</div><div class="pts">${rp.toFixed(1)}</div></div>
   </div>`;
+  sb.querySelectorAll("[data-uid]").forEach(el2=> el2.onclick=()=>openViewTeam(el2.dataset.uid));
   s.appendChild(sb);
 
   // Spectator view — read-only, no power-ups
@@ -1378,8 +1412,8 @@ function quarterStatLines(pos, stats){
   }
   return lines;
 }
-function openPlayerBoxScore(p){
-  const wk=app.currentWeek||1;
+function openPlayerBoxScore(p, wk, returnTo){
+  wk = wk || app.currentWeek || 1;
   const row=app.playerWeekStats[wk] && app.playerWeekStats[wk][p.id];
   const pu=app.powerupPicks.find(x=>x.week===wk && x.player_id===p.id);
   const ov=$("overlay");
@@ -1415,7 +1449,7 @@ function openPlayerBoxScore(p){
     </table></div>
     ${noData}
   </div></div>`;
-  ov.querySelector("#pbClose").onclick=()=>{ ov.innerHTML=""; };
+  ov.querySelector("#pbClose").onclick=()=>{ if(returnTo) returnTo(); else ov.innerHTML=""; };
 }
 
 // ============================ MY TEAM (managed in-app — no Sleeper) ============================
@@ -1425,9 +1459,10 @@ function renderTeam(){
   if(app.realLeague){
     const incomingN=(app.trades||[]).filter(t=>t.to_user===(app.user&&app.user.id)&&t.status==="pending").length;
     const tt=el("div","tabset");
-    [["lineup","Lineup"],["trades","Trades"+(incomingN?" ("+incomingN+")":"")]].forEach(([id,lab])=>{ const b=el("button",app.teamTab===id?"on":"",lab); b.onclick=()=>{app.teamTab=id;renderTeam();}; tt.appendChild(b); });
+    [["lineup","Lineup"],["trades","Trades"+(incomingN?" ("+incomingN+")":"")],["waivers","Waivers"]].forEach(([id,lab])=>{ const b=el("button",app.teamTab===id?"on":"",lab); b.onclick=()=>{app.teamTab=id;renderTeam();}; tt.appendChild(b); });
     s.appendChild(tt);
     if(app.teamTab==="trades"){ renderTrades(s); return; }
+    if(app.teamTab==="waivers"){ renderMyWaivers(s); return; }
     const myPicks=myDraftPicks();
     if(!myPicks.length){
       const empty=el("div","card");
@@ -1509,6 +1544,62 @@ function rosterRow(p,isStarter){
   return d;
 }
 
+// View-only version of another manager's team — reachable by tapping their
+// team name anywhere in the app. Same roster/bench layout as My Team's
+// Lineup view, but no lineup editing, drop, or waivers UI; tapping a
+// player opens the same action modal used for your own roster, which for
+// someone else's player offers Info + "Offer Trade" instead of Drop (see
+// playerActionModal's other-user branch).
+function openViewTeam(uid){
+  if(!uid) return;
+  if(uid===(app.user&&app.user.id)){ app.tab="team"; app.teamTab="lineup"; render(); return; }
+  app.viewTeamUid=uid; app._viewTeamFrom=(app.tab!=="viewteam")?app.tab:(app._viewTeamFrom||"league");
+  app.tab="viewteam"; render();
+}
+function renderViewTeam(){
+  const s=$("screen"); s.innerHTML="";
+  const uid=app.viewTeamUid;
+  const m=(app.members||[]).find(x=>x.user_id===uid);
+  const back=el("button","btn sec"); back.style.marginBottom="10px"; back.textContent="← Back"; back.style.width="100%";
+  back.onclick=()=>{ app.tab=app._viewTeamFrom||"league"; app.viewTeamUid=null; render(); };
+  s.appendChild(back);
+  if(!m){ s.appendChild(el("div","card","<div class='muted'>Team not found.</div>")); return; }
+  const uname=usernameOf(uid);
+  const picks=(app.draft?app.draft.picks:[]).filter(p=>p.user_id===uid);
+  const hd=el("div","card");
+  hd.innerHTML=`<h2 class="title">${m.team_name||"Team"}${uname?` <span class="muted" style="font-size:12px;font-weight:600">(${uname})</span>`:""}</h2>
+    <div class="muted" style="font-size:12px">View only — tap a player for stats, projections, or to offer a trade.</div>`;
+  s.appendChild(hd);
+  if(!picks.length){ s.appendChild(el("div","card","<div class='muted' style='font-size:13px'>Hasn't drafted yet.</div>")); return; }
+  const starterIds=app.lineupsByUser && app.lineupsByUser[uid];
+  const {startersOut, bench}=startersForUser(uid, starterIds);
+  const metaFor=(p)=>{
+    const gi=weekGameInfo({teamAb:p.teamAb}, app.currentWeek||1);
+    const oppTxt = gi ? " "+(gi.home?"vs ":"@ ")+gi.opp : "";
+    return `${p.teamAb||""}${oppTxt}${dvpBadge(p.pos, gi&&gi.opp)}`;
+  };
+  const toPick=(p)=>({user_id:uid, player_id:p.id, player_name:p.name, pos:p.pos, team:p.teamAb, headshot:p.headshot});
+  const sc=el("div","card"); sc.appendChild(el("h2","title","Starters"));
+  SLOTS.forEach((slot,i)=>{
+    const p=startersOut[i]; const isEmpty=!p || !p.id || p.id.indexOf("e_")===0;
+    const row=el("div","plr"+(isEmpty?"":" tappable")); row.style.gridTemplateColumns="42px 34px 1fr auto"; row.style.cursor="pointer";
+    if(!isEmpty) row.innerHTML=`<div class="pos">${slot.lbl}</div>${avatarHTML({pos:p.pos,name:p.name,headshot:p.headshot})}<div><div class="nm">${p.name}</div><div class="meta2">${metaFor(p)}</div></div><div class="muted" style="font-size:11px">ⓘ</div>`;
+    else row.innerHTML=`<div class="pos">${slot.lbl}</div><div class="avatar" style="background:var(--ink)"></div><div><div class="nm muted">— empty</div></div><div></div>`;
+    if(!isEmpty) row.onclick=()=>playerActionModal(toPick(p));
+    sc.appendChild(row);
+  });
+  s.appendChild(sc);
+  const bc=el("div","card"); bc.appendChild(el("h2","title","Bench ("+bench.length+")"));
+  if(!bench.length) bc.appendChild(el("div","muted","<div style='font-size:13px'>No bench players.</div>"));
+  bench.forEach(p=>{
+    const row=el("div","plr tappable"); row.style.gridTemplateColumns="34px 26px 1fr auto"; row.style.cursor="pointer";
+    row.innerHTML=`${avatarHTML({pos:p.pos,name:p.name,headshot:p.headshot})}<div class="pos">${p.pos}</div><div><div class="nm">${p.name}</div><div class="meta2">${metaFor(p)}</div></div><div class="muted" style="font-size:11px">ⓘ</div>`;
+    row.onclick=()=>playerActionModal(toPick(p));
+    bc.appendChild(row);
+  });
+  s.appendChild(bc);
+}
+
 // ============================ PLAYERS (in-app add/drop — no Sleeper) ============================
 const POS_ORDER={RB:0,WR:1,QB:2,TE:3,K:4,DEF:5};
 function ensurePool(){ if(!app.pool && !app.poolLoading && !app.poolError) loadPool(); }
@@ -1561,7 +1652,12 @@ async function openPlayerDetail(p){
   // it comes from the team schedule fetch below, not the /overview or
   // /gamelog athlete endpoints, so it doesn't need (or have) an espnId.
   if(!isDef && !p.espnId){ toast("No profile for "+p.name); return; }
-  app.pDetail={p, loading:true}; app.pDetailTab="season"; app.pSeasonStatTab=null; showDetailModal();
+  // Captured once, up front — the trade builder overwrites the SAME overlay
+  // div this modal renders into, so without this, tapping ⓘ mid-trade and
+  // then closing the player card blanks the overlay instead of resuming the
+  // trade (tradeBuilder state itself survives, but nothing re-renders it).
+  const returnTo = app.tradeBuilder ? renderTradeBuilder : null;
+  app.pDetail={p, loading:true, returnTo}; app.pDetailTab="season"; app.pSeasonStatTab=null; showDetailModal();
   let data=null, gl=null, sched=[], bye="";
   // Roster/lineup views only pass {espnId, teamAb, ...} (no teamId) — fall
   // back to the pool-derived ab->id map so the schedule fetch below doesn't
@@ -1587,7 +1683,7 @@ async function openPlayerDetail(p){
     schedOk=true;
   }catch(e){}
   const ok = isDef ? schedOk : !!data;
-  app.pDetail = ok ? {p, data, gl, sched, bye, loading:false, isDef} : {p, error:true, loading:false};
+  app.pDetail = ok ? {p, data, gl, sched, bye, loading:false, isDef, returnTo} : {p, error:true, loading:false, returnTo};
   showDetailModal();
 }
 // Matchup/spectate rows only carry {id, name, pos, teamAb, headshot} — no
@@ -1692,7 +1788,7 @@ function showDetailModal(){
       const g=byWk[w]; const oppTxt=g&&g.opp?("vs "+g.opp):"—";
       let scoreTxt='<span class="muted">—</span>';
       const raw = (app.realLeague && p.id) ? realWeekRawStats(p.id,w) : null;
-      if(app.realLeague && p.id){ const sc=playerWeekScore(p.id,w); if(sc!=null) scoreTxt=`<b style="color:var(--gold)">${sc.toFixed(1)}</b>`; }
+      if(app.realLeague && p.id){ const sc=playerWeekScore(p.id,w); if(sc!=null) scoreTxt=`<b class="pdWkPt" data-wk="${w}" style="color:var(--gold);cursor:pointer;text-decoration:underline dotted">${sc.toFixed(1)}</b>`; }
       const statCells=seasonCols.map(([key])=>{
         // No row at all for this week yet = not played/not polled = blank.
         // A row that DOES exist but never accrued this specific stat
@@ -1722,10 +1818,11 @@ function showDetailModal(){
     <div class="modal-x" id="pdClose">✕</div>
     <div style="overflow:auto;flex:1;min-height:0">${head}${body}</div>
   </div></div>`;
-  ov.querySelector("#pdClose").onclick=()=>{ app.pDetail=null; ov.innerHTML=""; };
+  ov.querySelector("#pdClose").onclick=()=>{ const back=D.returnTo; app.pDetail=null; if(back) back(); else ov.innerHTML=""; };
   const dt=ov.querySelector("#pDetailTabs"); if(dt) dt.querySelectorAll(".chip").forEach(b=> b.onclick=()=>{ app.pDetailTab=b.dataset.t; showDetailModal(); });
   const tw=ov.querySelector("#statTabs"); if(tw) tw.querySelectorAll(".chip").forEach(b=> b.onclick=()=>{ app.pStatTab=b.dataset.t; showDetailModal(); });
   const sst=ov.querySelector("#pSeasonStatTabs"); if(sst) sst.querySelectorAll(".chip").forEach(b=> b.onclick=()=>{ app.pSeasonStatTab=b.dataset.t; showDetailModal(); });
+  ov.querySelectorAll(".pdWkPt").forEach(b=> b.onclick=(e)=>{ e.stopPropagation(); openPlayerBoxScore(p, parseInt(b.dataset.wk,10), showDetailModal); });
 }
 function posChips(s){
   const chips=el("div","chips");
@@ -1830,7 +1927,7 @@ function renderPlayers(){
     <div class='muted' style='font-size:12px'>Real players from ESPN — tap any player for research (stats, projection, bye, news). Add to your bench; roster full → pick a drop.</div>`));
   if(!poolGuard(s,renderPlayers)) return;
   ensureAllTeamsWeekInfo(); ensureDvP();
-  const search=el("input","input"); search.placeholder="Search by player or team…"; search.value=app.pSearch||"";
+  const search=el("input","input"); search.id="plSearch"; search.placeholder="Search by player or team…"; search.value=app.pSearch||"";
   search.style.marginBottom="10px";
   search.oninput=()=>{ app.pSearch=search.value; renderPlayersList(); };
   s.appendChild(search);
@@ -1854,7 +1951,7 @@ function renderPlayersList(){
   // In a real league, "taken" players = everyone's draft picks; otherwise the mock roster
   const draftPicks = (app.realLeague && app.draft) ? app.draft.picks : [];
   const memMap = (app.draft && app.draft.memMap) || {};
-  const ownerOf = {}; draftPicks.forEach(p=>{ ownerOf[p.player_id]=memMap[p.user_id]||"Someone"; });
+  const ownerOf = {}; const pickByPid = {}; draftPicks.forEach(p=>{ ownerOf[p.player_id]=memMap[p.user_id]||"Someone"; pickByPid[p.player_id]=p; });
   const takenIds = new Set( app.realLeague ? draftPicks.map(p=>p.player_id) : [...myStarters,...myBench].map(p=>p.id) );
   const q=(app.pSearch||"").trim().toLowerCase();
   const matchesSearch=p=> !q || (p.name||"").toLowerCase().includes(q) || (p.teamAb||"").toLowerCase().includes(q);
@@ -1868,8 +1965,15 @@ function renderPlayersList(){
   pool.slice(0,60).forEach(p=>{
     const owner=app.realLeague && ownerOf[p.id];
     if(owner){
+      // Tap through to that player's card / a trade offer for them — no
+      // more remembering who owns who, just tap the 🔒 row. faRow's own
+      // row.onclick always opens the read-only info card regardless of the
+      // onClick param passed in (that one's wired to the button only, which
+      // gets replaced below) — override it explicitly to reach the fuller
+      // action modal (info + offer trade) instead.
       const row=faRow(p,"","",()=>{},false,"fa");
       const btnSlot=row.lastElementChild; btnSlot.innerHTML=`<span class="muted" style="font-size:11px;margin-left:auto">🔒 ${owner}</span>`;
+      if(pickByPid[p.id]) row.onclick=()=>playerActionModal(pickByPid[p.id]);
       c.appendChild(row);
     } else if(app.realLeague){
       const draftDone = app.draft && app.draft.status==="done";
@@ -1988,7 +2092,12 @@ async function loadDraft(){
 function subscribeDraft(){
   if(app.draftChannel || !app.sbLeagueId) return;
   const lid=app.sbLeagueId;
-  const refresh=async ()=>{ await loadDraft(); if(app.tab==="draft") renderDraft(); if(app.tab==="team") renderTeam(); };
+  // Covers live draft picks AND free-agent adds/drops (both land in
+  // draft_picks — it's the roster-ownership table) — needs a full render()
+  // like every other handler here, not just draft/team, since a pickup
+  // needs to disappear from the Players tab live too, not just the two
+  // tabs that show your own roster.
+  const refresh=async ()=>{ await loadDraft(); if(!app.showConfirm && app.user && app.connectedLeague) render(); };
   const refreshTrades=async ()=>{ const before=app.trades.filter(t=>t.to_user===app.user.id&&t.status==="pending").length;
     await loadTrades(); const after=app.trades.filter(t=>t.to_user===app.user.id&&t.status==="pending").length;
     if(after>before) toast("📨 New trade offer!");
@@ -2003,6 +2112,10 @@ function subscribeDraft(){
     if(!app.showConfirm && app.user && app.connectedLeague) render(); };
   const refreshLineups=async ()=>{ if(!app.realLeague) return; await loadLineup(); await loadAllLineups();
     if(!app.showConfirm && app.user && app.connectedLeague) render(); };
+  // Team renames and username changes — league_members/profiles were never
+  // even subscribed to before (on top of never being in the realtime
+  // publication at all, fixed in phase8's SQL), so neither ever pushed live.
+  const refreshMembers=async ()=>{ await loadLeagueData(); if(!app.showConfirm && app.user && app.connectedLeague) render(); };
   app.draftChannel=sb.channel("draft-"+lid)
     .on("postgres_changes",{event:"*",schema:"public",table:"draft_picks",filter:"league_id=eq."+lid}, refresh)
     .on("postgres_changes",{event:"*",schema:"public",table:"drafts",filter:"league_id=eq."+lid}, refresh)
@@ -2018,6 +2131,8 @@ function subscribeDraft(){
     .on("postgres_changes",{event:"*",schema:"public",table:"waiver_wire",filter:"league_id=eq."+lid}, refreshWaivers)
     .on("postgres_changes",{event:"*",schema:"public",table:"playoff_matchups",filter:"league_id=eq."+lid}, refreshPlayoffs)
     .on("postgres_changes",{event:"*",schema:"public",table:"trade_votes"}, refreshTradeVotes)
+    .on("postgres_changes",{event:"*",schema:"public",table:"league_members",filter:"league_id=eq."+lid}, refreshMembers)
+    .on("postgres_changes",{event:"*",schema:"public",table:"profiles"}, refreshMembers)
     .subscribe();
 }
 function unsubscribeDraft(){ if(app.draftChannel){ try{ sb.removeChannel(app.draftChannel); }catch(e){} app.draftChannel=null; } }
@@ -2070,7 +2185,18 @@ function allowedDraftPositions(userId){
   return { set, labels:empty.map(f=>f.lbl) };
 }
 function playerActionModal(pick){
-  if(pick.user_id!==(app.user&&app.user.id)){ openPlayerDetail({id:pick.player_id,espnId:(pick.player_id||"").replace(/^e/,""),name:pick.player_name,pos:pick.pos,teamAb:pick.team,headshot:pick.headshot}); return; }
+  if(pick.user_id!==(app.user&&app.user.id)){
+    const ov2=$("overlay");
+    ov2.innerHTML=`<div class="modal"><div class="box" style="max-width:340px">
+      <div style="display:flex;align-items:center;gap:10px;text-align:left">${avatarHTML({pos:pick.pos,name:pick.player_name,headshot:pick.headshot})}<div><div style="font-weight:800">${pick.player_name}</div><div class="muted" style="font-size:12px">${pick.pos} · ${pick.team||""}</div></div></div>
+      <button class="btn sec" id="paInfo2" style="width:100%;margin-top:14px">📊 Player Info</button>
+      ${app.realLeague?`<button class="btn" id="paTrade2" style="width:100%;margin-top:8px">🔁 Offer Trade for ${pick.player_name}</button>`:""}
+      <button class="btn sec" id="paCancel2" style="width:100%;margin-top:8px">Cancel</button></div></div>`;
+    ov2.querySelector("#paInfo2").onclick=()=> openPlayerDetail({id:pick.player_id,espnId:(pick.player_id||"").replace(/^e/,""),name:pick.player_name,pos:pick.pos,teamAb:pick.team,headshot:pick.headshot});
+    const tb2=ov2.querySelector("#paTrade2"); if(tb2) tb2.onclick=()=> openTradeBuilderForTarget(pick);
+    ov2.querySelector("#paCancel2").onclick=()=>{ ov2.innerHTML=""; };
+    return;
+  }
   const ov=$("overlay");
   ov.innerHTML=`<div class="modal"><div class="box" style="max-width:340px">
     <div style="display:flex;align-items:center;gap:10px;text-align:left">${avatarHTML({pos:pick.pos,name:pick.player_name,headshot:pick.headshot})}<div><div style="font-weight:800">${pick.player_name}</div><div class="muted" style="font-size:12px">${pick.pos} · ${pick.team||""}</div></div></div>
@@ -2164,6 +2290,15 @@ function openTradeBuilder(pick){
   const others=app.members.filter(m=>m.user_id!==app.user.id);
   if(!others.length){ toast("No other managers to trade with yet"); return; }
   app.tradeBuilder={ to:others[0].user_id, offer:new Set(pick?[pick.player_id]:[]), request:new Set(), step:1 };
+  renderTradeBuilder();
+}
+// Starts a trade FOR a specific player you don't own — from a viewed
+// team's roster, or from a locked 🔒 row on the Players tab. Pre-selects
+// that player on the request side and jumps straight to step 1 (choosing
+// what to offer) instead of starting empty.
+function openTradeBuilderForTarget(pick){
+  if(!myDraftPicks().length){ toast("You need to draft a roster before proposing trades"); return; }
+  app.tradeBuilder={ to:pick.user_id, offer:new Set(), request:new Set([pick.player_id]), step:1 };
   renderTradeBuilder();
 }
 function tbRow(p, selected, onToggle){
@@ -2457,8 +2592,16 @@ function setupRealMatchup(){
 // attributing the gain to whichever quarter is live right now). Defense
 // "points allowed" is exact (from the real linescore), not diffed.
 function defBracket(pa){
-  if(pa<=0) return 10; if(pa<=6) return 7; if(pa<=13) return 4;
-  if(pa<=20) return 1; if(pa<=27) return 0; if(pa<=34) return -1; return -4;
+  const sc=app.settings.scoring;
+  if(pa<=0) return sc.pa0!=null?sc.pa0:10;
+  if(pa<=6) return sc.pa1_6!=null?sc.pa1_6:8;
+  if(pa<=13) return sc.pa7_13!=null?sc.pa7_13:6;
+  if(pa<=17) return sc.pa14_17!=null?sc.pa14_17:4;
+  if(pa<=21) return sc.pa18_21!=null?sc.pa18_21:2;
+  if(pa<=27) return 0; // ESPN awards 0 for 22-27 — no separate setting
+  if(pa<=34) return sc.pa28_34!=null?sc.pa28_34:-2;
+  if(pa<=45) return sc.pa35_45!=null?sc.pa35_45:-6;
+  return sc.pa46p!=null?sc.pa46p:-8;
 }
 function parseMadeAttempted(str){
   const m=/^(\d+)\s*\/\s*(\d+)$/.exec(String(str||"").trim());
@@ -3027,39 +3170,68 @@ function syncStandingsCache(rows){
   app._lastStandingsPush=key;
   sb.rpc("sync_standings_cache",{lid:app.sbLeagueId, standings:snap}).then(({error})=>{ if(error) app._lastStandingsPush=null; });
 }
-// Worst-first order for waiver priority. Reverse Standings recomputes live
-// from getRealStandings() (best-first, so reversed); Rolling priority uses
-// the persisted list the background job maintains (see phase5 SQL /
-// poll-scores.js's buildPriorityOrder — same logic, mirrored here for
-// display since the server-side run is the one that actually matters).
+// Worst-first order for waiver priority. Both methods use the persisted
+// list the background job maintains once it's current for this week;
+// Reverse Standings additionally recomputes fresh from getRealStandings()
+// the moment a new week starts (see phase5 SQL / poll-scores.js's
+// buildPriorityOrder — same logic, mirrored here for display since the
+// server-side run is the one that actually matters).
 function computeWaiverOrder(){
   const method=(app.settings.league&&app.settings.league.waiver)||"Reverse standings";
   const memberIds=(app.members||[]).map(m=>m.user_id);
   let order;
-  if(method==="Rolling priority"){
+  // Reverse Standings carries forward this week's already-rotated order
+  // (see poll-scores.js's buildPriorityOrder) once it's been through at
+  // least one processing run this week — same "persist unless the week
+  // just turned over" rule as Rolling priority, so a manager who skipped
+  // claims while others ahead claimed shows correctly bumped up for the
+  // rest of the week instead of visually reverting to raw standings.
+  const sameWeek = app.leagueWaiverPriorityWeek!=null && app.leagueWaiverPriorityWeek===app.leagueCurrentWeek;
+  if(method==="Rolling priority" || sameWeek){
     const saved=(app.leagueWaiverPriority||[]).filter(u=>memberIds.includes(u));
     const missing=memberIds.filter(u=>!saved.includes(u));
     order=[...saved,...missing];
   } else {
-    order=getRealStandings().slice().reverse().map(r=>r.uid);
+    // Before any games are played every team is tied 0-0-0 — with no other
+    // tiebreak, a stable "worst first" sort of an all-tied array comes out
+    // IDENTICAL to "best first" (reversing a full tie changes nothing),
+    // so during preseason testing Reverse Standings looked exactly like
+    // regular standings. Ties fall back to reversed original draft order
+    // (last drafter picks first pre-Week-1) — same convention ESPN/Sleeper
+    // use before there's a real record to sort by.
+    const draftOrder=(app.draft&&app.draft.order)||[];
+    const draftIdx=(uid)=>{ const i=draftOrder.indexOf(uid); return i<0?draftOrder.length:i; };
+    order=getRealStandings().slice()
+      .sort((a,b)=> (a.w-b.w) || ((a.pf-a.pa)-(b.pf-b.pa)) || (draftIdx(b.uid)-draftIdx(a.uid)))
+      .map(r=>r.uid);
   }
   return {method, order};
 }
+// League tab's Waivers sub-tab — order only. Your own pending claims and
+// recent results moved to the My Team tab (see renderMyWaivers) since they
+// were confusingly split from Trades before and everyone else's claims
+// have no business being here anyway (they're private until they resolve).
 function renderWaiversTab(s){
   const {method, order}=computeWaiverOrder();
   const c=el("div","card");
   c.appendChild(el("h2","title","📋 Waiver Order"));
-  c.appendChild(el("div","muted",`<div style="font-size:12px;margin-bottom:8px">Method: <b style="color:var(--gold)">${method}</b> · ${method==="Reverse standings"?"resets every week from current standings — worst record picks first":"persists — only a successful claim sends you to the back"}</div>`));
+  c.appendChild(el("div","muted",`<div style="font-size:12px;margin-bottom:8px">Method: <b style="color:var(--gold)">${method}</b> · ${method==="Reverse standings"?"worst record picks first — a manager who skips claims while others ahead claim moves up for the rest of the week":"persists — only a successful claim sends you to the back"}</div>`));
   order.forEach((uid,i)=>{
     const m=(app.members||[]).find(x=>x.user_id===uid);
     const uname=usernameOf(uid);
-    const row=el("div","",`<div style="padding:8px 0;border-top:1px solid var(--line);font-size:13px">${i+1}. ${(m&&m.team_name)||"Team"}${uname?` <span class="muted" style="font-size:11px">(${uname})</span>`:""}${uid===(app.user&&app.user.id)?' <span class="muted" style="font-size:11px">(you)</span>':''}</div>`);
+    const isMe=uid===(app.user&&app.user.id);
+    const nameHtml = isMe ? ((m&&m.team_name)||"Team") : `<span data-uid="${uid}" style="cursor:pointer;text-decoration:underline dotted">${(m&&m.team_name)||"Team"}</span>`;
+    const row=el("div","",`<div style="padding:8px 0;border-top:1px solid var(--line);font-size:13px">${i+1}. ${nameHtml}${uname?` <span class="muted" style="font-size:11px">(${uname})</span>`:""}${isMe?' <span class="muted" style="font-size:11px">(you)</span>':''}</div>`);
+    const nm=row.querySelector("span[data-uid]"); if(nm) nm.onclick=()=>openViewTeam(uid);
     c.appendChild(row);
   });
   const last=app.leagueLastWaiverProcess?new Date(app.leagueLastWaiverProcess):null;
   c.appendChild(el("div","muted",`<div style="font-size:11px;margin-top:10px">${last?"Last processed "+last.toLocaleString():"Not processed yet"} · claims process automatically, weekly.</div>`));
   s.appendChild(c);
-
+}
+// My Team tab's Waivers sub-tab — your own pending claims (reorderable) and
+// your recent results. Moved here from the League tab, next to Trades.
+function renderMyWaivers(s){
   const mine=(app.waiverClaims||[]).filter(x=>x.status==="pending" && x.user_id===(app.user&&app.user.id)).sort((a,b)=>a.priority-b.priority);
   const cc=el("div","card");
   cc.appendChild(el("h2","title","Your Pending Claims"));
@@ -3072,14 +3244,20 @@ function renderWaiversTab(s){
     const up=el("button","btn sm sec","↑"); up.disabled=i===0; up.onclick=()=>reorderClaim(mine,i,-1);
     const dn=el("button","btn sm sec","↓"); dn.disabled=i===mine.length-1; dn.onclick=()=>reorderClaim(mine,i,1);
     const cancel=el("button","btn sm sec","✕"); cancel.onclick=async()=>{
-      try{ const {error}=await sb.rpc("cancel_waiver_claim",{cid:cl.id}); if(error) throw error; await loadWaivers(); renderLeague(); }
+      try{ const {error}=await sb.rpc("cancel_waiver_claim",{cid:cl.id}); if(error) throw error; await loadWaivers(); renderTeam(); }
       catch(e){ toast(e.message||"Cancel failed"); } };
     btns.append(up,dn,cancel); row.appendChild(btns);
     cc.appendChild(row);
   });
   s.appendChild(cc);
 
-  const history=(app.waiverClaims||[]).filter(x=>x.status!=="pending" && x.user_id===(app.user&&app.user.id)).slice(0,10);
+  // Sorted by processed_at, not the array's incoming order — waiver_claims
+  // loads ordered by each claim's own PRIORITY (1,2,3... per user), which
+  // interleaves unpredictably across different users/claims and doesn't
+  // reflect when a claim actually ran; the most recently processed claim
+  // could easily land second or third in that raw order.
+  const history=(app.waiverClaims||[]).filter(x=>x.status!=="pending" && x.user_id===(app.user&&app.user.id))
+    .sort((a,b)=> new Date(b.processed_at||b.created_at) - new Date(a.processed_at||a.created_at)).slice(0,10);
   if(history.length){
     const hc=el("div","card"); hc.appendChild(el("h2","title","Recent Claim Results"));
     history.forEach(cl=>{
@@ -3094,7 +3272,7 @@ async function reorderClaim(mine, i, dir){
   const j=i+dir; if(j<0||j>=mine.length) return;
   const ids=mine.map(x=>x.id);
   const tmp=ids[i]; ids[i]=ids[j]; ids[j]=tmp;
-  try{ const {error}=await sb.rpc("reorder_waiver_claims",{lid:app.sbLeagueId, ordered_ids:ids}); if(error) throw error; await loadWaivers(); renderLeague(); }
+  try{ const {error}=await sb.rpc("reorder_waiver_claims",{lid:app.sbLeagueId, ordered_ids:ids}); if(error) throw error; await loadWaivers(); renderTeam(); }
   catch(e){ toast(e.message||"Reorder failed"); }
 }
 function openBenchMove(pick){
@@ -3187,28 +3365,8 @@ function renderDraft(){
   }
   board.appendChild(grid); s.appendChild(board);
 
-  if(app.isCommish && (live||done)){
-    const rb=el("button","btn sec"); rb.style.width="100%"; rb.style.margin="4px 0 12px"; rb.textContent="⚠️ Reset League for New Season (commissioner)";
-    rb.onclick=async ()=>{
-      const warn="⚠️ This resets the ENTIRE league, not just the draft:\n\n"
-        +"• Every draft pick — everyone's roster goes to zero\n"
-        +"• All power-up usage and history\n"
-        +"• Saved lineups\n"
-        +"• Waiver claims and waiver history\n"
-        +"• Trades and votes\n"
-        +"• The playoff bracket\n"
-        +"• The transaction log\n"
-        +"• Current week resets back to 1\n"
-        +"• Preseason test stats (real-season stats already in progress for other leagues are untouched)\n\n"
-        +"This cannot be undone. Everyone will need to redraft. Continue?";
-      if(!confirm(warn)) return;
-      try{ const {error}=await sb.rpc("reset_draft",{lid:app.sbLeagueId}); if(error) throw error;
-        app.queue=[]; saveQueue();
-        await Promise.all([loadDraft(), loadLeagueData(), loadWaivers(), loadTrades(), loadPlayoffMatchups(), loadTransactions(), loadSchedule()]);
-        toast("League reset — ready for a fresh draft"); render(); }
-      catch(e){ toast(e.message||"Reset failed"); } };
-    s.appendChild(rb);
-  }
+  // Reset League moved to the Commish tab (renderCommish) — it was too easy
+  // to hit by accident sitting right on the draft board.
   if(!live) return;
 
   const draftedSet=new Set(D.picks.map(p=>p.player_id));
@@ -3240,9 +3398,14 @@ function renderDraft(){
     tg.onclick=()=>{ app.commishMode=!app.commishMode; renderDraft(); };
     s.appendChild(tg);
   }
-  const search=el("input","input"); search.placeholder="Search by player or team…"; search.value=app.pSearch||"";
+  const search=el("input","input"); search.id="dSearch"; search.placeholder="Search by player or team…"; search.value=app.pSearch||"";
   search.style.marginBottom="10px";
-  search.oninput=()=>{ app.pSearch=search.value; renderDraft(); };
+  // Unlike the Players tab (which re-renders a separate sub-list), the draft
+  // board's search re-renders this whole screen on every keystroke — that
+  // recreates this exact input, so without manually restoring focus/cursor
+  // afterward, typing a second letter lands nowhere.
+  search.oninput=()=>{ app.pSearch=search.value; const pos=search.selectionStart; renderDraft();
+    const r=document.getElementById("dSearch"); if(r){ r.focus(); try{ r.setSelectionRange(pos,pos); }catch(e){} } };
   s.appendChild(search);
   const teamRow=el("div","row"); teamRow.style.marginBottom="10px";
   const teamSel=el("select","input"); teamSel.style.marginBottom="0";
@@ -3288,10 +3451,15 @@ function renderLeague(){
       matchups.forEach((m,i)=>{
         const c=el("div","card"); c.style.cursor="pointer";
         const unA=(app.realLeague && m.uidA)?usernameOf(m.uidA):"", unB=(app.realLeague && m.uidB)?usernameOf(m.uidB):"";
-        c.innerHTML=`<div class="row"><div><b style="color:${m.me?'var(--you)':'var(--txt)'}">${m.a}</b>${unA?` <span class="muted" style="font-size:11px">(${unA})</span>`:""}</div><b>${(+m.as).toFixed(1)}</b></div>
-          <div class="row" style="margin-top:6px"><div><b style="color:${m.me?'var(--opp)':'var(--txt)'}">${m.b}</b>${unB?` <span class="muted" style="font-size:11px">(${unB})</span>`:""}</div><b>${(+m.bs).toFixed(1)}</b></div>
+        const nameA = (app.realLeague && m.uidA && !m.me) ? `<b data-uid="${m.uidA}" style="color:${m.me?'var(--you)':'var(--txt)'};cursor:pointer;text-decoration:underline dotted">${m.a}</b>` : `<b style="color:${m.me?'var(--you)':'var(--txt)'}">${m.a}</b>`;
+        const nameB = (app.realLeague && m.uidB && !m.me) ? `<b data-uid="${m.uidB}" style="color:${m.me?'var(--opp)':'var(--txt)'};cursor:pointer;text-decoration:underline dotted">${m.b}</b>` : `<b style="color:${m.me?'var(--opp)':'var(--txt)'}">${m.b}</b>`;
+        c.innerHTML=`<div class="row"><div>${nameA}${unA?` <span class="muted" style="font-size:11px">(${unA})</span>`:""}</div><b>${(+m.as).toFixed(1)}</b></div>
+          <div class="row" style="margin-top:6px"><div>${nameB}${unB?` <span class="muted" style="font-size:11px">(${unB})</span>`:""}</div><b>${(+m.bs).toFixed(1)}</b></div>
           <div class="muted" style="font-size:10px;text-align:right;margin-top:4px">tap for lineups →</div>`;
         c.onclick=()=>{ app.leagueMatchup=i; renderLeague(); };
+        // Tap a team name specifically to view their roster instead of
+        // drilling into the matchup lineup comparison.
+        c.querySelectorAll("b[data-uid]").forEach(b=> b.onclick=(e)=>{ e.stopPropagation(); openViewTeam(b.dataset.uid); });
         s.appendChild(c);
       });
     }
@@ -3309,9 +3477,13 @@ function renderLeague(){
       const st=t.streak||""; const sc= st[0]==="W"?"var(--you)":st[0]==="L"?"var(--opp)":"var(--muted)";
       const pu=(t.pu!=null)?("+"+t.pu.toFixed(1)):"—";
       const mgrTd = app.realLeague ? `<td class="muted" style="font-size:12px">${usernameOf(t.uid)||"—"}</td>` : "";
-      html+=`<tr class="${t.me?'me':''}"><td>${i+1}</td><td>${t.team}</td>${mgrTd}<td>${t.w}-${t.l}</td><td>${t.pf}</td><td>${t.pa||"—"}</td><td style="color:${sc};font-weight:700">${st||"—"}</td><td style="color:var(--gold);font-weight:700;white-space:nowrap">${pu}</td></tr>`;
+      const teamTd = (app.realLeague && t.uid && !t.me) ? `<td data-uid="${t.uid}" style="cursor:pointer;text-decoration:underline dotted">${t.team}</td>` : `<td>${t.team}</td>`;
+      html+=`<tr class="${t.me?'me':''}"><td>${i+1}</td>${teamTd}${mgrTd}<td>${t.w}-${t.l}</td><td>${t.pf}</td><td>${t.pa||"—"}</td><td style="color:${sc};font-weight:700">${st||"—"}</td><td style="color:var(--gold);font-weight:700;white-space:nowrap">${pu}</td></tr>`;
     });
-    html+=`</table>`; wrap.innerHTML=html; c.appendChild(wrap); s.appendChild(c);
+    html+=`</table>`; wrap.innerHTML=html;
+    // Tap a team name to view their roster read-only (see openViewTeam).
+    wrap.querySelectorAll("td[data-uid]").forEach(td=> td.onclick=()=>openViewTeam(td.dataset.uid));
+    c.appendChild(wrap); s.appendChild(c);
   } else if(app.leagueTab==="waivers"){
     renderWaiversTab(s);
   } else if(app.leagueTab==="schedule"){
@@ -3809,7 +3981,19 @@ function renderCommish(){
     cRow("2-point conversion","points", cNum(sc.twoPt,1,v=>sc.twoPt=v)),
     cRow("Defense: sack","points", cNum(sc.sack,1,v=>sc.sack=v)),
     cRow("Defense: interception","points", cNum(sc.defInt,1,v=>sc.defInt=v)),
-    cRow("Defense/return TD","points", cNum(sc.defTD,1,v=>sc.defTD=v)),
+    cRow("Defense/return TD","points (INT/fumble/kick/punt/blocked-kick return)", cNum(sc.defTD,1,v=>sc.defTD=v)),
+    cRow("Defense: fumble recovered","points — ⚠️ not yet auto-scored (see note below)", cNum(sc.fumRec,1,v=>sc.fumRec=v)),
+    cRow("Defense: safety","points — ⚠️ not yet auto-scored (see note below)", cNum(sc.defSafety,1,v=>sc.defSafety=v)),
+    cRow("Defense: blocked kick","points — ⚠️ not yet auto-scored (see note below)", cNum(sc.blockedKick,1,v=>sc.blockedKick=v)),
+    cRow("Defense: 2pt return","points — ⚠️ not yet auto-scored (see note below)", cNum(sc.defTwoPtRet,1,v=>sc.defTwoPtRet=v)),
+    cRow("Points allowed: 0","points", cNum(sc.pa0,1,v=>sc.pa0=v)),
+    cRow("Points allowed: 1-6","points", cNum(sc.pa1_6,1,v=>sc.pa1_6=v)),
+    cRow("Points allowed: 7-13","points", cNum(sc.pa7_13,1,v=>sc.pa7_13=v)),
+    cRow("Points allowed: 14-17","points", cNum(sc.pa14_17,1,v=>sc.pa14_17=v)),
+    cRow("Points allowed: 18-21","points", cNum(sc.pa18_21,1,v=>sc.pa18_21=v)),
+    cRow("Points allowed: 28-34","points", cNum(sc.pa28_34,1,v=>sc.pa28_34=v)),
+    cRow("Points allowed: 35-45","points", cNum(sc.pa35_45,1,v=>sc.pa35_45=v)),
+    cRow("Points allowed: 46+","points", cNum(sc.pa46p,1,v=>sc.pa46p=v)),
     cRow("Field goal 0-39 yd","points", cNum(sc.fg0_39,1,v=>sc.fg0_39=v)),
     cRow("Field goal 40-49 yd","points", cNum(sc.fg40_49,1,v=>sc.fg40_49=v)),
     cRow("Field goal 50+ yd","points", cNum(sc.fg50p,1,v=>sc.fg50p=v)),
@@ -3817,6 +4001,7 @@ function renderCommish(){
     cRow("Extra point made","points", cNum(sc.xp,1,v=>sc.xp=v)),
     cRow("Missed extra point","points", cNum(sc.xpMiss,1,v=>sc.xpMiss=v)),
   );
+  scoring.appendChild(el("div","muted","<div style='font-size:11px;margin-top:8px'>⚠️ Fumble recovered, safety, blocked kick, and 2pt return are stored so the numbers are correct and visible, but aren't auto-detected from live scoring yet — ESPN's box score doesn't cleanly separate these from other stats the same way sacks/INTs/TDs are. Sacks, INTs, defense/return TDs, and points allowed are all fully live.</div>"));
   s.appendChild(scoring);
 
   // League setup
@@ -3848,6 +4033,32 @@ function renderCommish(){
     cRow("Weeks per round","matchups can span 1 or 2 weeks each", cSeg([[1,"1 week"],[2,"2 weeks"]], lg.playoffWeeksPerRound||1, v=>{lg.playoffWeeksPerRound=v;renderCommish();})),
   );
   s.appendChild(sch);
+
+  // Moved here from the draft board (was too easy to hit by accident
+  // mid-draft) — commissioner-only, works regardless of draft phase.
+  const danger=el("div","card"); danger.style.borderColor="var(--red)";
+  danger.appendChild(el("h2","title","Danger Zone"));
+  const rb=el("button","btn"); rb.style.width="100%"; rb.textContent="⚠️ Reset League for New Season";
+  rb.onclick=async ()=>{
+    const warn="⚠️ This resets the ENTIRE league, not just the draft:\n\n"
+      +"• Every draft pick — everyone's roster goes to zero\n"
+      +"• All power-up usage and history\n"
+      +"• Saved lineups\n"
+      +"• Waiver claims and waiver history\n"
+      +"• Trades and votes\n"
+      +"• The playoff bracket\n"
+      +"• The transaction log\n"
+      +"• Current week resets back to 1\n"
+      +"• Preseason test stats (real-season stats already in progress for other leagues are untouched)\n\n"
+      +"This cannot be undone. Everyone will need to redraft. Continue?";
+    if(!confirm(warn)) return;
+    try{ const {error}=await sb.rpc("reset_draft",{lid:app.sbLeagueId}); if(error) throw error;
+      app.queue=[]; saveQueue();
+      await Promise.all([loadDraft(), loadLeagueData(), loadWaivers(), loadTrades(), loadPlayoffMatchups(), loadTransactions(), loadSchedule()]);
+      toast("League reset — ready for a fresh draft"); render(); }
+    catch(e){ toast(e.message||"Reset failed"); } };
+  danger.appendChild(rb);
+  s.appendChild(danger);
 
   const save=el("button","btn"); save.style.width="100%"; save.style.marginBottom="20px"; save.textContent="Save League Settings";
   save.onclick=async ()=>{
@@ -4001,8 +4212,27 @@ async function boot(){
   }catch(e){}
   if(AUTH_RECOVERY){ app.showReset=true; try{ history.replaceState({}, "", location.pathname); }catch(e){} render(); return; }
   if(AUTH_REDIRECT){ app.showConfirm=true; try{ history.replaceState({}, "", location.pathname); }catch(e){} render(); return; }
+  if(app.user && await autoRejoinLastSession()) return;
   if(app.user && await autoEnterIfSingle()) return;
   render();
+}
+// Restores whichever league/tab you last had open (see the localStorage
+// write in render()) — checked before autoEnterIfSingle() so it also
+// covers managers in 2+ leagues, not just single-league accounts. Falls
+// through silently (returns false) if there's nothing saved, or the saved
+// league isn't one you're still a member of (e.g. removed, or a fresh
+// browser/device).
+async function autoRejoinLastSession(){
+  let saved=null;
+  try{ saved=JSON.parse(localStorage.getItem("ccf_lastSession")||"null"); }catch(e){}
+  if(!saved || !saved.leagueId) return false;
+  const still=(app.myLeagues||[]).find(m=>m.league_id===saved.leagueId);
+  if(!still) return false;
+  await enterLeague(saved.leagueId, (still.leagues&&still.leagues.name)||saved.name, (still.leagues&&still.leagues.join_code)||saved.code);
+  if(saved.tab) app.tab=saved.tab;
+  if(saved.teamTab) app.teamTab=saved.teamTab;
+  render();
+  return true;
 }
 boot();
 setInterval(tick, TICK);
