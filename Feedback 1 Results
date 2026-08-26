@@ -1,0 +1,20 @@
+All 20 items addressed:
+
+Realtime refresh — fixed everywhere (draft picks, free-agent adds, powerups, team renames, username changes)
+Search bar losing focus — fixed (Players + Draft tabs)
+Refresh dropping you to the league picker — fixed, restores your last league/tab
+My Claims + Recent Claim Results — moved to My Team tab, next to Trades
+Multiple waiver claims sharing a drop target — now allowed
+Reset Draft button — moved to Commish tab's new Danger Zone
+View-only team pages — tap a team name (Standings, Scoreboard, Matchup, Waiver Order) to see their roster/bench; click a player to check stats or start a trade
+Reverse Standings looking identical to regular standings — fixed (was a real bug, tied 0-0-0 records at preseason)
+Claim auto-cancels if its drop target gets dropped some other way
+Claim/results ordering and timestamps — fixed
+League Activity waiver messages now show team + username
+Pending-claim privacy — verified already correct, no change needed
+Waivers tab — now shows order only; order correctly persists mid-week
+Trade builder back button — fixed (same root cause as the blocker above)
+Trades not landing — fixed (see above)
+Forgot-password wrong URL — not a code bug, see below
+Past-week points breakdown on player cards — now clickable
+Defensive scoring — reworked to ESPN's real values from your screenshots
