@@ -31,6 +31,69 @@ create policy "read my trades" on public.trades for select to authenticated
     or public.voted_on_trade(id)
   ));
 
+-- One-time cleanup: the trades-invisible bug above meant every failed
+-- "Send" attempt looked like nothing happened, so testers understandably
+-- resubmitted the exact same offer repeatedly — leaving a pile of
+-- identical pending trades once reads started working again. Cancels all
+-- but the most recent of each exact-duplicate group (same proposer,
+-- recipient, and exact offer/request player sets, order-independent).
+-- Safe to run more than once — nothing left to dedupe the second time.
+with dupes as (
+  select id, row_number() over (
+    partition by league_id, from_user, to_user,
+      (select array_agg(x order by x) from jsonb_array_elements_text(offer) x),
+      (select array_agg(x order by x) from jsonb_array_elements_text(request) x)
+    order by created_at desc
+  ) as rn
+  from public.trades where status in ('pending','pending_review')
+)
+update public.trades set status='cancelled' where id in (select id from dupes where rn > 1);
+
+-- propose_trade: blocks submitting an exact carbon-copy of a trade you
+-- already have pending to the same recipient (same offer AND request
+-- player sets, order-independent) — this is what let the duplicate pile
+-- above happen in the first place, now that reads work and resubmitting
+-- no longer looks like a no-op. Different combinations against the same
+-- recipient (different players, a different drop, an added extra piece)
+-- are still allowed — e.g. Bijan-for-Gibbs and Bijan-for-Burrow to the
+-- same manager can both sit pending; whichever gets accepted first
+-- executes, and execute_trade's existing stale-ownership check (unchanged)
+-- already rejects the other automatically once Bijan is no longer yours
+-- to trade.
+create or replace function public.propose_trade(lid uuid, target uuid, offer jsonb, request jsonb)
+returns bigint language plpgsql security definer set search_path = public as $$
+declare tid bigint; deadline text; cw int; dw int; dupe_id bigint;
+begin
+  if not public.is_member(lid) then raise exception 'You are not in this league'; end if;
+  if target = auth.uid() then raise exception 'You cannot trade with yourself'; end if;
+  select l.settings->'league'->>'tradeDeadline', l.current_week into deadline, cw from public.leagues l where l.id=lid;
+  if deadline is not null and deadline <> 'No deadline' then
+    dw := nullif(regexp_replace(deadline, '\D', '', 'g'), '')::int;
+    if dw is not null and cw is not null and cw > dw then
+      raise exception 'The trade deadline (%) has passed', deadline;
+    end if;
+  end if;
+  if jsonb_array_length(offer)=0 or jsonb_array_length(request)=0 then raise exception 'Pick players on both sides'; end if;
+  if exists (select 1 from jsonb_array_elements_text(offer) x
+             where not exists (select 1 from public.draft_picks where league_id=lid and player_id=x and user_id=auth.uid()))
+    then raise exception 'You do not own all offered players'; end if;
+  if exists (select 1 from jsonb_array_elements_text(request) x
+             where not exists (select 1 from public.draft_picks where league_id=lid and player_id=x and user_id=target))
+    then raise exception 'They do not own all requested players'; end if;
+  select ex.id into dupe_id from public.trades ex
+    where ex.league_id=lid and ex.from_user=auth.uid() and ex.to_user=target
+      and ex.status in ('pending','pending_review')
+      and (select array_agg(x order by x) from jsonb_array_elements_text(ex.offer) x)
+        = (select array_agg(x order by x) from jsonb_array_elements_text(offer) x)
+      and (select array_agg(x order by x) from jsonb_array_elements_text(ex.request) x)
+        = (select array_agg(x order by x) from jsonb_array_elements_text(request) x)
+    limit 1;
+  if dupe_id is not null then raise exception 'This trade is already pending. Offer a different trade.'; end if;
+  insert into public.trades (league_id, from_user, to_user, offer, request)
+    values (lid, auth.uid(), target, offer, request) returning id into tid;
+  return tid;
+end; $$;
+
 -- Marks which week the persisted waiver_priority reflects. Reverse
 -- Standings now persists its post-processing order too (previously only
 -- Rolling priority did) so a manager who skips claims while managers ahead
