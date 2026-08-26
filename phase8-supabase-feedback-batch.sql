@@ -1,9 +1,35 @@
 -- ============================================================
 -- Couch Coach Fantasy — Phase 8: tester feedback batch (realtime coverage,
 -- waiver multi-claim/same-drop support, waiver order persistence for
--- Reverse Standings, claim messaging/ordering, orphaned-claim cleanup).
+-- Reverse Standings, claim messaging/ordering, orphaned-claim cleanup,
+-- and a critical trades RLS recursion fix).
 -- Run in Supabase SQL Editor after phase7-supabase-playoffs.sql.
 -- ============================================================
+
+-- CRITICAL: phase6's "read my trades" policy on trades checks trade_votes
+-- via an EXISTS subquery, and trade_votes' own "read trade votes" policy
+-- checks trades via an EXISTS subquery right back — every read of either
+-- table recursively re-triggers the other's RLS policy, which Postgres
+-- detects as infinite recursion and errors out. PostgREST surfaces that as
+-- a bare 500 Internal Server Error, which is exactly what every SELECT on
+-- trades has been hitting since phase6 shipped — trades were always being
+-- created successfully (propose_trade is security definer and bypasses
+-- RLS for its own INSERT), they just could never be READ BACK by anyone,
+-- proposer included, which is why every trade "disappeared" instantly.
+-- Fixed by moving the trade_votes check into a security-definer function —
+-- its internal query bypasses RLS entirely, so it can no longer re-trigger
+-- trades' own policy and the cycle is broken.
+create or replace function public.voted_on_trade(tid bigint)
+returns boolean language sql security definer set search_path = public stable as $$
+  select exists (select 1 from public.trade_votes where trade_id = tid and user_id = auth.uid());
+$$;
+
+drop policy if exists "read my trades" on public.trades;
+create policy "read my trades" on public.trades for select to authenticated
+  using (public.is_member(league_id) and (
+    from_user = auth.uid() or to_user = auth.uid() or status = 'pending_review'
+    or public.voted_on_trade(id)
+  ));
 
 -- Marks which week the persisted waiver_priority reflects. Reverse
 -- Standings now persists its post-processing order too (previously only
