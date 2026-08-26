@@ -42,3 +42,9 @@ Here is what you wanted us to test:
 (48-hour auto-resolve isn't practically testable live — just know it's there as a backstop)
 
 Make sure we can actually test all of this dipshit
+
+The forgot password link works but it takes people to the old jghead version and they didn't have to change their password and login again. Let's use common sense here
+
+When I click on a player acrd and click on his points for any given week in the past this season, it should give me the points breakdown just like it does in the matchups tab
+
+Defensive stats need to be reworked in the commish settings. I have screenshots provided from ESPN that shows how most of the base defensive stats should be calculated. 
