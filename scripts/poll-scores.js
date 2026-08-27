@@ -357,6 +357,18 @@ async function autoAdvanceWeeks() {
       }
       await sb(`leagues?id=eq.${league.id}`, { method: "PATCH", body: JSON.stringify({ current_week: espnWk }) });
       console.log(`auto-advance: league ${league.id} week ${league.current_week} -> ${espnWk}`);
+      // Trades accepted while a locked player was involved wait in
+      // accepted_pending_week until the week actually turns over — this is
+      // the automatic (non-commissioner) advance path, so it needs its own
+      // copy of the same due-trade sweep set_week() does for the manual
+      // path. execute_trade is security-definer and revoked from
+      // anon/authenticated, but this poller authenticates with the service
+      // role, which bypasses that revoke same as it bypasses RLS.
+      const dueTrades = await sb(`trades?select=id&league_id=eq.${league.id}&status=eq.accepted_pending_week&execute_after_week=lt.${espnWk}`);
+      for (const dt of dueTrades) {
+        try { await sb("rpc/execute_trade", { method: "POST", body: JSON.stringify({ tid: dt.id }) }); }
+        catch (e) { console.error(`auto-advance: trade ${dt.id} execute failed:`, e.message); }
+      }
     } catch (e) {
       console.error(`auto-advance: league ${league.id} failed:`, e.message);
     }

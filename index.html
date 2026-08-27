@@ -219,7 +219,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260826a";
+const BUILD_ID = "20260826b";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -1177,7 +1177,8 @@ function renderHome(){
     const tx=(app.transactions||[]).slice(0,8);
     if(!tx.length) act.appendChild(el("div","muted","<div style='font-size:13px'>No league activity yet — trades and drops show up here.</div>"));
     tx.forEach(t=>{ const ic=t.kind==="trade"?"🔁":t.kind==="drop"?"🗑️":"➕";
-      const row=el("div","",`<div style="padding:9px 0;border-top:1px solid var(--line);font-size:13px${t.kind==="trade"?";cursor:pointer":""}"><span style="margin-right:7px">${ic}</span>${t.detail}${t.kind==="trade"?' <span class="muted" style="font-size:11px">· tap to view →</span>':""}</div>`);
+      const row=el("div","",`<div style="padding:9px 0;border-top:1px solid var(--line);font-size:13px${t.kind==="trade"?";cursor:pointer":""}"><span style="margin-right:7px">${ic}</span>${t.detail}${t.kind==="trade"?' <span class="muted" style="font-size:11px">· tap to view →</span>':""}
+        <div class="muted" style="font-size:10px;margin-top:2px">${fmtDT(t.created_at)}</div></div>`);
       if(t.kind==="trade") row.onclick=()=>{ app.tab="team"; app.teamTab="trades"; render(); };
       act.appendChild(row); });
   } else {
@@ -2262,7 +2263,8 @@ function renderTransactions(s){
     // My Team → Trades, where the Needs Review section lists it — lets
     // eligible voters jump straight there from the activity feed instead
     // of hunting for it.
-    const row=el("div","",`<div style="padding:9px 0;border-top:1px solid var(--line);font-size:13px${t.kind==="trade"?";cursor:pointer":""}"><span style="margin-right:7px">${ic}</span>${t.detail}${t.kind==="trade"?' <span class="muted" style="font-size:11px">· tap to view →</span>':""}</div>`);
+    const row=el("div","",`<div style="padding:9px 0;border-top:1px solid var(--line);font-size:13px${t.kind==="trade"?";cursor:pointer":""}"><span style="margin-right:7px">${ic}</span>${t.detail}${t.kind==="trade"?' <span class="muted" style="font-size:11px">· tap to view →</span>':""}
+      <div class="muted" style="font-size:10px;margin-top:2px">${fmtDT(t.created_at)}</div></div>`);
     if(t.kind==="trade") row.onclick=()=>{ app.tab="team"; app.teamTab="trades"; render(); };
     c.appendChild(row);
   });
@@ -2357,12 +2359,16 @@ function renderTradeBuilder(){
 // request is no longer valid by the time it actually runs, so a successful
 // RPC call here does NOT guarantee the trade was accepted. Check the
 // resulting status instead of assuming success from accept=true.
-async function respondTrade(id, accept){
-  try{ const {error}=await sb.rpc("respond_trade",{ tid:id, accept }); if(error) throw error;
+// locked (from tradeHasLockedPlayer) tells the RPC whether to defer actual
+// execution to next week instead of moving rosters immediately — see
+// execute_trade/respond_trade's comments in phase8 for why.
+async function respondTrade(id, accept, locked){
+  try{ const {error}=await sb.rpc("respond_trade",{ tid:id, accept, p_locked:!!locked }); if(error) throw error;
     await loadTrades(); await loadDraft(); await loadLineup(); await loadTransactions();
     const st=(app.trades.find(t=>t.id===id)||{}).status;
     const msg = !accept ? "Trade rejected"
       : st==="pending_review" ? "Accepted — now awaiting review"
+      : st==="accepted_pending_week" ? "Accepted — a player is locked, this will finalize next week"
       : st==="rejected" ? "Accepted, but a player's no longer available — trade rejected"
       : "Trade accepted! ✅";
     toast(msg); render(); }
@@ -2372,21 +2378,23 @@ async function cancelTrade(id){
   try{ const {error}=await sb.rpc("cancel_trade",{ tid:id }); if(error) throw error; await loadTrades(); toast("Trade cancelled"); render(); }
   catch(e){ toast(e.message||"Failed"); }
 }
-async function reviewTrade(id, approve){
-  try{ const {error}=await sb.rpc("review_trade",{ tid:id, approve }); if(error) throw error;
+async function reviewTrade(id, approve, locked){
+  try{ const {error}=await sb.rpc("review_trade",{ tid:id, approve, p_locked:!!locked }); if(error) throw error;
     await loadTrades(); await loadDraft(); await loadLineup(); await loadTransactions();
     const st=(app.trades.find(t=>t.id===id)||{}).status;
     const msg = !approve ? "Trade rejected"
+      : st==="accepted_pending_week" ? "Approved — a player is locked, this will finalize next week"
       : st==="rejected" ? "Approved, but a player's no longer available — trade rejected"
       : "Trade approved ✅";
     toast(msg); render(); }
   catch(e){ toast(e.message||"Failed"); }
 }
-async function voteTrade(id, approve){
-  try{ const {error}=await sb.rpc("vote_trade",{ tid:id, approve }); if(error) throw error;
+async function voteTrade(id, approve, locked){
+  try{ const {error}=await sb.rpc("vote_trade",{ tid:id, approve, p_locked:!!locked }); if(error) throw error;
     await loadTrades(); await loadDraft(); await loadLineup(); await loadTransactions();
     const st=(app.trades.find(t=>t.id===id)||{}).status;
     const msg = st==="accepted" ? "Vote recorded — majority reached, trade executed! ✅"
+      : st==="accepted_pending_week" ? "Vote recorded — majority reached, a player is locked so this will finalize next week"
       : st==="rejected" ? "Vote recorded — trade rejected"
       : "Vote recorded";
     toast(msg); render(); }
@@ -2402,21 +2410,64 @@ function reviewDeadlineLabel(startedAtIso){
   if(hoursLeft<=0) return "auto-resolving any moment";
   return `auto-approves in ~${Math.max(1,Math.round(hoursLeft))}h if not settled sooner`;
 }
+// Player names inside a trade card, each clickable (see wireTradePlayerClicks)
+// to open the same read-only player card used everywhere else — added
+// since there was previously no way to check on a player involved in a
+// trade under review without leaving the Trades tab entirely.
+function tradePlayersHtml(ids){
+  return (ids||[]).map(pid=>{
+    const p=(app.draft?app.draft.picks:[]).find(x=>x.player_id===pid);
+    const name=p?p.player_name:playerNameOf(pid);
+    return `<span class="tp" data-pid="${pid}" style="text-decoration:underline dotted;cursor:pointer">${name}</span>`;
+  }).join(", ") || "—";
+}
+function wireTradePlayerClicks(container){
+  container.querySelectorAll(".tp").forEach(el2=> el2.onclick=(e)=>{ e.stopPropagation();
+    const pid=el2.dataset.pid; const p=(app.draft?app.draft.picks:[]).find(x=>x.player_id===pid);
+    if(p) openPlayerDetail({id:p.player_id,espnId:(p.player_id||"").replace(/^e/,""),name:p.player_name,pos:p.pos,teamAb:p.team,headshot:p.headshot});
+    else toast("That player is no longer on a roster");
+  });
+}
+// Any offer/request player whose real NFL game has already started this
+// week — same lock check used to freeze lineup slots. A trade accepted
+// while this is true waits to actually move rosters until the league's
+// current week turns over (see execute_trade / set_week / the poller's
+// autoAdvanceWeeks), so nobody can trade for a player mid-game (or after
+// their final stat line is locked in) and get credit for points that
+// already happened under the old roster.
+function tradeHasLockedPlayer(t){
+  const ids=[...(t.offer||[]),...(t.request||[])];
+  return ids.some(pid=>{
+    const p=(app.draft?app.draft.picks:[]).find(x=>x.player_id===pid);
+    return p && isPlayerLocked({team:p.team});
+  });
+}
+function fmtDT(iso){
+  if(!iso) return "";
+  try{ return new Date(iso).toLocaleString(undefined,{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}); }catch(e){ return ""; }
+}
 function renderTrades(s){
+  // Needed for tradeHasLockedPlayer's isPlayerLocked checks below — the
+  // Lineup view already primes this, but Trades is reachable without ever
+  // visiting Lineup first (e.g. straight from a League Activity link).
+  ensureCurrentWeekInfo();
   const meId=app.user.id;
   const incoming=app.trades.filter(t=>t.to_user===meId && t.status==="pending");
   const outgoing=app.trades.filter(t=>t.from_user===meId && t.status==="pending");
   const review=app.trades.filter(t=>t.status==="pending_review");
-  const history=app.trades.filter(t=>t.status!=="pending" && t.status!=="pending_review").slice(0,8);
+  const waitingOnLock=app.trades.filter(t=>t.status==="accepted_pending_week" && (t.from_user===meId || t.to_user===meId));
+  const history=app.trades.filter(t=>!["pending","pending_review","accepted_pending_week"].includes(t.status)).slice(0,8);
   s.appendChild(el("div","card","<div class='muted' style='font-size:12px'>Start a trade from <b style='color:var(--txt)'>My Team</b> or <b style='color:var(--txt)'>Players</b> → tap a player → <b style='color:var(--txt)'>Offer in Trade</b>.</div>"));
   const tradeCard=(t,kind)=>{
     const c=el("div","card");
     c.innerHTML=`<div style="font-size:12px;font-weight:700">${kind==="in"?("From "+teamNameOf(t.from_user)):("To "+teamNameOf(t.to_user))}</div>
-      <div style="font-size:13px;margin-top:6px"><span class="muted">You get:</span> ${kind==="in"?tradeNames(t.offer):tradeNames(t.request)}</div>
-      <div style="font-size:13px;margin-top:2px"><span class="muted">You give:</span> ${kind==="in"?tradeNames(t.request):tradeNames(t.offer)}</div>`;
+      <div class="muted" style="font-size:11px;margin-top:2px">${fmtDT(t.created_at)}</div>
+      <div style="font-size:13px;margin-top:6px"><span class="muted">You get:</span> ${kind==="in"?tradePlayersHtml(t.offer):tradePlayersHtml(t.request)}</div>
+      <div style="font-size:13px;margin-top:2px"><span class="muted">You give:</span> ${kind==="in"?tradePlayersHtml(t.request):tradePlayersHtml(t.offer)}</div>`;
+    wireTradePlayerClicks(c);
     if(kind==="in"){
       const row=el("div","row"); row.style.marginTop="10px";
-      const a=el("button","btn"); a.style.flex="1"; a.textContent="Accept"; a.onclick=()=>respondTrade(t.id,true);
+      const a=el("button","btn"); a.style.flex="1"; a.textContent="Accept"; a.onclick=()=>respondTrade(t.id,true,tradeHasLockedPlayer(t));
       const r=el("button","btn sec"); r.style.flex="1"; r.textContent="Reject"; r.onclick=()=>respondTrade(t.id,false);
       row.append(a,r); c.appendChild(row);
     } else {
@@ -2428,9 +2479,11 @@ function renderTrades(s){
     const isParty=t.from_user===meId || t.to_user===meId;
     const c=el("div","card");
     c.innerHTML=`<div style="font-size:12px;font-weight:700">${teamNameOf(t.from_user)} ↔ ${teamNameOf(t.to_user)}</div>
-      <div style="font-size:13px;margin-top:6px"><span class="muted">${teamNameOf(t.from_user)} gives:</span> ${tradeNames(t.offer)}</div>
-      <div style="font-size:13px;margin-top:2px"><span class="muted">${teamNameOf(t.to_user)} gives:</span> ${tradeNames(t.request)}</div>
+      <div class="muted" style="font-size:11px;margin-top:2px">Proposed ${fmtDT(t.created_at)}</div>
+      <div style="font-size:13px;margin-top:6px"><span class="muted">${teamNameOf(t.from_user)} gives:</span> ${tradePlayersHtml(t.offer)}</div>
+      <div style="font-size:13px;margin-top:2px"><span class="muted">${teamNameOf(t.to_user)} gives:</span> ${tradePlayersHtml(t.request)}</div>
       <div class="muted" style="font-size:11px;margin-top:6px">Review: <b style="color:var(--gold)">${t.review_mode||"Commissioner"}</b>${t.review_started_at?" · "+reviewDeadlineLabel(t.review_started_at):""}</div>`;
+    wireTradePlayerClicks(c);
     if(t.review_mode==="League vote"){
       const votes=(app.tradeVotes||[]).filter(v=>v.trade_id===t.id);
       const forN=votes.filter(v=>v.approve).length, againstN=votes.filter(v=>!v.approve).length;
@@ -2439,8 +2492,8 @@ function renderTrades(s){
       if(!isParty){
         const mine=votes.find(v=>v.user_id===meId);
         const row=el("div","row"); row.style.marginTop="8px";
-        const a=el("button","btn"+(mine&&mine.approve?"":" sec")); a.style.flex="1"; a.textContent="👍 Approve"; a.onclick=()=>voteTrade(t.id,true);
-        const r=el("button","btn"+(mine&&!mine.approve?"":" sec")); r.style.flex="1"; r.textContent="👎 Reject"; r.onclick=()=>voteTrade(t.id,false);
+        const a=el("button","btn"+(mine&&mine.approve?"":" sec")); a.style.flex="1"; a.textContent="👍 Approve"; a.onclick=()=>voteTrade(t.id,true,tradeHasLockedPlayer(t));
+        const r=el("button","btn"+(mine&&!mine.approve?"":" sec")); r.style.flex="1"; r.textContent="👎 Reject"; r.onclick=()=>voteTrade(t.id,false,false);
         row.append(a,r); c.appendChild(row);
       }
     } else if(!app.isCommish){
@@ -2449,8 +2502,8 @@ function renderTrades(s){
     if(app.isCommish){
       const row2=el("div","row"); row2.style.marginTop="8px";
       const lab=t.review_mode==="League vote"?"Override":"";
-      const a2=el("button","btn sec"); a2.style.flex="1"; a2.textContent=(lab?lab+": ":"")+"Approve"; a2.onclick=()=>reviewTrade(t.id,true);
-      const r2=el("button","btn sec"); r2.style.flex="1"; r2.textContent=(lab?lab+": ":"")+"Reject"; r2.onclick=()=>reviewTrade(t.id,false);
+      const a2=el("button","btn sec"); a2.style.flex="1"; a2.textContent=(lab?lab+": ":"")+"Approve"; a2.onclick=()=>reviewTrade(t.id,true,tradeHasLockedPlayer(t));
+      const r2=el("button","btn sec"); r2.style.flex="1"; r2.textContent=(lab?lab+": ":"")+"Reject"; r2.onclick=()=>reviewTrade(t.id,false,false);
       row2.append(a2,r2); c.appendChild(row2);
     }
     if(t.from_user===meId){
@@ -2458,12 +2511,30 @@ function renderTrades(s){
     }
     return c;
   };
+  const lockedCard=(t)=>{
+    const c=el("div","card"); c.style.opacity=".85";
+    c.innerHTML=`<div style="font-size:12px;font-weight:700">${teamNameOf(t.from_user)} ↔ ${teamNameOf(t.to_user)}</div>
+      <div class="muted" style="font-size:11px;margin-top:2px">Accepted ${fmtDT(t.created_at)}</div>
+      <div style="font-size:13px;margin-top:6px"><span class="muted">${teamNameOf(t.from_user)} gives:</span> ${tradePlayersHtml(t.offer)}</div>
+      <div style="font-size:13px;margin-top:2px"><span class="muted">${teamNameOf(t.to_user)} gives:</span> ${tradePlayersHtml(t.request)}</div>
+      <div class="muted" style="font-size:12px;margin-top:6px">⏳ A player involved already started this week's game — this trade will finalize automatically once Week ${(t.execute_after_week||app.currentWeek||1)+1} begins.</div>`;
+    wireTradePlayerClicks(c);
+    return c;
+  };
   if(review.length){ s.appendChild(el("h2","title","🗳️ Needs Review ("+review.length+")")); review.forEach(t=>s.appendChild(reviewCard(t))); }
+  if(waitingOnLock.length){ s.appendChild(el("h2","title","⏳ Accepted — Processing Next Week ("+waitingOnLock.length+")")); waitingOnLock.forEach(t=>s.appendChild(lockedCard(t))); }
   if(incoming.length){ s.appendChild(el("h2","title","📨 Incoming ("+incoming.length+")")); incoming.forEach(t=>s.appendChild(tradeCard(t,"in"))); }
   if(outgoing.length){ s.appendChild(el("h2","title","📤 Sent")); outgoing.forEach(t=>s.appendChild(tradeCard(t,"out"))); }
-  if(!incoming.length && !outgoing.length && !review.length) s.appendChild(el("div","card","<div class='muted' style='font-size:13px'>No pending trades.</div>"));
+  if(!incoming.length && !outgoing.length && !review.length && !waitingOnLock.length) s.appendChild(el("div","card","<div class='muted' style='font-size:13px'>No pending trades.</div>"));
   if(history.length){ const h=el("div","card"); h.appendChild(el("h2","title","History"));
-    history.forEach(t=>{ const mine=t.from_user===meId; h.appendChild(el("div","",`<div style="padding:7px 0;border-top:1px solid var(--line);font-size:12px"><b>${t.status}</b> · ${mine?"you → "+teamNameOf(t.to_user):teamNameOf(t.from_user)+" → you"}</div>`)); });
+    history.forEach(t=>{ const mine=t.from_user===meId;
+      const row=el("div","",`<div style="padding:7px 0;border-top:1px solid var(--line);font-size:12px">
+        <b>${t.status}</b> · ${mine?"you → "+teamNameOf(t.to_user):teamNameOf(t.from_user)+" → you"}
+        <div class="muted" style="font-size:11px;margin-top:2px">${fmtDT(t.resolved_at||t.created_at)}</div>
+        <div style="margin-top:3px"><span class="muted">gave</span> ${tradePlayersHtml(t.from_user===meId?t.offer:t.request)} <span class="muted">for</span> ${tradePlayersHtml(t.from_user===meId?t.request:t.offer)}</div>
+      </div>`);
+      wireTradePlayerClicks(row);
+      h.appendChild(row); });
     s.appendChild(h); }
 }
 // Locked once that player's REAL NFL game has kicked off — checked against

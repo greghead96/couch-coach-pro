@@ -102,13 +102,74 @@ begin
   return tid;
 end; $$;
 
--- respond_trade: League-vote trades now post to League Activity the moment
+-- Timestamp of whatever actually SETTLED the trade (accepted/rejected/
+-- cancelled) — created_at only ever recorded when it was PROPOSED, so
+-- History had no way to show when a trade was actually resolved.
+alter table public.trades add column if not exists resolved_at timestamptz;
+-- Set (to the week it was accepted during) when a trade is accepted while
+-- ANY offer/request player is locked (their real game already started this
+-- week) — see execute_trade below for why it waits instead of moving
+-- rosters immediately.
+alter table public.trades add column if not exists execute_after_week int;
+
+-- Internal only — actually moves the players. Now also: (1) names both
+-- teams/managers and every player involved in the transactions log message
+-- instead of a bare "Trade completed", (2) stamps resolved_at, (3) accepts
+-- 'accepted_pending_week' as an awaiting-execution status too, since that's
+-- exactly what set_week()/poll-scores.js's autoAdvanceWeeks() call this
+-- with once a deferred trade's wait is over.
+create or replace function public.execute_trade(tid bigint)
+returns void language plpgsql security definer set search_path = public as $$
+declare t public.trades; from_team text; to_team text; from_uname text; to_uname text;
+  offer_names text; request_names text; detail text;
+begin
+  select * into t from public.trades where id = tid;
+  if not found then raise exception 'Trade not found'; end if;
+  if t.status not in ('pending','pending_review','accepted_pending_week') then raise exception 'Trade is not awaiting execution'; end if;
+  if exists (select 1 from jsonb_array_elements_text(t.offer) x
+             where not exists (select 1 from public.draft_picks where league_id=t.league_id and player_id=x and user_id=t.from_user))
+     or exists (select 1 from jsonb_array_elements_text(t.request) x
+             where not exists (select 1 from public.draft_picks where league_id=t.league_id and player_id=x and user_id=t.to_user))
+  then
+    update public.trades set status='rejected', resolved_at=now() where id=tid;
+    return;
+  end if;
+  select team_name into from_team from public.league_members where league_id=t.league_id and user_id=t.from_user;
+  select team_name into to_team from public.league_members where league_id=t.league_id and user_id=t.to_user;
+  select display_name into from_uname from public.profiles where id=t.from_user;
+  select display_name into to_uname from public.profiles where id=t.to_user;
+  select string_agg(player_name, ', ') into offer_names from public.draft_picks
+    where league_id=t.league_id and player_id in (select jsonb_array_elements_text(t.offer));
+  select string_agg(player_name, ', ') into request_names from public.draft_picks
+    where league_id=t.league_id and player_id in (select jsonb_array_elements_text(t.request));
+  detail := coalesce(from_team,'A team') || coalesce(' ('||from_uname||')','') || ' traded ' || coalesce(offer_names,'players')
+    || ' to ' || coalesce(to_team,'a team') || coalesce(' ('||to_uname||')','') || ' for ' || coalesce(request_names,'players');
+  update public.draft_picks set user_id=t.to_user
+    where league_id=t.league_id and user_id=t.from_user and player_id in (select jsonb_array_elements_text(t.offer));
+  update public.draft_picks set user_id=t.from_user
+    where league_id=t.league_id and user_id=t.to_user and player_id in (select jsonb_array_elements_text(t.request));
+  update public.trades set status='accepted', resolved_at=now() where id=tid;
+  insert into public.transactions(league_id, kind, detail, actor) values (t.league_id, 'trade', detail, t.to_user);
+end; $$;
+revoke execute on function public.execute_trade(bigint) from public, anon, authenticated;
+
+-- respond_trade: League-vote trades post to League Activity the moment
 -- they enter review, since eligible voters (everyone except the two
 -- parties) need to actually find out a vote is open — Commissioner-review
 -- trades deliberately do NOT post here, only once execute_trade actually
--- runs them (already the case, unchanged) — the rest of the league doesn't
--- need advance notice of something only the commissioner acts on.
-create or replace function public.respond_trade(tid bigint, accept boolean)
+-- runs them — the rest of the league doesn't need advance notice of
+-- something only the commissioner acts on.
+--
+-- New p_locked param: the client checks (using the same real-kickoff-time
+-- data it already uses to lock lineup slots) whether any offer/request
+-- player's game has already started this week, and passes that along. When
+-- true and this would otherwise execute instantly (no review), the trade
+-- is marked accepted_pending_week instead — the actual roster move waits
+-- until the league's current_week turns over (set_week / autoAdvanceWeeks
+-- both sweep for these). Review-mode trades don't need this here since
+-- they don't execute immediately anyway; the same check applies later, at
+-- review_trade/vote_trade time, right when THEY would trigger execution.
+create or replace function public.respond_trade(tid bigint, accept boolean, p_locked boolean default false)
 returns void language plpgsql security definer set search_path = public as $$
 declare t public.trades; mode text;
 begin
@@ -116,10 +177,15 @@ begin
   if not found then raise exception 'Trade not found'; end if;
   if t.to_user <> auth.uid() then raise exception 'Only the recipient can respond'; end if;
   if t.status <> 'pending' then raise exception 'Trade is no longer pending'; end if;
-  if not accept then update public.trades set status='rejected' where id=tid; return; end if;
+  if not accept then update public.trades set status='rejected', resolved_at=now() where id=tid; return; end if;
   select coalesce(l.settings->'league'->>'tradeReview','No review') into mode from public.leagues l where l.id=t.league_id;
   if mode is null or mode = 'No review' then
-    perform public.execute_trade(tid);
+    if p_locked then
+      update public.trades set status='accepted_pending_week',
+        execute_after_week=(select current_week from public.leagues where id=t.league_id) where id=tid;
+    else
+      perform public.execute_trade(tid);
+    end if;
   else
     update public.trades set status='pending_review', review_mode=mode, review_started_at=now() where id=tid;
     if mode = 'League vote' then
@@ -131,6 +197,97 @@ begin
           t.from_user);
     end if;
   end if;
+end; $$;
+
+-- review_trade: same p_locked deferral as respond_trade, for the
+-- commissioner-approval path (including a League-vote override approval).
+create or replace function public.review_trade(tid bigint, approve boolean, p_locked boolean default false)
+returns void language plpgsql security definer set search_path = public as $$
+declare t public.trades;
+begin
+  select * into t from public.trades where id = tid;
+  if not found then raise exception 'Trade not found'; end if;
+  if not exists (select 1 from public.leagues where id=t.league_id and commissioner_id=auth.uid()) then
+    raise exception 'Only the commissioner can review this trade';
+  end if;
+  if t.status <> 'pending_review' then raise exception 'Trade is not awaiting review'; end if;
+  if approve then
+    if p_locked then
+      update public.trades set status='accepted_pending_week',
+        execute_after_week=(select current_week from public.leagues where id=t.league_id) where id=tid;
+    else
+      perform public.execute_trade(tid);
+    end if;
+  else
+    update public.trades set status='rejected', resolved_at=now() where id=tid;
+  end if;
+end; $$;
+
+-- vote_trade: fixes "column reference approve is ambiguous" — the approve
+-- parameter shares its exact name with trade_votes.approve, and the tally
+-- query below selects from trade_votes in the same scope, so Postgres
+-- can't tell which "approve" is meant (same root cause as the earlier
+-- offer/request ambiguity in propose_trade). Aliased to v_approve
+-- internally and trade_votes qualified via "tv" throughout. Also adds the
+-- same p_locked deferral as respond_trade/review_trade for the
+-- majority-reached path.
+create or replace function public.vote_trade(tid bigint, approve boolean, p_locked boolean default false)
+returns void language plpgsql security definer set search_path = public as $$
+declare t public.trades; eligible int; votes_for int; votes_against int; v_approve boolean;
+begin
+  v_approve := approve;
+  select * into t from public.trades where id = tid;
+  if not found then raise exception 'Trade not found'; end if;
+  if not public.is_member(t.league_id) then raise exception 'You are not in this league'; end if;
+  if auth.uid() = t.from_user or auth.uid() = t.to_user then raise exception 'You cannot vote on your own trade'; end if;
+  if t.status <> 'pending_review' or t.review_mode <> 'League vote' then raise exception 'This trade is not open for a league vote'; end if;
+  insert into public.trade_votes(trade_id, user_id, approve) values (tid, auth.uid(), v_approve)
+    on conflict (trade_id, user_id) do update set approve = excluded.approve, voted_at = now();
+  select count(*) into eligible from public.league_members
+    where league_id = t.league_id and user_id <> t.from_user and user_id <> t.to_user;
+  select count(*) filter (where tv.approve), count(*) filter (where not tv.approve)
+    into votes_for, votes_against from public.trade_votes tv where tv.trade_id = tid;
+  if eligible > 0 and votes_for > eligible / 2.0 then
+    if p_locked then
+      update public.trades set status='accepted_pending_week',
+        execute_after_week=(select current_week from public.leagues where id=t.league_id) where id = tid;
+    else
+      perform public.execute_trade(tid);
+    end if;
+  elsif eligible > 0 and votes_against > eligible / 2.0 then
+    update public.trades set status='rejected', resolved_at=now() where id = tid;
+  end if;
+end; $$;
+
+-- cancel_trade: also stamps resolved_at for History's timestamp.
+create or replace function public.cancel_trade(tid bigint)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  update public.trades set status='cancelled', resolved_at=now()
+   where id=tid and from_user=auth.uid() and status in ('pending','pending_review');
+end; $$;
+
+-- set_week: sweeps for trades that were accepted while a locked player was
+-- involved and are now clear to actually execute, since the week they were
+-- locked for has passed. This is the manual (commissioner-triggered)
+-- path — poll-scores.js's autoAdvanceWeeks() carries an equivalent sweep
+-- for the automatic in-season path, since it updates current_week directly
+-- via REST rather than through this RPC.
+create or replace function public.set_week(lid uuid, wk int)
+returns void language plpgsql security definer set search_path = public as $$
+declare old_wk int; new_wk int; r record;
+begin
+  if not exists (select 1 from public.leagues where id=lid and commissioner_id=auth.uid()) then
+    raise exception 'Only the commissioner can change the week'; end if;
+  select current_week into old_wk from public.leagues where id=lid;
+  insert into public.weekly_lineups(league_id, week, user_id, starters)
+    select lid, old_wk, user_id, starters from public.lineups where league_id=lid
+    on conflict (league_id, week, user_id) do update set starters=excluded.starters;
+  new_wk := greatest(1, wk);
+  update public.leagues set current_week = new_wk where id=lid;
+  for r in select id from public.trades where league_id=lid and status='accepted_pending_week' and execute_after_week < new_wk loop
+    perform public.execute_trade(r.id);
+  end loop;
 end; $$;
 
 -- Marks which week the persisted waiver_priority reflects. Reverse
