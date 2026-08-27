@@ -169,6 +169,15 @@ revoke execute on function public.execute_trade(bigint) from public, anon, authe
 -- both sweep for these). Review-mode trades don't need this here since
 -- they don't execute immediately anyway; the same check applies later, at
 -- review_trade/vote_trade time, right when THEY would trigger execution.
+--
+-- IMPORTANT: create or replace does NOT drop a function whose parameter
+-- list changed — it leaves the old 2-arg version in place and adds this
+-- 3-arg one as a SEPARATE overload. With both coexisting, a call using
+-- only {tid, accept} becomes genuinely ambiguous (Postgres can't tell if
+-- you meant the old exact-2-arg function or this one using p_locked's
+-- default), which is exactly the "could not choose the best candidate
+-- function" error hit live — so the old signature is dropped first.
+drop function if exists public.respond_trade(bigint, boolean);
 create or replace function public.respond_trade(tid bigint, accept boolean, p_locked boolean default false)
 returns void language plpgsql security definer set search_path = public as $$
 declare t public.trades; mode text;
@@ -201,6 +210,9 @@ end; $$;
 
 -- review_trade: same p_locked deferral as respond_trade, for the
 -- commissioner-approval path (including a League-vote override approval).
+-- Old 2-arg signature dropped first — same overload-ambiguity reason as
+-- respond_trade above.
+drop function if exists public.review_trade(bigint, boolean);
 create or replace function public.review_trade(tid bigint, approve boolean, p_locked boolean default false)
 returns void language plpgsql security definer set search_path = public as $$
 declare t public.trades;
@@ -230,7 +242,11 @@ end; $$;
 -- offer/request ambiguity in propose_trade). Aliased to v_approve
 -- internally and trade_votes qualified via "tv" throughout. Also adds the
 -- same p_locked deferral as respond_trade/review_trade for the
--- majority-reached path.
+-- majority-reached path. Old 2-arg signature dropped first — this is
+-- exactly the overload that produced "Could not choose the best candidate
+-- function... vote_trade(tid, approve), vote_trade(tid, approve, p_locked)"
+-- live, once both signatures existed side by side.
+drop function if exists public.vote_trade(bigint, boolean);
 create or replace function public.vote_trade(tid bigint, approve boolean, p_locked boolean default false)
 returns void language plpgsql security definer set search_path = public as $$
 declare t public.trades; eligible int; votes_for int; votes_against int; v_approve boolean;
