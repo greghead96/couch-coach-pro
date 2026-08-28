@@ -186,7 +186,7 @@ async function fetchGameBox(eventId) {
         const raw = g.name === "kicking"
           ? kickerRawFromBox(g.labels || [], a.stats || [], scoringPlays, tid, name)
           : boxAthleteRaw(g.name, g.labels || [], a.stats || []);
-        if (!byAthlete[id]) byAthlete[id] = { raw: {}, qtd: 0 };
+        if (!byAthlete[id]) byAthlete[id] = { raw: {}, qtd: 0, name };
         Object.keys(raw).forEach((k) => { byAthlete[id].raw[k] = (byAthlete[id].raw[k] || 0) + raw[k]; });
         byAthlete[id].qtd += qualifyingTDCount(raw);
       });
@@ -202,7 +202,22 @@ async function fetchGameBox(eventId) {
     // CURRENT (still in progress) quarter's linescore entry until it ends.
     teamScores[tid] = Number(c.score) || 0;
   });
-  return { period, final, byAthlete, linescores, teamScores, teamStats };
+  return { period, final, byAthlete, linescores, teamScores, teamStats, scoringPlays };
+}
+// Real quarter (1-4, chronological) of each of this athlete's touchdown
+// scoring plays, matched by role — mirrors index.html's identical
+// function (matchingTDPeriods), verified against live ESPN data there.
+// Kept in sync manually since this file has no shared-module setup with
+// the client script.
+function matchingTDPeriods(scoringPlays, name, role) {
+  if (!name) return [];
+  return (scoringPlays || []).filter((p) => {
+    const t = (p.type && p.type.text) || "", txt = p.text || "";
+    if (role === "passer") return t === "Passing Touchdown" && txt.indexOf("from " + name + " (") >= 0;
+    if (role === "receiver") return t === "Passing Touchdown" && txt.indexOf(name + " ") === 0;
+    if (role === "rusher") return t === "Rushing Touchdown" && txt.indexOf(name + " ") === 0;
+    return false;
+  }).map((p) => (p.period && p.period.number) || null);
 }
 
 async function pollLeague(league) {
@@ -236,7 +251,7 @@ async function pollLeague(league) {
       } else {
         const espnId = String(p.player_id || "").replace(/^e/, "");
         const r = box.byAthlete[espnId]; if (!r) continue;
-        updates.push({ athleteId: p.player_id, week: wk, period: box.period, isDef: false, raw: r.raw, qtd: r.qtd });
+        updates.push({ athleteId: p.player_id, week: wk, period: box.period, isDef: false, raw: r.raw, qtd: r.qtd, name: r.name, scoringPlays: box.scoringPlays });
       }
     }
   }
@@ -275,14 +290,41 @@ async function pollLeague(league) {
         + (u.raw.fgMade0_39 || 0) * 3 + (u.raw.fgMade40_49 || 0) * 4 + (u.raw.fgMade50p || 0) * 5
         + (u.raw.fgMissed || 0) * -1 + (u.raw.xpMade || 0) * 1; // informational only, clients recompute with real settings
       const prevTotal = prev ? (prev.prev_total || 0) : 0;
-      const delta = Math.max(0, curFp - prevTotal);
-      const tdDelta = Math.max(0, u.qtd - prevQtd);
-      const cur = qpts[u.period] || { fp: 0, qtd: 0, stats: {} };
+      const totalDelta = Math.max(0, curFp - prevTotal);
       const statsDelta = {};
       Object.keys(u.raw).forEach((k) => { statsDelta[k] = Math.max(0, (u.raw[k] || 0) - (prevStats[k] || 0)); });
+      // TDs placed in their REAL quarter (via scoringPlays), not "whichever
+      // quarter is live right now" — mirrors index.html's identical fix
+      // (matchingTDPeriods), same root cause: a TD near the end of a
+      // quarter can go unpolled until after that quarter ends.
+      const tdFields = [
+        { key: "passTD", role: "passer", pts: 4, qualifies: false },
+        { key: "rushTD", role: "rusher", pts: 6, qualifies: true },
+        { key: "recTD", role: "receiver", pts: 6, qualifies: true },
+      ];
+      let tdPointsTotal = 0;
+      tdFields.forEach(({ key, role, pts, qualifies }) => {
+        const n = statsDelta[key] || 0; if (!n) return;
+        const already = prevStats[key] || 0;
+        const periods = matchingTDPeriods(u.scoringPlays, u.name, role).slice(already, already + n);
+        while (periods.length < n) periods.push(null); // never drop credit if scoringPlays can't confirm it
+        periods.forEach((per) => {
+          const q = (per >= 1 && per <= 4) ? per : u.period;
+          const bucket = qpts[q] || { fp: 0, qtd: 0, stats: {} };
+          bucket.fp = Math.round((bucket.fp + pts) * 10) / 10;
+          if (qualifies) bucket.qtd = (bucket.qtd || 0) + 1;
+          bucket.stats = { ...bucket.stats, [key]: ((bucket.stats && bucket.stats[key]) || 0) + 1 };
+          qpts[q] = bucket;
+          tdPointsTotal += pts;
+        });
+      });
+      const remainingFp = Math.max(0, Math.round((totalDelta - tdPointsTotal) * 10) / 10);
+      const remainingStatsDelta = { ...statsDelta };
+      tdFields.forEach(({ key }) => { delete remainingStatsDelta[key]; });
+      const cur = qpts[u.period] || { fp: 0, qtd: 0, stats: {} };
       const mergedStats = { ...(cur.stats || {}) };
-      Object.keys(statsDelta).forEach((k) => { mergedStats[k] = (mergedStats[k] || 0) + statsDelta[k]; });
-      qpts[u.period] = { fp: Math.round((cur.fp + delta) * 10) / 10, qtd: cur.qtd + tdDelta, stats: mergedStats };
+      Object.keys(remainingStatsDelta).forEach((k) => { mergedStats[k] = (mergedStats[k] || 0) + remainingStatsDelta[k]; });
+      qpts[u.period] = { fp: Math.round((cur.fp + remainingFp) * 10) / 10, qtd: cur.qtd || 0, stats: mergedStats };
       prevQtd = u.qtd; prevBonus = 0; newPrevStats = u.raw;
       prevTotalOut = curFp; // true cumulative fp-to-date, needed for next run's delta calc
     }
