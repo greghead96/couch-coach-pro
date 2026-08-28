@@ -77,13 +77,13 @@
   .plr.bench{opacity:.85;}
   .plr.tappable{cursor:pointer;border:1px solid var(--gold);}
 
-  .puwrap { display:flex; gap:8px; overflow-x:auto; padding-bottom:4px; }
-  .puchip { flex:0 0 auto; background:var(--panel2); border:2px solid var(--ink); border-radius:12px; box-shadow:0 3px 0 var(--ink);
-            padding:9px 11px; min-width:96px; text-align:center; position:relative; }
+  .puwrap { display:flex; gap:6px; padding-bottom:4px; }
+  .puchip { flex:1 1 0; min-width:0; background:var(--panel2); border:2px solid var(--ink); border-radius:12px; box-shadow:0 3px 0 var(--ink);
+            padding:7px 3px; text-align:center; position:relative; }
   .puchip.armed { box-shadow:0 0 0 2px var(--gold) inset; }
   .puchip.disabled { opacity:.4; }
-  .puchip .ic { font-size:20px; } .puchip .nm { font-size:11px; font-weight:700; margin-top:2px; }
-  .puchip .ct { font-size:10px; color:var(--gold); margin-top:3px; }
+  .puchip .ic { font-size:17px; } .puchip .nm { font-size:9.5px; font-weight:700; margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .puchip .ct { font-size:9px; color:var(--gold); margin-top:2px; }
   .puchip .cdbar { position:absolute; left:0; bottom:0; height:3px; background:var(--ice); }
 
   .feed { height:120px; overflow-y:auto; font-size:12px; }
@@ -127,7 +127,11 @@
   .mrow { display:grid; grid-template-columns:1fr 30px 1fr; align-items:center; gap:6px; padding:9px 0; border-top:1px solid var(--line); }
   .mrow-pos { text-align:center; font-size:10px; font-weight:800; color:var(--txt); background:var(--ink); border-radius:6px; padding:7px 0; }
   .mcell { display:flex; align-items:center; gap:8px; }
-  .mcell.l { flex-direction:row-reverse; text-align:right; }
+  /* Both sides keep the avatar adjacent to the center position badge (row-
+     reverse used to flip the LEFT side's avatar out to the far edge instead,
+     so faces landed on opposite sides of the row from column to column and
+     never lined up top to bottom) — just the text alignment differs. */
+  .mcell.l { text-align:right; }
   .mcell.r { text-align:left; }
   .mcell.tappable { cursor:pointer; }
   .mcell.tappable .mc-nm { color:var(--gold); }
@@ -219,7 +223,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260826b";
+const BUILD_ID = "20260827a";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -633,6 +637,12 @@ function usePU(k,p){
   if(!p.id || p.id.indexOf("e_")===0){ toast("That lineup spot is empty"); app.armed=null; renderMatchup(); return; }
   const side = myStarters.includes(p)?"me":"op";
   if(side!==cfg.target){ toast(cfg.target==="me"?"Target YOUR player":"Target the OPPONENT"); return; }
+  // Double/Freeze pick their quarter BEFORE confirming (confirmPUQuarter,
+  // shown once a quarter's chosen) instead of confirming the player first
+  // and only THEN asking for a quarter — the old order meant locking in a
+  // target before you'd even seen which quarters were available.
+  // Hot Start/Sub have no quarter step, so they keep the upfront confirm.
+  if(k==="double" || k==="freeze"){ usePUConfirmed(k,p); return; }
   confirmPUTarget(k,p,()=>usePUConfirmed(k,p));
 }
 function confirmPUTarget(k,p,onConfirm){
@@ -649,7 +659,23 @@ function confirmPUTarget(k,p,onConfirm){
   ov.querySelector("#puCancel").onclick=()=>{ ov.innerHTML=""; app.armed=null; renderMatchup(); };
   ov.querySelector("#puConfirm").onclick=()=>{ ov.innerHTML=""; onConfirm(); };
 }
-function usePUConfirmed(k,p){
+// Quarters a player already has SOME power-up scheduled for this week
+// (from either manager — an opponent's Freeze and your own Double are two
+// independent picks that can coexist on different quarters of the same
+// player). Excludes Hot Start's placeholder quarter (always stored as 1,
+// meaningless as a real quarter — see persistPowerup) so it never falsely
+// blocks Q1 for a genuine per-quarter pick.
+function usedQuartersFor(pid){
+  const used=new Set();
+  if(app.realLeague){
+    app.powerupPicks.filter(x=>x.week===app.currentWeek && x.player_id===pid && x.powerup_key!=="hotstart")
+      .forEach(x=>used.add(Number(x.quarter)));
+  } else {
+    app.sim.scheduled.filter(x=>x.pid===pid).forEach(x=>used.add(Number(x.q)));
+  }
+  return used;
+}
+async function usePUConfirmed(k,p){
   const cfg=POWERUPS[k];
   if(k==="hotstart"){
     // "Pregame" for a real league means THIS player's own game hasn't
@@ -660,10 +686,10 @@ function usePUConfirmed(k,p){
     const started = app.realLeague ? realCurrentQuarterFor(p)>0 : (app.sim.gameSec>0 || app.sim.running);
     if(started){ toast("Set Hot Start before "+p.name+"'s game kicks off"); return; }
     if(playerAssigned(p.id)){ toast(p.name+" already has a power-up this week"); return; }
+    if(app.realLeague){ const ok=await persistPowerup("hotstart",p.id,p.name,1); if(!ok) return; }
     app.inv.hotstart--; app.sim.hotStart=p.id; app.armed=null;
     logPU("me","hotstart",p.name,false,1);
     feed(`🔥 Hot Start set on ${p.name} — 3× on your lineup's fastest TD.`,"ev-pu");
-    if(app.realLeague) persistPowerup("hotstart",p.id,p.name,1);
     toast("Hot Start: "+p.name); renderMatchup(); return;
   }
   if(k==="sub"){
@@ -671,12 +697,19 @@ function usePUConfirmed(k,p){
     if(cq<1 || cq>2){ toast(app.realLeague?"Emergency Sub: only while that player's real game is in Q1-Q2":"Emergency Sub: first half of a live game only"); return; }
     openSubModal(p); return;
   }
-  // Double / Freeze — one power-up per player per week
-  if(playerAssigned(p.id)){ toast(p.name+" already has a power-up this week"); app.armed=null; renderMatchup(); return; }
+  // Double / Freeze — one power-up per player per QUARTER per week, not
+  // per player: a quarter your opponent already froze this player for is
+  // excluded from allowed, but other quarters are still fair game.
   const cq=app.realLeague ? realCurrentQuarterFor(p) : currentQuarter();
-  const allowed=[]; for(let q=1;q<=4;q++) if(q>cq) allowed.push(q);
-  if(!allowed.length){ toast("No upcoming quarters left"); app.armed=null; renderMatchup(); return; }
-  showQuarterPicker(k,p,allowed);
+  const used=usedQuartersFor(p.id);
+  const allowed=[], blockedByOther=[];
+  for(let q=1;q<=4;q++){
+    if(q<=cq) continue;
+    if(used.has(q)) blockedByOther.push(q); else allowed.push(q);
+  }
+  if(!allowed.length && !blockedByOther.length){ toast("No upcoming quarters left"); app.armed=null; renderMatchup(); return; }
+  if(!allowed.length){ toast("Every remaining quarter on "+p.name+" already has a power-up — choose a different player"); app.armed=null; renderMatchup(); return; }
+  showQuarterPicker(k,p,allowed,blockedByOther);
 }
 function openSubModal(starter){
   const ov=$("overlay");
@@ -689,21 +722,32 @@ function openSubModal(starter){
     <div class="muted" style="font-size:12px;margin:6px 0 8px">Sub in for <b style="color:var(--txt)">${starter.name}</b> (${starter.pos}, game underway). Pick a ${slot?slot.pos.join("/"):starter.pos} on your bench who hasn't kicked off — they start fresh:</div>
     <div style="max-height:46vh;overflow:auto">${list||'<div class="muted">No eligible bench players at this position.</div>'}</div>
     <button class="btn sec" id="subCancel" style="width:100%;margin-top:12px">Cancel</button></div></div>`;
-  ov.querySelectorAll(".subOpt").forEach(b=> b.onclick=()=>{
+  ov.querySelectorAll(".subOpt").forEach(b=> b.onclick=async ()=>{
     const bp=myBench[+b.dataset.i];
     const bi=myBench.indexOf(bp);
+    const subQ=app.realLeague ? realCurrentQuarterFor(starter) : currentQuarter();
+    // Persist BEFORE mutating anything client-side — this used to fire the
+    // "Subbed in" toast and swap the roster regardless of whether the save
+    // actually succeeded, so a failed/duplicate save silently reverted the
+    // next time the lineup rebuilt from the real persisted data, while the
+    // inventory count separately re-derives itself from that same real
+    // data — together looking exactly like "it gave me another one right
+    // back" and "the old defense was back in my lineup".
+    if(app.realLeague){ const ok=await persistPowerup("sub",bp.id,bp.name,subQ,starter.id); if(!ok) return; }
     reset(bp);
     myStarters[si]=bp; myBench[bi]=starter;
+    // myStarters/myBench are rebuilt FROM app.lineup on every matchup setup
+    // (setupRealMatchup) — without also updating app.lineup itself here,
+    // that rebuild silently discards this swap the next time it runs.
+    if(app.realLeague && Array.isArray(app.lineup)){ app.lineup[si]=bp.id; saveLineup(); }
     app.inv.sub--; app.armed=null; $("overlay").innerHTML="";
     feed(`🔁 Emergency Sub — ${bp.name} in for ${starter.name} (fresh game)!`,"ev-pu");
-    const subQ=currentQuarter();
     logPU("me","sub",bp.name,false,subQ);
-    if(app.realLeague) persistPowerup("sub",bp.id,bp.name,subQ,starter.id);
     toast("Subbed in "+bp.name); renderMatchup();
   });
   ov.querySelector("#subCancel").onclick=()=>{ $("overlay").innerHTML=""; app.armed=null; renderMatchup(); };
 }
-function showQuarterPicker(k,p,allowed){
+function showQuarterPicker(k,p,allowed,blockedByOther){
   const cfg=POWERUPS[k]; const ov=$("overlay");
   ov.innerHTML=`<div class="modal"><div class="box">
     <div style="font-size:30px">${cfg.icon}</div>
@@ -715,20 +759,40 @@ function showQuarterPicker(k,p,allowed){
   const pick=ov.querySelector("#qpick");
   [1,2,3,4].forEach(q=>{
     const okq=allowed.includes(q);
-    const b=el("button","btn"+(okq?"":" sec")); b.textContent="Q"+q; b.style.padding="12px 15px";
-    if(!okq){ b.disabled=true; b.style.opacity=".35"; } else b.onclick=()=>schedulePU(k,p,q);
+    const blocked=(blockedByOther||[]).includes(q);
+    const b=el("button","btn"+(okq?"":" sec")); b.textContent="Q"+q+(blocked?" 🧊":""); b.style.padding="12px 15px";
+    if(blocked) b.onclick=()=>toast("Your opponent has frozen this quarter. Choose another quarter or choose a different player to use the power up on.");
+    else if(!okq){ b.disabled=true; b.style.opacity=".35"; }
+    else b.onclick=()=>confirmPUQuarter(k,p,q);
     pick.appendChild(b);
   });
   ov.querySelector("#qcancel").onclick=()=>{ ov.innerHTML=""; app.armed=null; renderMatchup(); };
 }
-function schedulePU(k,p,q){
+// Combined player+quarter confirmation, shown after a quarter is picked
+// (see usePU's comment on why this moved after quarter selection).
+function confirmPUQuarter(k,p,q){
+  const cfg=POWERUPS[k]; const ov=$("overlay");
+  ov.innerHTML=`<div class="modal"><div class="box" style="max-width:340px">
+    <div style="font-size:30px">${cfg.icon}</div>
+    <div style="font-weight:800;margin-top:6px">${cfg.name}</div>
+    <div class="muted" style="font-size:13px;margin:8px 0 4px">Use on <b style="color:var(--txt)">${p.name}</b> (${p.pos}${p.teamAb?" · "+p.teamAb:""}) for <b style="color:var(--txt)">Q${q}</b>?</div>
+    <div class="muted" style="font-size:11px">This locks in your target and quarter — you won't be able to change it once confirmed.</div>
+    <div class="row" style="margin-top:16px;gap:8px">
+      <button class="btn sec" id="puBack" style="flex:1">← Back</button>
+      <button class="btn" id="puConfirm" style="flex:1">Confirm</button>
+    </div></div></div>`;
+  ov.querySelector("#puBack").onclick=()=>usePUConfirmed(k,p);
+  ov.querySelector("#puConfirm").onclick=()=>schedulePU(k,p,q);
+}
+async function schedulePU(k,p,q){
   const cfg=POWERUPS[k];
-  app.inv[k]--; app.armed=null; $("overlay").innerHTML="";
+  $("overlay").innerHTML="";
+  if(app.realLeague){ const ok=await persistPowerup(k,p.id,p.name,q); if(!ok){ app.armed=null; renderMatchup(); return; } }
+  app.inv[k]--; app.armed=null;
   app.sim.scheduled.push({key:k,pid:p.id,q,by:"me"});
   logPU("me",k,p.name,false,q);
   feed(`${cfg.icon} ${cfg.name} scheduled on ${p.name} for Q${q}.`,"ev-pu");
   toast(`${cfg.name} set for Q${q}`);
-  if(app.realLeague) persistPowerup(k,p.id,p.name,q);
   renderMatchup();
 }
 
@@ -1265,7 +1329,11 @@ function renderMatchup(){
       const wk=app.currentWeek||1;
       const aRoster=startersForUser(m.uidA, app.lineupsByUser[m.uidA]);
       const bRoster=startersForUser(m.uidB, app.lineupsByUser[m.uidB]);
-      [...aRoster.startersOut,...aRoster.bench,...bRoster.startersOut,...bRoster.bench].forEach(p=>{ if(p.id) p.pts=playerWeekScore(p.id,wk)||0; });
+      // realPlayerAdjustedTotal, not the raw playerWeekScore — power-ups
+      // are real, persisted effects on real scoring, not just a display
+      // toy for the owner's own screen, so a spectated player who got
+      // Double Points (or was frozen, or subbed) needs to show that here too.
+      [...aRoster.startersOut,...aRoster.bench,...bRoster.startersOut,...bRoster.bench].forEach(p=>{ if(p.id) p.pts=realPlayerAdjustedTotal(p.id,wk); });
       s.appendChild(matchupLineups(aRoster.startersOut,bRoster.startersOut,"Starters",false,m.a,m.b));
       s.appendChild(matchupLineups(aRoster.bench,bRoster.bench,"Bench",false,m.a,m.b));
     }
@@ -1369,7 +1437,7 @@ function playerCell(p,side,armedCfg,cq,leftSide){
   if(activeNow) cell.classList.add("boosted");
   const hot = hotOn ? "🔥" : "";
   const tags=[hot, ...sched.map(x=>POWERUPS[x.key].icon+"Q"+x.q)].filter(Boolean).join(" ");
-  const sub = app.realLeague ? [tags, teamOppLine(p)].filter(Boolean).join(" · ") : (tags || statLine(p));
+  const sub = app.realLeague ? [tags, liveGameLine(p)].filter(Boolean).join(" · ") : (tags || statLine(p));
   const av=avatarHTML(p);
   const nm = leftSide ? (hot?hot+" ":"")+p.name+" "+statusTag(p) : statusTag(p)+p.name+(hot?" "+hot:"");
   const body=`<div class="mc-body"><div class="mc-nm">${nm}</div>
@@ -2933,6 +3001,29 @@ function teamOppLine(p){
   const gi=weekGameInfo(p, app.currentWeek||1);
   return p.teamAb+(gi?(" "+(gi.home?"vs ":"@ ")+gi.opp):"");
 }
+// Live per-player game status for the Matchup tab — "Q1 12:32 vs CLE" while
+// in progress (updates every poll, same 30s cadence as the rest of live
+// scoring), "F · NE 24-CLE 17" once final, and the plain schedule line
+// (teamOppLine) for anyone whose game hasn't kicked off yet or hasn't been
+// polled at all (bye week, or just not fetched this session yet).
+function liveGameLine(p){
+  if(!p.teamAb) return "";
+  const tid=teamIdForAb(p.teamAb); if(tid==null) return teamOppLine(p);
+  const gi=weekGameInfo(p, app.currentWeek||1);
+  const gs=app.playerGameState && app.playerGameState[tid];
+  if(!gs || !gi || !gi.opp) return teamOppLine(p);
+  if(gs.final){
+    const ls=gs.linescores||{};
+    const oppTid=Object.keys(ls).find(t=>t!==String(tid));
+    const myScore=(ls[tid]||ls[String(tid)]||[]).reduce((a,b)=>a+b,0);
+    const oppScore=oppTid?(ls[oppTid]||[]).reduce((a,b)=>a+b,0):null;
+    return `F · ${p.teamAb} ${myScore}${oppScore!=null?"-"+gi.opp+" "+oppScore:""}`;
+  }
+  if(gs.period>=1){
+    return `Q${gs.period}${gs.clock?" "+gs.clock:""} ${gi.home?"vs":"@"} ${gi.opp}`;
+  }
+  return teamOppLine(p);
+}
 async function fetchGameBoxFP(eventId){
   const d=await (await fetch(ESPN+"/summary?event="+eventId)).json();
   const comp=(d.header&&d.header.competitions&&d.header.competitions[0])||{};
@@ -2943,6 +3034,7 @@ async function fetchGameBoxFP(eventId){
   // to 1 (as if Q1 were already underway) is what locked Q1 out of the
   // quarter picker for players whose games hadn't started.
   const period= final?4 : state==="pre" ? 0 : (status.period||1);
+  const clock=status.displayClock||"";
   const scoringPlays=d.scoringPlays||[];
   const byAthlete={}, teamStats={};
   ((d.boxscore&&d.boxscore.players)||[]).forEach(tm=>{
@@ -2964,7 +3056,7 @@ async function fetchGameBoxFP(eventId){
     const tid=String((c.team&&c.team.id)||"");
     linescores[tid]=(c.linescores||[]).map(l=>l.value||0);
   });
-  return {period, final, byAthlete, linescores, teamStats};
+  return {period, final, clock, byAthlete, linescores, teamStats};
 }
 // Poll ESPN for every real player in the current matchup and persist real
 // per-quarter fantasy points. Any manager's open app contributes a poll —
@@ -2978,7 +3070,28 @@ async function pollRealStats(){
   ensurePool();
   for(let i=0;i<25 && (app.poolLoading || (!app.pool && !app.poolError)); i++) await new Promise(r=>setTimeout(r,200));
   const wk=app.currentWeek||1;
-  const all=[...myStarters,...myBench,...oppStarters,...oppBench].filter(p=>p.id && !p.id.startsWith("e_"));
+  // Also poll whichever matchup is actually on screen right now (spectating
+  // someone else's, not just your own) — otherwise a spectated player's
+  // stats only ever refresh if THEIR owner happens to have the Matchup tab
+  // open at the same moment. The background job (poll-scores.js) covers
+  // everyone eventually regardless, but this keeps whatever you're actively
+  // looking at as fresh as your own matchup.
+  let viewed=[];
+  try{
+    const others=realOtherMatchups(wk);
+    const allMatchups=[{your:true, uidA:app.user&&app.user.id, uidB:weekOpponent()}, ...others];
+    const cur=allMatchups[app.matchupIdx]||allMatchups[0];
+    if(cur && !cur.your && cur.uidA && cur.uidB){
+      const aRoster=startersForUser(cur.uidA, app.lineupsByUser[cur.uidA]);
+      const bRoster=startersForUser(cur.uidB, app.lineupsByUser[cur.uidB]);
+      viewed=[...aRoster.startersOut,...aRoster.bench,...bRoster.startersOut,...bRoster.bench];
+    }
+  }catch(e){}
+  const seenIds=new Set();
+  const all=[...myStarters,...myBench,...oppStarters,...oppBench,...viewed].filter(p=>{
+    if(!p.id || p.id.startsWith("e_")) return false;
+    if(seenIds.has(p.id)) return false; seenIds.add(p.id); return true;
+  });
   const byTeam={};
   all.forEach(p=>{ const tid=teamIdForAb(p.teamAb); if(!tid) return; (byTeam[tid]=byTeam[tid]||[]).push(p); });
   const updates=[];
@@ -2996,7 +3109,7 @@ async function pollRealStats(){
   }));
   teamIds.forEach((teamId,idx)=>{
     const box=boxes[idx]; if(!box) return;
-    app.playerGameState[teamId]={period:box.period, final:box.final};
+    app.playerGameState[teamId]={period:box.period, final:box.final, clock:box.clock, linescores:box.linescores};
     for(const p of byTeam[teamId]){
       let curFp, curQtd=0, curBonus=0, curBonusTd=0, curRaw=null, curSacks=0, curInts=0, totalAllowed=null;
       if(p.pos==="DEF"){
@@ -3104,12 +3217,16 @@ async function loadAllRealScoringData(){
     if(!app._scoringLoadWarned){ app._scoringLoadWarned=true; toast("⚠ Couldn't load power-up/score data: "+e.message); }
   }
 }
+// Returns whether the save actually succeeded — callers now await this and
+// only commit their own client-side state (inventory, lineup swap, etc.)
+// once it's true, instead of assuming success and later silently reverting
+// when the persisted data (the actual source of truth) didn't match.
 async function persistPowerup(key,pid,pname,q,targetId){
-  if(!app.realLeague) return;
+  if(!app.realLeague) return true;
   try{ const {error}=await sb.rpc("log_powerup",{lid:app.sbLeagueId, wk:app.currentWeek, pid, pname, key, q, target:targetId||null});
     if(error) throw error;
-    await loadAllRealScoringData(); refreshRealInv(); }
-  catch(e){ toast(e.message||"Couldn't save power-up"); }
+    await loadAllRealScoringData(); refreshRealInv(); return true; }
+  catch(e){ toast(e.message||"Couldn't save power-up"); return false; }
 }
 // For real leagues, weekly inventory is derived from persisted picks (so it
 // survives refreshes/devices and naturally refills when the week advances).
