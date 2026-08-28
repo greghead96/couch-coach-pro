@@ -1,50 +1,13 @@
-I have to refresh every time the commish starts the draft or does something. As the draft is going and people make their picks I should be able to see it as it goes. While testing everyone had to refresh every time someone made a pick to see it and to show it was their turn. 
-This will need to be across all pages. If someone picks up a player in the players tab I should not have to refresh to see it. If someone applies a powerup I should not have to refresh to see it. Any time a click is done it should be clear to everyone.
+When selecting a power up and then selecting a player, a confirmation box comes up prior to selecting which quarter. We should first select which quarter and then be prompted for confirmation.
 
-Also every time I type in the search bar it gets one letter and makes me click back in to the search bar...big issue there if you are typing it shoould let you until you click out
+Emergency sub seems off it automatically gave me another one right after using it. You only get 1 a week. Also I subbed in the 49ers for the Steelers defense when the steelers were in Q1 and it worked but then I check back later and the Steelers defense was in my lineup. 
+Also defensive stats seems to be working for sacks, ints,etc...but Steelers still show 0 points allowed, 10 fp but the game is PIT 14 BUF 10 right now. This should be updating as the game goes on so whatever gicing up 10 points to BUF it should show that in the points breakdown box anywhere it is needed.
 
-Every time we refresh the page it takes you out to the pick league page if you are in two leagues. When you refresh it should stay on the page you were last on.
+Make power up buttons on matchup page smaller so that we can see all 4 without having to scroll on phones
 
-Need a place on your my team page to hold your waivers and be able to reorder priority as needed. 
-You should also be able to attempt to claim as many different players but choose the same drop and depedning on priority it will drop the player if you get the first guy you want and the 2nd claim will disappear but if your first claim doesn't go through because of priority then hopefully your second player gets claimed. 
-If neither are able to be claimed then you keep the player you were going to drop  
+Improve formatting on matchup page so that the faces of the players on “your starters” are all aligned top to bottom like they are under “their starters”. Make it so the matchups tab has the faces directly next to the position icon on either side so they are straight down. 
+Also on the matchups tab when a player is in a game we should see the Q1 12:32 vs CLE or Q4 5:41 vs BUF. We want to know live as the game is going what quarter our player is in and who they are matched up against and this should change as the game is live. 
+Once the game is over you put an F for final and the team names and final score.
 
-Move the reset the draft button into the commish tab so it is not accidentally hit on the draft page
-
-Move the My Claims section from the league tab to the my teams tab next to trades
-
-Needs to be able to see other users teams in a view only mode...anywhere in the app if I click on a users team name it should send me to there team page which should look like the my team page but not have trades, waivers, etc...
-just see there team and bench and be able to click on their players to offer trades or check stats, projected points, ranked vs the opponent that week(vs CLE 32, vs DEN 5) etc...mirror ESPN
-Also when I am on a players page I should be able to click into one of their players and ask for a trade for them...this should prompt the trade menu to start. 
-You should also be able to search for a player on the players tab when show all players is on and do this the same way that way you don't have to remember who owns every player in the league
-
-Reverse standings actually used regular standings that needs to be fixed. and some players were able to put a claim in for a player and choose someone to drop...then they added a player they didn't have to claim and dropped that same player. 
-If they do this then their claim should be removed as the drop is no longer on their team to be part of a claim later
-
-Make sure the waiver claims are timestamped and ordered corrrectly. The last one I has go through was second in the list but it was the most recent. Make sure they are ordered. 
-Also successful claims that are landing in the League Activity page should have the same logic and also tell people what team(and user) amde the claim 
-Nobody should see each others claim unless it was successful and on the League activity page or the waiver transactions page
-Recent Claim Results should also be on the my team page just like the My Claims section
-
-The only thing the waivers tab should have after the updates is waiver order and this should reflect as needed for situations like if I am 5th in waiver order but I don't make any claims on Tuesday night and the 1-4 make claims then I should be 1st in order come Wednsday morning when waivers process. 
-I should only move back out of first when it flips to the next week and resets based on reverse standings OR I make a claim before the week ends.
-
-During the trade process when viewing a player card on my team AND the team I am trying to trade with the only way to go back is hit the X which then closes out the trade entirely. 
-We should not have to restart after checking a player card. Just add a back button so you can view multiple players as needed and then finalize your trade selections on either side
-
-Offered a trade to another team and it did not land in the trades tab. And because of this we cannot test if the league can have a vote, if the commish can push the trade through, etc...trades cannot be tested until this is resolved
-Here is what you wanted us to test:
--Propose/accept a trade with review OFF — should execute instantly (baseline, shouldn't have changed)
--Set review to "Commissioner" — propose, accept, confirm it sits pending until Greg approves/rejects
--Set review to "League vote" — propose, accept, have other managers vote, confirm majority approves/rejects it automatically
--While a vote's in progress, have Greg use the commissioner override button — should push it through (or kill it) immediately regardless of vote count
--Try proposing a trade after Greg sets a trade deadline week in the past — should be blocked with a clear message
-(48-hour auto-resolve isn't practically testable live — just know it's there as a backstop)
-
-Make sure we can actually test all of this dipshit
-
-The forgot password link works but it takes people to the old jghead version and they didn't have to change their password and login again. Let's use common sense here
-
-When I click on a player acrd and click on his points for any given week in the past this season, it should give me the points breakdown just like it does in the matchups tab
-
-Defensive stats need to be reworked in the commish settings. I have screenshots provided from ESPN that shows how most of the base defensive stats should be calculated. 
+Currently when a player has been frozen by the opponent for a certain quarter, the user is unable to select them for other power ups (double points or hot start) but they should be allowed to. For double points the user should only be able to select the quarters that the player is not frozen. 
+So if the opponent uses the freeze on Dillion Gabriel for Q2, the user should be able to use double points for Q1, Q3, or Q4. If they click Q2 in this scenario it should say "Your opponent has frozen this quarter. Choose another quarter or choose a different player to use the power up on."
