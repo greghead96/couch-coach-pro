@@ -228,7 +228,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260827d";
+const BUILD_ID = "20260828a";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -3077,26 +3077,76 @@ async function fetchGameBoxFP(eventId){
     // even though the real score already reflects it.
     teamScores[tid]=Number(c.score)||0;
   });
-  return {period, final, clock, byAthlete, linescores, teamScores, teamStats, scoringPlays};
+  return {period, final, clock, byAthlete, linescores, teamScores, teamStats, scoringPlays, drives:d.drives};
 }
-// Real quarter (1-4, chronological order) of each of this athlete's
-// touchdown scoring plays, matched by role since the same "Passing
-// Touchdown" scoring play credits BOTH the passer ("from {name}") and the
-// receiver (text starts with "{name} "), and a rushing TD's text starts
-// with "{name} " under "Rushing Touchdown" instead. Verified against live
-// ESPN data (a passer with 2 real Q1 TDs + 1 Q2 TD matched exactly
-// [1,1,2]) — this is what actually fixes a TD landing in the wrong
-// quarter bucket, which happens whenever a TD occurs late in a quarter
-// and isn't polled again before that quarter ends.
-function matchingTDPeriods(scoringPlays, name, role){
-  if(!name) return [];
-  return (scoringPlays||[]).filter(p=>{
-    const t=(p.type&&p.type.text)||"", txt=p.text||"";
-    if(role==="passer") return t==="Passing Touchdown" && txt.indexOf("from "+name+" (")>=0;
-    if(role==="receiver") return t==="Passing Touchdown" && txt.indexOf(name+" ")===0;
-    if(role==="rusher") return t==="Rushing Touchdown" && txt.indexOf(name+" ")===0;
-    return false;
-  }).map(p=>(p.period&&p.period.number)||null);
+// "D."/"F.Lastname" abbreviation ESPN uses in play-by-play text, from a
+// roster player's full display name — drop generational suffixes (Jr./
+// Sr./II/III/IV) since ESPN's play text does too.
+function abbrevName(full){
+  const parts=String(full||"").trim().split(/\s+/); if(parts.length<2) return null;
+  const suffixes=new Set(["jr.","jr","sr.","sr","ii","iii","iv","v"]);
+  let last=parts[parts.length-1];
+  if(suffixes.has(last.toLowerCase()) && parts.length>2) last=parts[parts.length-2];
+  return parts[0][0]+"."+last;
+}
+function playerAbbrevMap(players){
+  const map={};
+  (players||[]).forEach(p=>{ const ab=abbrevName(p.name||p.player_name); if(ab) map[ab]=p; });
+  return map;
+}
+// Direct, exact per-quarter offense stats from real play-by-play (every
+// play carries its own quarter, yardage, and real wallclock time) —
+// replaces the old "diff the cumulative box score, credit whichever
+// quarter is live right now" approach, which misattributed anything that
+// happened late in a quarter and wasn't polled again before that quarter
+// ended (confirmed live: a QB's 2nd Q1 TD landed in Q2 under the old
+// approach). Recomputed FRESH from the complete play list every poll, so
+// there's no diffing/last-seen-snapshot state to get out of sync at all.
+// Verified against live ESPN data: summed passing yards/TDs exactly
+// matched the box score total, and TD attribution matched real
+// broadcast-quarter results exactly (a QB's 3 TDs correctly split 2-Q1/1-Q2,
+// matching his two receivers' individual TD quarters too).
+//
+// Only rushing/passing/receiving yards, TDs, and INTs thrown are covered —
+// fumbles lost and 2-point conversions still use the older box-score-diff
+// fallback (see pollRealStats) since real play text for those has more
+// real-world variation than was safe to commit to without more testing.
+function statsFromDrives(drives, rosterByAbbrev){
+  const namePat="([A-Z][A-Za-z'-]*\\.[A-Za-z.'-]+)";
+  const out={};
+  const ensure=(pid)=>{ if(!out[pid]) out[pid]={quarters:{1:{stats:{}},2:{stats:{}},3:{stats:{}},4:{stats:{}}}, qtdEvents:[]}; return out[pid]; };
+  const bump=(pid,q,key,amt)=>{ const b=ensure(pid).quarters[q]; b.stats[key]=(b.stats[key]||0)+amt; };
+  const markTd=(pid,q,wallclock)=>{ ensure(pid).qtdEvents.push({period:q, wallclock}); };
+  const list=[...((drives&&drives.previous)||[]), ...(drives&&drives.current?[drives.current]:[])];
+  list.forEach(d=>{
+    (d.plays||[]).forEach(play=>{
+      const type=(play.type&&play.type.text)||"";
+      const text=String(play.text||"").trim().replace(/^\([^)]*\)\s*/,'').trim();
+      const period=(play.period&&play.period.number)||null;
+      if(!period || period<1 || period>4) return;
+      const yds=play.statYardage||0;
+      const wallclock=play.wallclock||null;
+      if(type==="Rush" || type==="Rushing Touchdown"){
+        const m=new RegExp("^"+namePat+"\\s").exec(text);
+        if(!m) return;
+        const p=rosterByAbbrev[m[1]]; if(!p) return;
+        bump(p.player_id, period, "rushYds", yds);
+        if(type==="Rushing Touchdown"){ bump(p.player_id, period, "rushTD", 1); markTd(p.player_id, period, wallclock); }
+      } else if(type==="Pass Reception" || type==="Passing Touchdown"){
+        const m=new RegExp("^"+namePat+"\\spass\\s.*?\\bto\\s"+namePat+"\\b").exec(text);
+        if(!m) return;
+        const passer=rosterByAbbrev[m[1]], receiver=rosterByAbbrev[m[2]];
+        const isTd=type==="Passing Touchdown";
+        if(passer){ bump(passer.player_id, period, "passYds", yds); if(isTd) bump(passer.player_id, period, "passTD", 1); }
+        if(receiver){ bump(receiver.player_id, period, "rec", 1); bump(receiver.player_id, period, "recYds", yds);
+          if(isTd){ bump(receiver.player_id, period, "recTD", 1); markTd(receiver.player_id, period, wallclock); } }
+      } else if(type==="Pass Interception Return"){
+        const m=new RegExp("^"+namePat+"\\spass\\s(?:short|deep)").exec(text);
+        if(m){ const passer=rosterByAbbrev[m[1]]; if(passer) bump(passer.player_id, period, "passInt", 1); }
+      }
+    });
+  });
+  return out;
 }
 // Poll ESPN for every real player in the current matchup and persist real
 // per-quarter fantasy points. Any manager's open app contributes a poll —
@@ -3150,8 +3200,13 @@ async function pollRealStats(){
   teamIds.forEach((teamId,idx)=>{
     const box=boxes[idx]; if(!box) return;
     app.playerGameState[teamId]={period:box.period, final:box.final, clock:box.clock, teamScores:box.teamScores};
+    // Built once per team: exact per-quarter offense stats straight from
+    // play-by-play (see statsFromDrives) — this is what actually drives
+    // pass/rush/rec yards+TDs+INT below now, not the box-score diff.
+    const offenseRoster=byTeam[teamId].filter(p=>p.pos!=="DEF");
+    const computedByPid=statsFromDrives(box.drives, playerAbbrevMap(offenseRoster));
     for(const p of byTeam[teamId]){
-      let curFp, curQtd=0, curBonus=0, curBonusTd=0, curRaw=null, curSacks=0, curInts=0, totalAllowed=null;
+      let curFp, curQtd=0, curBonus=0, curBonusTd=0, curRaw=null, curSacks=0, curInts=0, totalAllowed=null, computed=null;
       if(p.pos==="DEF"){
         const opp=Object.keys(box.teamScores).find(t=>t!==teamId);
         totalAllowed = opp!=null ? (box.teamScores[opp]||0) : 0;
@@ -3161,10 +3216,11 @@ async function pollRealStats(){
       } else {
         const espnId=(p.id||"").replace(/^e/,"");
         const r=box.byAthlete[espnId]; if(!r) continue;
-        curFp=r.fp; curQtd=r.qtd; curRaw=r.raw;
+        curRaw=r.raw; // still needed for fumLost, which stays on the box-score-diff fallback
+        computed=computedByPid[p.id]||null;
       }
       updates.push({athlete_id:p.id, week:wk, period:box.period, curFp, curQtd, curBonus, curBonusTd, curSacks, curInts, curRaw, totalAllowed, isDef:p.pos==="DEF",
-        name:(box.byAthlete[(p.id||"").replace(/^e/,"")]||{}).name, scoringPlays:box.scoringPlays});
+        pos:p.pos, computed});
     }
   });
   if(!updates.length) return;
@@ -3176,7 +3232,7 @@ async function pollRealStats(){
     const qpts=(prev&&prev.q_pts)?{...prev.q_pts}:{};
     const prevStats=(prev&&prev.prev_stats)?prev.prev_stats:{};
     let prevQtd=prev?(prev.prev_qtd||0):0, prevBonus=prev?(prev.prev_bonus||0):0;
-    let newPrevStats=prevStats;
+    let newPrevStats=prevStats, prevTotalOut=prev?prev.prev_total:0, firstQtdAtOut=null;
     const hadQtdBefore=prevQtd>0; // captured before prevQtd is reused below to hold the new cumulative total
     if(u.isDef){
       // Points allowed is a WHOLE-GAME stat in standard fantasy scoring (evaluated
@@ -3190,63 +3246,62 @@ async function pollRealStats(){
       const cur=qpts[u.period]||{fp:0,qtd:0,stats:{}};
       qpts[u.period]={fp:Math.round((cur.fp+bonusDelta)*10)/10, qtd:(cur.qtd||0)+tdDelta,
         stats:{sacks:(cur.stats&&cur.stats.sacks||0)+sackDelta, ints:(cur.stats&&cur.stats.ints||0)+intDelta, defTD:(cur.stats&&cur.stats.defTD||0)+tdDelta}};
-      prevBonus=u.curBonus; prevQtd=u.curBonusTd;
+      prevBonus=u.curBonus; prevQtd=u.curBonusTd; prevTotalOut=u.curFp;
       newPrevStats={sacks:u.curSacks, ints:u.curInts};
+      firstQtdAtOut=(!hadQtdBefore&&prevQtd>0)?new Date().toISOString():null;
     } else {
-      const prevTotal=prev?prev.prev_total:0;
-      const totalDelta=Math.max(0, u.curFp-prevTotal);
-      const statsDelta={};
-      Object.keys(u.curRaw||{}).forEach(k=>{ statsDelta[k]=Math.max(0,(u.curRaw[k]||0)-(prevStats[k]||0)); });
-      // TDs are placed in their REAL quarter (via scoringPlays), not
-      // "whichever quarter is live right now" — a TD near the end of a
-      // quarter can easily go unpolled until after that quarter's over,
-      // which used to dump the whole thing (yards AND the TD) into the
-      // wrong bucket (confirmed live: a QB's 2nd Q1 TD landed in Q2 because
-      // it wasn't polled until after Q1 had ended). Yardage still uses the
-      // current-quarter heuristic — ESPN's box score has no per-quarter
-      // yardage breakdown to do better without full play-by-play parsing.
-      const sc=app.settings.scoring;
-      const tdFields=[
-        {key:"passTD", role:"passer",   pts:sc.passTD||4, qualifies:false},
-        {key:"rushTD", role:"rusher",   pts:sc.rushTD||6, qualifies:true},
-        {key:"recTD",  role:"receiver", pts:sc.recTD||6,  qualifies:true},
-      ];
-      let tdPointsTotal=0;
-      tdFields.forEach(({key,role,pts,qualifies})=>{
-        const n=statsDelta[key]||0; if(!n) return;
-        const already=prevStats[key]||0;
-        const periods=matchingTDPeriods(u.scoringPlays, u.name, role).slice(already, already+n);
-        while(periods.length<n) periods.push(null); // never drop credit if scoringPlays can't confirm it
-        periods.forEach(per=>{
-          const q=(per>=1&&per<=4)?per:u.period;
-          const bucket=qpts[q]||{fp:0,qtd:0,stats:{}};
-          bucket.fp=Math.round((bucket.fp+pts)*10)/10;
-          if(qualifies) bucket.qtd=(bucket.qtd||0)+1;
-          bucket.stats={...bucket.stats, [key]:((bucket.stats&&bucket.stats[key])||0)+1};
-          qpts[q]=bucket;
-          tdPointsTotal+=pts;
-        });
-      });
-      // Whatever's left after backing the TD points above out of the
-      // total delta — yardage, receptions, INTs thrown, fumbles lost —
-      // still goes to the current quarter, same as before.
-      const remainingFp=Math.max(0, Math.round((totalDelta-tdPointsTotal)*10)/10);
-      const remainingStatsDelta={...statsDelta};
-      tdFields.forEach(({key})=>{ delete remainingStatsDelta[key]; });
-      const cur=qpts[u.period]||{fp:0,qtd:0,stats:{}};
-      const mergedStats={...(cur.stats||{})};
-      Object.keys(remainingStatsDelta).forEach(k=>{ mergedStats[k]=(mergedStats[k]||0)+remainingStatsDelta[k]; });
-      qpts[u.period]={fp:Math.round((cur.fp+remainingFp)*10)/10, qtd:cur.qtd||0, stats:mergedStats};
-      prevQtd=u.curQtd;
-      newPrevStats=u.curRaw||{};
+      // Offense stats now come directly from play-by-play (statsFromDrives)
+      // instead of diffing the cumulative box score — exact per-quarter
+      // attribution for yardage AND touchdowns (not just TDs), recomputed
+      // fresh every poll from the complete play list, so there's no
+      // "previous snapshot" to drift out of sync for these fields at all.
+      // Fumbles lost still uses the old box-score-diff approach — real
+      // fumble play text has more real-world variation than was safe to
+      // commit to without more testing.
+      const computed=u.computed||{quarters:{1:{stats:{}},2:{stats:{}},3:{stats:{}},4:{stats:{}}}, qtdEvents:[]};
+      let totalFp=0;
+      for(let q=1;q<=4;q++){
+        const stats={...(computed.quarters[q]&&computed.quarters[q].stats)};
+        const qtd=(stats.rushTD||0)+(stats.recTD||0);
+        const fp=quarterFpFromStats(u.pos, stats);
+        qpts[q]={fp, qtd, stats};
+        totalFp+=fp;
+      }
+      // Fields play-by-play doesn't cover — fumbles lost, and (for
+      // kickers, who share this same branch) FG/XP makes and misses —
+      // still use the old box-score-diff approach, credited to whichever
+      // quarter is currently live. Kickers never match any Rush/Pass
+      // Reception pattern, so `computed` is empty for them and this is
+      // the ONLY place their stats come from; nothing regresses.
+      const PLAY_BY_PLAY_FIELDS=new Set(["passYds","passTD","passInt","rushYds","rushTD","rec","recYds","recTD"]);
+      const leftoverRaw=u.curRaw||{};
+      const leftoverStatsDelta={};
+      Object.keys(leftoverRaw).forEach(k=>{ if(!PLAY_BY_PLAY_FIELDS.has(k)) leftoverStatsDelta[k]=Math.max(0,(leftoverRaw[k]||0)-(prevStats[k]||0)); });
+      if(Object.keys(leftoverStatsDelta).some(k=>leftoverStatsDelta[k])){
+        const cur=qpts[u.period];
+        const mergedStats={...cur.stats};
+        Object.keys(leftoverStatsDelta).forEach(k=>{ mergedStats[k]=(mergedStats[k]||0)+leftoverStatsDelta[k]; });
+        const before=quarterFpFromStats(u.pos, cur.stats), after=quarterFpFromStats(u.pos, mergedStats);
+        cur.stats=mergedStats;
+        cur.fp=Math.round((cur.fp+(after-before))*10)/10;
+        totalFp+=(after-before);
+      }
+      // Hot Start needs the REAL chronological moment a qualifying TD
+      // happened (a Q1 TD in an 8pm game is later in real time than a Q4
+      // TD in a 1pm game) — now available directly from the play itself
+      // (wallclock) instead of approximating it as "whenever we happened
+      // to poll and noticed the cumulative count went up".
+      const earliestTd=computed.qtdEvents.reduce((min,e)=>(e.wallclock&&(!min||e.wallclock<min))?e.wallclock:min, null);
+      prevQtd=computed.qtdEvents.length; // informational only — nothing diffs against this for offense anymore
+      newPrevStats=leftoverRaw;
+      prevTotalOut=Math.round(totalFp*10)/10;
+      firstQtdAtOut=earliestTd || ((!hadQtdBefore&&prevQtd>0)?new Date().toISOString():null);
     }
     // See poll-scores.js's identical comment: Hot Start needs real
-    // chronological order across different games (a Q1 score in the 8pm
-    // game is later in real time than a Q4 score in a 1pm game), which
-    // quarter number can't express on its own. Stamped once, the first
-    // time this player's cumulative qualifying-TD count leaves zero.
-    const firstQtdAt=(prev&&prev.first_qtd_at)?prev.first_qtd_at:(!hadQtdBefore&&prevQtd>0)?new Date().toISOString():null;
-    return { athlete_id:u.athlete_id, week:wk, season:2026, q_pts:qpts, prev_total:u.curFp, prev_qtd:prevQtd, prev_bonus:prevBonus, prev_stats:newPrevStats, first_qtd_at:firstQtdAt,
+    // chronological order across different games, which quarter number
+    // can't express on its own. Set once and never overwritten after that.
+    const firstQtdAt=(prev&&prev.first_qtd_at)?prev.first_qtd_at:firstQtdAtOut;
+    return { athlete_id:u.athlete_id, week:wk, season:2026, q_pts:qpts, prev_total:prevTotalOut, prev_qtd:prevQtd, prev_bonus:prevBonus, prev_stats:newPrevStats, first_qtd_at:firstQtdAt,
       season_type: (app.settings.league&&app.settings.league.testPreseason)?"preseason":"regular" };
   });
   const {error:upsertErr}=await sb.from("player_week_stats").upsert(rows);

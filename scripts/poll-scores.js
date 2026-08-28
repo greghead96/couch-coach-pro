@@ -202,22 +202,79 @@ async function fetchGameBox(eventId) {
     // CURRENT (still in progress) quarter's linescore entry until it ends.
     teamScores[tid] = Number(c.score) || 0;
   });
-  return { period, final, byAthlete, linescores, teamScores, teamStats, scoringPlays };
+  return { period, final, byAthlete, linescores, teamScores, teamStats, scoringPlays, drives: d.drives };
 }
-// Real quarter (1-4, chronological) of each of this athlete's touchdown
-// scoring plays, matched by role — mirrors index.html's identical
-// function (matchingTDPeriods), verified against live ESPN data there.
-// Kept in sync manually since this file has no shared-module setup with
-// the client script.
-function matchingTDPeriods(scoringPlays, name, role) {
-  if (!name) return [];
-  return (scoringPlays || []).filter((p) => {
-    const t = (p.type && p.type.text) || "", txt = p.text || "";
-    if (role === "passer") return t === "Passing Touchdown" && txt.indexOf("from " + name + " (") >= 0;
-    if (role === "receiver") return t === "Passing Touchdown" && txt.indexOf(name + " ") === 0;
-    if (role === "rusher") return t === "Rushing Touchdown" && txt.indexOf(name + " ") === 0;
-    return false;
-  }).map((p) => (p.period && p.period.number) || null);
+// "D."/"F.Lastname" abbreviation ESPN uses in play-by-play text, from a
+// roster player's full display name — mirrors index.html's identical
+// function. Kept in sync manually since this file has no shared-module
+// setup with the client script.
+function abbrevName(full) {
+  const parts = String(full || "").trim().split(/\s+/); if (parts.length < 2) return null;
+  const suffixes = new Set(["jr.", "jr", "sr.", "sr", "ii", "iii", "iv", "v"]);
+  let last = parts[parts.length - 1];
+  if (suffixes.has(last.toLowerCase()) && parts.length > 2) last = parts[parts.length - 2];
+  return parts[0][0] + "." + last;
+}
+function playerAbbrevMap(players) {
+  const map = {};
+  (players || []).forEach((p) => { const ab = abbrevName(p.name || p.player_name); if (ab) map[ab] = p; });
+  return map;
+}
+// Direct, exact per-quarter offense stats from real play-by-play — mirrors
+// index.html's identical function (statsFromDrives), verified there
+// against live ESPN data: summed stats exactly matched the box score
+// total, and TD attribution matched real broadcast-quarter results.
+// Fumbles lost and 2-point conversions still use boxAthleteRaw's
+// cumulative totals (see pollLeague) — real fumble play text has more
+// variation than was safe to commit to without more testing.
+function statsFromDrives(drives, rosterByAbbrev) {
+  const namePat = "([A-Z][A-Za-z'-]*\\.[A-Za-z.'-]+)";
+  const out = {};
+  const ensure = (pid) => { if (!out[pid]) out[pid] = { quarters: { 1: { stats: {} }, 2: { stats: {} }, 3: { stats: {} }, 4: { stats: {} } }, qtdEvents: [] }; return out[pid]; };
+  const bump = (pid, q, key, amt) => { const b = ensure(pid).quarters[q]; b.stats[key] = (b.stats[key] || 0) + amt; };
+  const markTd = (pid, q, wallclock) => { ensure(pid).qtdEvents.push({ period: q, wallclock }); };
+  const list = [...((drives && drives.previous) || []), ...(drives && drives.current ? [drives.current] : [])];
+  list.forEach((d) => {
+    (d.plays || []).forEach((play) => {
+      const type = (play.type && play.type.text) || "";
+      const text = String(play.text || "").trim().replace(/^\([^)]*\)\s*/, "").trim();
+      const period = (play.period && play.period.number) || null;
+      if (!period || period < 1 || period > 4) return;
+      const yds = play.statYardage || 0;
+      const wallclock = play.wallclock || null;
+      if (type === "Rush" || type === "Rushing Touchdown") {
+        const m = new RegExp("^" + namePat + "\\s").exec(text);
+        if (!m) return;
+        const p = rosterByAbbrev[m[1]]; if (!p) return;
+        bump(p.player_id, period, "rushYds", yds);
+        if (type === "Rushing Touchdown") { bump(p.player_id, period, "rushTD", 1); markTd(p.player_id, period, wallclock); }
+      } else if (type === "Pass Reception" || type === "Passing Touchdown") {
+        const m = new RegExp("^" + namePat + "\\spass\\s.*?\\bto\\s" + namePat + "\\b").exec(text);
+        if (!m) return;
+        const passer = rosterByAbbrev[m[1]], receiver = rosterByAbbrev[m[2]];
+        const isTd = type === "Passing Touchdown";
+        if (passer) { bump(passer.player_id, period, "passYds", yds); if (isTd) bump(passer.player_id, period, "passTD", 1); }
+        if (receiver) {
+          bump(receiver.player_id, period, "rec", 1); bump(receiver.player_id, period, "recYds", yds);
+          if (isTd) { bump(receiver.player_id, period, "recTD", 1); markTd(receiver.player_id, period, wallclock); }
+        }
+      } else if (type === "Pass Interception Return") {
+        const m = new RegExp("^" + namePat + "\\spass\\s(?:short|deep)").exec(text);
+        if (m) { const passer = rosterByAbbrev[m[1]]; if (passer) bump(passer.player_id, period, "passInt", 1); }
+      }
+    });
+  });
+  return out;
+}
+// Same hardcoded "informational only" point values used elsewhere in this
+// file (real per-league settings are applied client-side) — position-
+// agnostic since a stats object only ever has the fields relevant to
+// whoever it belongs to populated in the first place.
+function infoFpFromStats(stats) {
+  return (stats.passYds || 0) / 25 + (stats.passTD || 0) * 4 + (stats.passInt || 0) * -2
+    + (stats.rushYds || 0) / 10 + (stats.rushTD || 0) * 6
+    + (stats.rec || 0) * 0.5 + (stats.recYds || 0) / 10 + (stats.recTD || 0) * 6
+    + (stats.fumLost || 0) * -2;
 }
 
 async function pollLeague(league) {
@@ -241,6 +298,11 @@ async function pollLeague(league) {
     let box;
     try { box = await fetchGameBox(eventId); }
     catch (e) { if (e instanceof RateLimitedError) throw e; console.error(`box fetch failed for ${ab}`, e.message); continue; }
+    // Built once per team: exact per-quarter offense stats straight from
+    // play-by-play (statsFromDrives) — this drives pass/rush/rec
+    // yards+TDs+INT below now, not the box-score diff.
+    const offenseRoster = byTeam[ab].filter((p) => p.pos !== "DEF");
+    const computedByPid = statsFromDrives(box.drives, playerAbbrevMap(offenseRoster));
     for (const p of byTeam[ab]) {
       if (p.pos === "DEF") {
         const athleteId = `def_${teamId}`;
@@ -251,7 +313,7 @@ async function pollLeague(league) {
       } else {
         const espnId = String(p.player_id || "").replace(/^e/, "");
         const r = box.byAthlete[espnId]; if (!r) continue;
-        updates.push({ athleteId: p.player_id, week: wk, period: box.period, isDef: false, raw: r.raw, qtd: r.qtd, name: r.name, scoringPlays: box.scoringPlays });
+        updates.push({ athleteId: p.player_id, week: wk, period: box.period, isDef: false, raw: r.raw, computed: computedByPid[p.player_id] || null });
       }
     }
   }
@@ -265,7 +327,7 @@ async function pollLeague(league) {
     const prev = byId[u.athleteId];
     const qpts = (prev && prev.q_pts) ? { ...prev.q_pts } : {};
     const prevStats = (prev && prev.prev_stats) ? prev.prev_stats : {};
-    let prevQtd = prev ? (prev.prev_qtd || 0) : 0, prevBonus = prev ? (prev.prev_bonus || 0) : 0, newPrevStats = prevStats, prevTotalOut = 0;
+    let prevQtd = prev ? (prev.prev_qtd || 0) : 0, prevBonus = prev ? (prev.prev_bonus || 0) : 0, newPrevStats = prevStats, prevTotalOut = 0, firstQtdAtOut = null;
     const hadQtdBefore = prevQtd > 0; // captured before prevQtd gets reused below to hold the new cumulative total
     if (u.isDef) {
       qpts.pa = { allowed: u.totalAllowed, fp: defBracket(u.totalAllowed) };
@@ -282,60 +344,56 @@ async function pollLeague(league) {
       };
       prevBonus = curBonusFp; prevQtd = u.bonus.td;
       newPrevStats = { sacks: u.bonus.sacks, ints: u.bonus.ints };
+      firstQtdAtOut = (!hadQtdBefore && prevQtd > 0) ? new Date().toISOString() : null;
     } else {
-      const curFp = (u.raw.passYds || 0) / 25 + (u.raw.passTD || 0) * 4 + (u.raw.passInt || 0) * -2
-        + (u.raw.rushYds || 0) / 10 + (u.raw.rushTD || 0) * 6
-        + (u.raw.rec || 0) * 0.5 + (u.raw.recYds || 0) / 10 + (u.raw.recTD || 0) * 6
-        + (u.raw.fumLost || 0) * -2
-        + (u.raw.fgMade0_39 || 0) * 3 + (u.raw.fgMade40_49 || 0) * 4 + (u.raw.fgMade50p || 0) * 5
-        + (u.raw.fgMissed || 0) * -1 + (u.raw.xpMade || 0) * 1; // informational only, clients recompute with real settings
-      const prevTotal = prev ? (prev.prev_total || 0) : 0;
-      const totalDelta = Math.max(0, curFp - prevTotal);
-      const statsDelta = {};
-      Object.keys(u.raw).forEach((k) => { statsDelta[k] = Math.max(0, (u.raw[k] || 0) - (prevStats[k] || 0)); });
-      // TDs placed in their REAL quarter (via scoringPlays), not "whichever
-      // quarter is live right now" — mirrors index.html's identical fix
-      // (matchingTDPeriods), same root cause: a TD near the end of a
-      // quarter can go unpolled until after that quarter ends.
-      const tdFields = [
-        { key: "passTD", role: "passer", pts: 4, qualifies: false },
-        { key: "rushTD", role: "rusher", pts: 6, qualifies: true },
-        { key: "recTD", role: "receiver", pts: 6, qualifies: true },
-      ];
-      let tdPointsTotal = 0;
-      tdFields.forEach(({ key, role, pts, qualifies }) => {
-        const n = statsDelta[key] || 0; if (!n) return;
-        const already = prevStats[key] || 0;
-        const periods = matchingTDPeriods(u.scoringPlays, u.name, role).slice(already, already + n);
-        while (periods.length < n) periods.push(null); // never drop credit if scoringPlays can't confirm it
-        periods.forEach((per) => {
-          const q = (per >= 1 && per <= 4) ? per : u.period;
-          const bucket = qpts[q] || { fp: 0, qtd: 0, stats: {} };
-          bucket.fp = Math.round((bucket.fp + pts) * 10) / 10;
-          if (qualifies) bucket.qtd = (bucket.qtd || 0) + 1;
-          bucket.stats = { ...bucket.stats, [key]: ((bucket.stats && bucket.stats[key]) || 0) + 1 };
-          qpts[q] = bucket;
-          tdPointsTotal += pts;
-        });
-      });
-      const remainingFp = Math.max(0, Math.round((totalDelta - tdPointsTotal) * 10) / 10);
-      const remainingStatsDelta = { ...statsDelta };
-      tdFields.forEach(({ key }) => { delete remainingStatsDelta[key]; });
-      const cur = qpts[u.period] || { fp: 0, qtd: 0, stats: {} };
-      const mergedStats = { ...(cur.stats || {}) };
-      Object.keys(remainingStatsDelta).forEach((k) => { mergedStats[k] = (mergedStats[k] || 0) + remainingStatsDelta[k]; });
-      qpts[u.period] = { fp: Math.round((cur.fp + remainingFp) * 10) / 10, qtd: cur.qtd || 0, stats: mergedStats };
-      prevQtd = u.qtd; prevBonus = 0; newPrevStats = u.raw;
-      prevTotalOut = curFp; // true cumulative fp-to-date, needed for next run's delta calc
+      // Offense stats now come directly from play-by-play (statsFromDrives)
+      // instead of diffing the cumulative box score — exact per-quarter
+      // attribution for yardage AND touchdowns, recomputed fresh every poll
+      // from the complete play list, so there's no "previous snapshot" to
+      // drift out of sync for these fields at all. Mirrors index.html's
+      // identical rework.
+      const computed = u.computed || { quarters: { 1: { stats: {} }, 2: { stats: {} }, 3: { stats: {} }, 4: { stats: {} } }, qtdEvents: [] };
+      let totalFp = 0;
+      for (let q = 1; q <= 4; q++) {
+        const stats = { ...(computed.quarters[q] && computed.quarters[q].stats) };
+        const qtd = (stats.rushTD || 0) + (stats.recTD || 0);
+        const fp = infoFpFromStats(stats);
+        qpts[q] = { fp, qtd, stats };
+        totalFp += fp;
+      }
+      // Fields play-by-play doesn't cover — fumbles lost, and (for
+      // kickers, who share this same branch) FG/XP makes and misses —
+      // still use the old box-score-diff approach, credited to whichever
+      // quarter is currently live. Kickers never match any Rush/Pass
+      // Reception pattern, so `computed` is empty for them and this is
+      // the ONLY place their stats come from; nothing regresses.
+      const PLAY_BY_PLAY_FIELDS = new Set(["passYds", "passTD", "passInt", "rushYds", "rushTD", "rec", "recYds", "recTD"]);
+      const leftoverStatsDelta = {};
+      Object.keys(u.raw || {}).forEach((k) => { if (!PLAY_BY_PLAY_FIELDS.has(k)) leftoverStatsDelta[k] = Math.max(0, (u.raw[k] || 0) - (prevStats[k] || 0)); });
+      if (Object.keys(leftoverStatsDelta).some((k) => leftoverStatsDelta[k])) {
+        const cur = qpts[u.period];
+        const mergedStats = { ...cur.stats };
+        Object.keys(leftoverStatsDelta).forEach((k) => { mergedStats[k] = (mergedStats[k] || 0) + leftoverStatsDelta[k]; });
+        const before = infoFpFromStats(cur.stats), after = infoFpFromStats(mergedStats);
+        cur.stats = mergedStats;
+        cur.fp = Math.round((cur.fp + (after - before)) * 10) / 10;
+        totalFp += (after - before);
+      }
+      // Hot Start needs the REAL chronological moment a qualifying TD
+      // happened — now available directly from the play itself (wallclock)
+      // instead of approximating it as "whenever we happened to poll and
+      // noticed the cumulative count went up".
+      const earliestTd = computed.qtdEvents.reduce((min, e) => (e.wallclock && (!min || e.wallclock < min)) ? e.wallclock : min, null);
+      prevQtd = computed.qtdEvents.length; // informational only — nothing diffs against this for offense anymore
+      newPrevStats = u.raw || {};
+      prevTotalOut = Math.round(totalFp * 10) / 10;
+      firstQtdAtOut = earliestTd || ((!hadQtdBefore && prevQtd > 0) ? new Date().toISOString() : null);
     }
     // Hot Start needs real chronological order across DIFFERENT games (a Q1
     // score in the 8pm game happens later in real time than a Q4 score in a
-    // 1pm game), which quarter number alone can't express. Stamped once,
-    // the first time this player's cumulative qualifying-TD count goes from
-    // zero to nonzero — close enough given the ~20s live poll cadence — and
+    // 1pm game), which quarter number alone can't express. Set once and
     // never overwritten after that.
-    const firstQtdAt = (prev && prev.first_qtd_at) ? prev.first_qtd_at
-      : (!hadQtdBefore && prevQtd > 0) ? new Date().toISOString() : null;
+    const firstQtdAt = (prev && prev.first_qtd_at) ? prev.first_qtd_at : firstQtdAtOut;
     return {
       athlete_id: u.athleteId, week: wk, season: 2026, q_pts: qpts,
       prev_total: u.isDef ? 0 : prevTotalOut, prev_qtd: prevQtd, prev_bonus: prevBonus, prev_stats: newPrevStats,
