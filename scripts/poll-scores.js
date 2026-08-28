@@ -242,25 +242,34 @@ function statsFromDrives(drives, rosterByAbbrev) {
       if (!period || period < 1 || period > 4) return;
       const yds = play.statYardage || 0;
       const wallclock = play.wallclock || null;
+      // Roster objects passed in vary by caller — this file's are raw
+      // draft_picks rows (.player_id), index.html's are simPlayer-shaped
+      // (.id) — support both rather than silently bucketing every match
+      // under an "undefined" key (the live bug: every offense player's
+      // computed stats came back null, and the caller's null-fallback
+      // overwrote real q_pts with all-zero stats).
+      const pidOf = (p) => p.player_id || p.id;
       if (type === "Rush" || type === "Rushing Touchdown") {
         const m = new RegExp("^" + namePat + "\\s").exec(text);
         if (!m) return;
         const p = rosterByAbbrev[m[1]]; if (!p) return;
-        bump(p.player_id, period, "rushYds", yds);
-        if (type === "Rushing Touchdown") { bump(p.player_id, period, "rushTD", 1); markTd(p.player_id, period, wallclock); }
+        const pid = pidOf(p);
+        bump(pid, period, "rushYds", yds);
+        if (type === "Rushing Touchdown") { bump(pid, period, "rushTD", 1); markTd(pid, period, wallclock); }
       } else if (type === "Pass Reception" || type === "Passing Touchdown") {
         const m = new RegExp("^" + namePat + "\\spass\\s.*?\\bto\\s" + namePat + "\\b").exec(text);
         if (!m) return;
         const passer = rosterByAbbrev[m[1]], receiver = rosterByAbbrev[m[2]];
         const isTd = type === "Passing Touchdown";
-        if (passer) { bump(passer.player_id, period, "passYds", yds); if (isTd) bump(passer.player_id, period, "passTD", 1); }
+        if (passer) { const pid = pidOf(passer); bump(pid, period, "passYds", yds); if (isTd) bump(pid, period, "passTD", 1); }
         if (receiver) {
-          bump(receiver.player_id, period, "rec", 1); bump(receiver.player_id, period, "recYds", yds);
-          if (isTd) { bump(receiver.player_id, period, "recTD", 1); markTd(receiver.player_id, period, wallclock); }
+          const pid = pidOf(receiver);
+          bump(pid, period, "rec", 1); bump(pid, period, "recYds", yds);
+          if (isTd) { bump(pid, period, "recTD", 1); markTd(pid, period, wallclock); }
         }
       } else if (type === "Pass Interception Return") {
         const m = new RegExp("^" + namePat + "\\spass\\s(?:short|deep)").exec(text);
-        if (m) { const passer = rosterByAbbrev[m[1]]; if (passer) bump(passer.player_id, period, "passInt", 1); }
+        if (m) { const passer = rosterByAbbrev[m[1]]; if (passer) bump(pidOf(passer), period, "passInt", 1); }
       }
     });
   });
