@@ -228,7 +228,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260828b";
+const BUILD_ID = "20260828c";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -3242,11 +3242,33 @@ async function pollRealStats(){
     let prevQtd=prev?(prev.prev_qtd||0):0, prevBonus=prev?(prev.prev_bonus||0):0;
     let newPrevStats=prevStats, prevTotalOut=prev?prev.prev_total:0, firstQtdAtOut=null;
     const hadQtdBefore=prevQtd>0; // captured before prevQtd is reused below to hold the new cumulative total
+    // Fantasy points legitimately drop within a game (an INT thrown, a
+    // fumble lost, a sack/negative run — whatever the league's own
+    // settings actually assign negative points to), so this ISN'T a
+    // "never decrease" guard. It only catches one specific failure shape:
+    // play-by-play finding LITERALLY NOTHING for a player who already has
+    // real recorded stats. A real drafted player who's actively in the
+    // game essentially never goes from "has stats" to "zero plays found
+    // at all" — that's the signature of a bad fetch, a name-match miss, or
+    // (confirmed live once already) a stale browser tab still running old,
+    // broken poll code. Skipping the write here just leaves the existing,
+    // better data alone; the next good poll recomputes correctly anyway.
+    if(!u.isDef && u.computed){
+      const isEmptyQ=q=>{ const s=q&&q.stats; return !s||Object.keys(s).length===0; };
+      const computedIsEmpty=[1,2,3,4].every(q=>isEmptyQ(u.computed.quarters[q]));
+      const hadRealDataBefore=prev && ( (prev.prev_total||0)>0 || [1,2,3,4].some(q=>!isEmptyQ(prev.q_pts&&prev.q_pts[q])) );
+      if(computedIsEmpty && hadRealDataBefore) return null;
+    }
     if(u.isDef){
       // Points allowed is a WHOLE-GAME stat in standard fantasy scoring (evaluated
       // once off the final/current total, never per-quarter) — stored separately
       // from the quarter buckets and just overwritten fresh each poll (exact, no diff needed).
-      qpts.pa={allowed:u.totalAllowed, fp:defBracket(u.totalAllowed)};
+      // Guarded with the existing stored value via max() — a real score
+      // never goes down, so if THIS fetch is briefly behind (a slower
+      // concurrent poll landing after a faster one, or ESPN itself lagging
+      // for a moment) it can't drag the stored total backward.
+      const safeTotalAllowed=Math.max(u.totalAllowed, (prev&&prev.q_pts&&prev.q_pts.pa&&prev.q_pts.pa.allowed)||0);
+      qpts.pa={allowed:safeTotalAllowed, fp:defBracket(safeTotalAllowed)};
       // Sacks/INTs/def-TDs are discrete plays, cumulative-to-date — diff like offense
       // and credit whichever quarter is live right now.
       const bonusDelta=Math.max(0, u.curBonus-prevBonus), tdDelta=Math.max(0, u.curBonusTd-prevQtd);
@@ -3311,7 +3333,8 @@ async function pollRealStats(){
     const firstQtdAt=(prev&&prev.first_qtd_at)?prev.first_qtd_at:firstQtdAtOut;
     return { athlete_id:u.athlete_id, week:wk, season:2026, q_pts:qpts, prev_total:prevTotalOut, prev_qtd:prevQtd, prev_bonus:prevBonus, prev_stats:newPrevStats, first_qtd_at:firstQtdAt,
       season_type: (app.settings.league&&app.settings.league.testPreseason)?"preseason":"regular" };
-  });
+  }).filter(Boolean);
+  if(!rows.length) return;
   const {error:upsertErr}=await sb.from("player_week_stats").upsert(rows);
   if(upsertErr){
     console.error("player_week_stats upsert failed", upsertErr);
@@ -4590,6 +4613,12 @@ setInterval(tick, TICK);
 // so the cadence is guaranteed fresh, not just "eventually catches up".
 document.addEventListener("visibilitychange", async ()=>{
   if(document.visibilityState!=="visible" || !app.user) return;
+  // Also check for a newer deploy right away — the 90s interval alone
+  // means a backgrounded tab could sit on an old, possibly-buggy build for
+  // a while after returning to the foreground before it notices (a stale
+  // tab silently re-polling with old code was confirmed to have actually
+  // corrupted live stats once already).
+  checkForUpdate();
   if(app.connectedLeague && app.realLeague){
     if(app.tab==="matchup"){ stopStatsPoll(); pollRealStats(); startStatsPoll(); }
     await Promise.all([loadTrades(), loadTransactions(), loadWaivers(), loadPlayoffMatchups(), loadDraft()]);

@@ -338,8 +338,23 @@ async function pollLeague(league) {
     const prevStats = (prev && prev.prev_stats) ? prev.prev_stats : {};
     let prevQtd = prev ? (prev.prev_qtd || 0) : 0, prevBonus = prev ? (prev.prev_bonus || 0) : 0, newPrevStats = prevStats, prevTotalOut = 0, firstQtdAtOut = null;
     const hadQtdBefore = prevQtd > 0; // captured before prevQtd gets reused below to hold the new cumulative total
+    // Fantasy points legitimately drop within a game (an INT, a fumble, a
+    // negative run — whatever the league's own settings assign negative
+    // points to), so this isn't a "never decrease" guard. It only catches
+    // one specific failure shape: play-by-play finding LITERALLY NOTHING
+    // for a player who already has real recorded stats — the signature of
+    // a bad fetch, a name-match miss, or (confirmed live once already) a
+    // stale poll run still using old, broken code. Mirrors index.html's
+    // identical guard.
+    if (!u.isDef && u.computed) {
+      const isEmptyQ = (q) => { const s = q && q.stats; return !s || Object.keys(s).length === 0; };
+      const computedIsEmpty = [1, 2, 3, 4].every((q) => isEmptyQ(u.computed.quarters[q]));
+      const hadRealDataBefore = prev && ((prev.prev_total || 0) > 0 || [1, 2, 3, 4].some((q) => !isEmptyQ(prev.q_pts && prev.q_pts[q])));
+      if (computedIsEmpty && hadRealDataBefore) return null;
+    }
     if (u.isDef) {
-      qpts.pa = { allowed: u.totalAllowed, fp: defBracket(u.totalAllowed) };
+      const safeTotalAllowed = Math.max(u.totalAllowed, (prev && prev.q_pts && prev.q_pts.pa && prev.q_pts.pa.allowed) || 0);
+      qpts.pa = { allowed: safeTotalAllowed, fp: defBracket(safeTotalAllowed) };
       const curBonusFp = u.bonus.sacks + u.bonus.ints * 2 + u.bonus.td * 6; // informational only, clients recompute with real settings
       const bonusDelta = Math.max(0, curBonusFp - prevBonus);
       const tdDelta = Math.max(0, u.bonus.td - prevQtd);
@@ -408,7 +423,8 @@ async function pollLeague(league) {
       prev_total: u.isDef ? 0 : prevTotalOut, prev_qtd: prevQtd, prev_bonus: prevBonus, prev_stats: newPrevStats,
       first_qtd_at: firstQtdAt, season_type: testPreseason ? "preseason" : "regular",
     };
-  });
+  }).filter(Boolean);
+  if (!rows.length) { console.log(`league ${league.id}: nothing to write for week ${wk} (all rows guarded/skipped)`); return; }
 
   await sb("player_week_stats", { method: "POST", headers: { Prefer: "resolution=merge-duplicates" }, body: JSON.stringify(rows) });
   console.log(`league ${league.id}: polled ${rows.length} players for week ${wk}`);
