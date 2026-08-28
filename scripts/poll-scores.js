@@ -234,8 +234,17 @@ function statsFromDrives(drives, rosterByAbbrev) {
   const bump = (pid, q, key, amt) => { const b = ensure(pid).quarters[q]; b.stats[key] = (b.stats[key] || 0) + amt; };
   const markTd = (pid, q, wallclock) => { ensure(pid).qtdEvents.push({ period: q, wallclock }); };
   const list = [...((drives && drives.previous) || []), ...(drives && drives.current ? [drives.current] : [])];
+  // ESPN's own drives.current is frequently the SAME drive object as the
+  // last entry in drives.previous (confirmed live: identical drive id,
+  // every play id duplicated) rather than a genuinely separate in-progress
+  // drive — concatenating both without deduplication processed that whole
+  // drive's plays twice, doubling every stat including TD counts. Guard by
+  // play id, not drive id, since a real still-active drive legitimately
+  // keeps growing new plays each poll on top of ones already seen.
+  const seenPlayIds = new Set();
   list.forEach((d) => {
     (d.plays || []).forEach((play) => {
+      if (play.id) { if (seenPlayIds.has(play.id)) return; seenPlayIds.add(play.id); }
       const type = (play.type && play.type.text) || "";
       const text = String(play.text || "").trim().replace(/^\([^)]*\)\s*/, "").trim();
       const period = (play.period && play.period.number) || null;
@@ -338,20 +347,6 @@ async function pollLeague(league) {
     const prevStats = (prev && prev.prev_stats) ? prev.prev_stats : {};
     let prevQtd = prev ? (prev.prev_qtd || 0) : 0, prevBonus = prev ? (prev.prev_bonus || 0) : 0, newPrevStats = prevStats, prevTotalOut = 0, firstQtdAtOut = null;
     const hadQtdBefore = prevQtd > 0; // captured before prevQtd gets reused below to hold the new cumulative total
-    // Fantasy points legitimately drop within a game (an INT, a fumble, a
-    // negative run — whatever the league's own settings assign negative
-    // points to), so this isn't a "never decrease" guard. It only catches
-    // one specific failure shape: play-by-play finding LITERALLY NOTHING
-    // for a player who already has real recorded stats — the signature of
-    // a bad fetch, a name-match miss, or (confirmed live once already) a
-    // stale poll run still using old, broken code. Mirrors index.html's
-    // identical guard.
-    if (!u.isDef && u.computed) {
-      const isEmptyQ = (q) => { const s = q && q.stats; return !s || Object.keys(s).length === 0; };
-      const computedIsEmpty = [1, 2, 3, 4].every((q) => isEmptyQ(u.computed.quarters[q]));
-      const hadRealDataBefore = prev && ((prev.prev_total || 0) > 0 || [1, 2, 3, 4].some((q) => !isEmptyQ(prev.q_pts && prev.q_pts[q])));
-      if (computedIsEmpty && hadRealDataBefore) return null;
-    }
     if (u.isDef) {
       const safeTotalAllowed = Math.max(u.totalAllowed, (prev && prev.q_pts && prev.q_pts.pa && prev.q_pts.pa.allowed) || 0);
       qpts.pa = { allowed: safeTotalAllowed, fp: defBracket(safeTotalAllowed) };
@@ -380,10 +375,25 @@ async function pollLeague(league) {
       let totalFp = 0;
       for (let q = 1; q <= 4; q++) {
         const stats = { ...(computed.quarters[q] && computed.quarters[q].stats) };
-        const qtd = (stats.rushTD || 0) + (stats.recTD || 0);
-        const fp = infoFpFromStats(stats);
-        qpts[q] = { fp, qtd, stats };
-        totalFp += fp;
+        const prevQ = prev && prev.q_pts && prev.q_pts[q];
+        const newIsEmpty = Object.keys(stats).length === 0;
+        const prevHadData = prevQ && prevQ.stats && Object.keys(prevQ.stats).length > 0;
+        if (newIsEmpty && prevHadData) {
+          // This quarter came back with no plays at all despite already
+          // having real recorded stats — keep what's there instead of
+          // wiping it. Not a "fp can't decrease" rule (it legitimately
+          // does, from an INT/fumble/negative play) — this only fires when
+          // play-by-play found NOTHING for an already-scoring player,
+          // which is the signature of a transient/incomplete fetch or a
+          // race with a fresher concurrent write, never a real game event.
+          qpts[q] = prevQ;
+          totalFp += prevQ.fp;
+        } else {
+          const qtd = (stats.rushTD || 0) + (stats.recTD || 0);
+          const fp = infoFpFromStats(stats);
+          qpts[q] = { fp, qtd, stats };
+          totalFp += fp;
+        }
       }
       // Fields play-by-play doesn't cover — fumbles lost, and (for
       // kickers, who share this same branch) FG/XP makes and misses —
