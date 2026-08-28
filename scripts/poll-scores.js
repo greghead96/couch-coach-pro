@@ -69,8 +69,13 @@ function defBracket(pa) {
 function boxAthleteRaw(groupName, labels, stats) {
   const gi = (lbl) => { const i = labels.indexOf(lbl); return i >= 0 ? (parseFloat(String(stats[i] || "0").replace(/,/g, "")) || 0) : 0; };
   if (groupName === "passing") return { passYds: gi("YDS"), passTD: gi("TD"), passInt: gi("INT") };
-  if (groupName === "rushing") return { rushYds: gi("YDS"), rushTD: gi("TD") };
-  if (groupName === "receiving") return { rec: gi("REC"), recYds: gi("YDS"), recTD: gi("TD") };
+  // Gated on the actual attempt count (CAR/REC) — ESPN has occasionally
+  // listed a player under "rushing" with zero real carries but that same
+  // game's receiving yards/TD copied in (mirrored fix in index.html's
+  // boxAthleteFP, found live on Germie Bernard's box score). A genuine
+  // zero-attempt line is 0 everything anyway, so this never drops real stats.
+  if (groupName === "rushing") { const car = gi("CAR"); return car > 0 ? { rushYds: gi("YDS"), rushTD: gi("TD") } : {}; }
+  if (groupName === "receiving") { const rec = gi("REC"); return rec > 0 ? { rec, recYds: gi("YDS"), recTD: gi("TD") } : {}; }
   if (groupName === "fumbles") return { fumLost: gi("LOST") };
   return {};
 }

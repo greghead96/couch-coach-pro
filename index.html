@@ -127,11 +127,16 @@
   .mrow { display:grid; grid-template-columns:1fr 30px 1fr; align-items:center; gap:6px; padding:9px 0; border-top:1px solid var(--line); }
   .mrow-pos { text-align:center; font-size:10px; font-weight:800; color:var(--txt); background:var(--ink); border-radius:6px; padding:7px 0; }
   .mcell { display:flex; align-items:center; gap:8px; }
-  /* Both sides keep the avatar adjacent to the center position badge (row-
-     reverse used to flip the LEFT side's avatar out to the far edge instead,
-     so faces landed on opposite sides of the row from column to column and
-     never lined up top to bottom) — just the text alignment differs. */
-  .mcell.l { text-align:right; }
+  /* Both sides keep the avatar adjacent to the center position badge, as a
+     true mirror image. Removing row-reverse alone wasn't enough — with no
+     justify-content, flex packs content at the start of the row (the OUTER
+     edge for the left column), so the avatar ended up floating wherever
+     the variable-width text block happened to end instead of flush against
+     the badge. flex-end packs the whole [text, avatar] group against the
+     column's INNER edge (the badge) instead. The right column was already
+     correct (flex-start naturally packs its [avatar, text] group against
+     ITS inner edge, no change needed). */
+  .mcell.l { text-align:right; justify-content:flex-end; }
   .mcell.r { text-align:left; }
   .mcell.tappable { cursor:pointer; }
   .mcell.tappable .mc-nm { color:var(--gold); }
@@ -223,7 +228,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260827a";
+const BUILD_ID = "20260827b";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -867,7 +872,7 @@ function renderTab(){
     if(app.tab==="matchup") startStatsPoll();
   }
   if(app.tab==="home") renderHome();
-  else if(app.tab==="nfl"){ ensureNFL(); renderNFL(); }
+  else if(app.tab==="nfl"){ ensureNFL(); startNflScoreboardPoll(); renderNFL(); }
   else if(app.tab==="matchup") renderMatchup();
   else if(app.tab==="team") renderTeam();
   else if(app.tab==="players"){ ensurePool(); renderPlayers(); }
@@ -2798,12 +2803,21 @@ function boxAthleteFP(groupName, labels, stats){
   if(groupName==="passing"){ const yds=gi("YDS"),td=gi("TD"),ints=gi("INT");
     fp+=yds/(sc.passYdsPerPt||25); fp+=td*(sc.passTD||4); fp+=ints*(sc.passInt||-2);
     raw.passYds=yds; raw.passTD=td; raw.passInt=ints; }
-  else if(groupName==="rushing"){ const yds=gi("YDS"),td=gi("TD");
-    fp+=yds/(sc.rushYdsPerPt||10); fp+=td*(sc.rushTD||6); qtd+=td;
-    raw.rushYds=yds; raw.rushTD=td; }
+  else if(groupName==="rushing"){ const car=gi("CAR"), yds=gi("YDS"),td=gi("TD");
+    // ESPN's box score has occasionally listed a receiver with zero actual
+    // carries under the "rushing" group with that SAME game's receiving
+    // yards/TD copied in (a real player, Germie Bernard, showed a 13-yd
+    // receiving TD double-counted as a 13-yd rushing TD too) — gating on
+    // CAR>0 rejects that spurious entry instead of crediting it a second
+    // time. A genuine 0-carry line has 0 everything anyway, so this never
+    // drops real stats.
+    if(car>0){ fp+=yds/(sc.rushYdsPerPt||10); fp+=td*(sc.rushTD||6); qtd+=td;
+      raw.rushYds=yds; raw.rushTD=td; } }
   else if(groupName==="receiving"){ const rec=gi("REC"),yds=gi("YDS"),td=gi("TD");
-    fp+=rec*(sc.ppr||0); fp+=yds/(sc.recYdsPerPt||10); fp+=td*(sc.recTD||6); qtd+=td;
-    raw.rec=rec; raw.recYds=yds; raw.recTD=td; }
+    // Same defensive gate, mirrored: a receiving line with 0 catches but
+    // nonzero yards/TD would be the reverse of the bug above.
+    if(rec>0){ fp+=rec*(sc.ppr||0); fp+=yds/(sc.recYdsPerPt||10); fp+=td*(sc.recTD||6); qtd+=td;
+      raw.rec=rec; raw.recYds=yds; raw.recTD=td; } }
   else if(groupName==="fumbles"){ const lost=gi("LOST"); fp+=lost*(sc.fumLost||-2); raw.fumLost=lost; }
   return {fp,qtd,raw};
 }
@@ -3188,6 +3202,15 @@ function startStatsPoll(){
   app.statsPollId=setInterval(()=>{ if(app.tab==="matchup") pollRealStats(); else stopStatsPoll(); }, 30000);
 }
 function stopStatsPoll(){ if(app.statsPollId){ clearInterval(app.statsPollId); app.statsPollId=null; } }
+// The NFL Live tab's scoreboard list previously only ever loaded once —
+// ensureNFL()'s guard (!app.nfl.games) skips re-fetching once it's
+// populated, so scores there never changed without a manual refresh even
+// though the per-game "gamecast" view already auto-polls once you drill in.
+function startNflScoreboardPoll(){
+  if(app.nflScoreboardPollId || app.tab!=="nfl") return;
+  app.nflScoreboardPollId=setInterval(()=>{ if(app.tab==="nfl") loadNFLScoreboard(); else stopNflScoreboardPoll(); }, 30000);
+}
+function stopNflScoreboardPoll(){ if(app.nflScoreboardPollId){ clearInterval(app.nflScoreboardPollId); app.nflScoreboardPollId=null; } }
 async function loadPlayerWeekStats(wk){
   const ids=[...new Set((app.draft?app.draft.picks:[]).map(p=>p.player_id))]; if(!ids.length) return;
   try{ const {data}=await sb.from("player_week_stats").select("*").in("athlete_id",ids).eq("week",wk);
@@ -4432,6 +4455,24 @@ async function autoRejoinLastSession(){
 }
 boot();
 setInterval(tick, TICK);
+// Mobile browsers pause/throttle setInterval timers (and can drop the
+// realtime socket) while the tab is backgrounded — phone locked, app
+// switched away from — with no guarantee they resume cleanly on return,
+// which is what made "everything's live" require a manual refresh after
+// leaving the app idle for a while. Catching up immediately when the page
+// becomes visible again closes that gap without needing the user to do
+// anything. Stats/scoreboard polls are explicitly stopped+restarted
+// (rather than trusting a possibly-stalled interval to still be running)
+// so the cadence is guaranteed fresh, not just "eventually catches up".
+document.addEventListener("visibilitychange", async ()=>{
+  if(document.visibilityState!=="visible" || !app.user) return;
+  if(app.connectedLeague && app.realLeague){
+    if(app.tab==="matchup"){ stopStatsPoll(); pollRealStats(); startStatsPoll(); }
+    await Promise.all([loadTrades(), loadTransactions(), loadWaivers(), loadPlayoffMatchups(), loadDraft()]);
+    if(!app.showConfirm && app.connectedLeague) render();
+  }
+  if(app.tab==="nfl") loadNFLScoreboard();
+});
 </script>
 </body>
 </html>
