@@ -192,9 +192,17 @@ async function fetchGameBox(eventId) {
       });
     });
   });
-  const linescores = {};
-  (comp.competitors || []).forEach((c) => { linescores[String((c.team && c.team.id) || "")] = (c.linescores || []).map((l) => l.value || 0); });
-  return { period, final, byAthlete, linescores, teamStats };
+  const linescores = {}, teamScores = {};
+  (comp.competitors || []).forEach((c) => {
+    const tid = String((c.team && c.team.id) || "");
+    linescores[tid] = (c.linescores || []).map((l) => l.value || 0);
+    // Mirrors index.html's fetchGameBoxFP — "points allowed so far" reads
+    // more reliably from the opponent's current overall score than a sum
+    // of per-quarter linescores, since ESPN doesn't always fill in the
+    // CURRENT (still in progress) quarter's linescore entry until it ends.
+    teamScores[tid] = Number(c.score) || 0;
+  });
+  return { period, final, byAthlete, linescores, teamScores, teamStats };
 }
 
 async function pollLeague(league) {
@@ -221,9 +229,8 @@ async function pollLeague(league) {
     for (const p of byTeam[ab]) {
       if (p.pos === "DEF") {
         const athleteId = `def_${teamId}`;
-        const opp = Object.keys(box.linescores).find((t) => t !== String(teamId));
-        const oppLs = opp ? box.linescores[opp] : [];
-        const totalAllowed = oppLs.slice(0, box.period).reduce((s, v) => s + v, 0);
+        const opp = Object.keys(box.teamScores).find((t) => t !== String(teamId));
+        const totalAllowed = opp != null ? (box.teamScores[opp] || 0) : 0;
         const bonus = teamDefenseBonusRaw(box.teamStats[String(teamId)]);
         updates.push({ athleteId, week: wk, period: box.period, isDef: true, totalAllowed, bonus });
       } else {

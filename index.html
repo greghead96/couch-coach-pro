@@ -228,7 +228,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260827b";
+const BUILD_ID = "20260827c";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -3027,11 +3027,11 @@ function liveGameLine(p){
   const gs=app.playerGameState && app.playerGameState[tid];
   if(!gs || !gi || !gi.opp) return teamOppLine(p);
   if(gs.final){
-    const ls=gs.linescores||{};
-    const oppTid=Object.keys(ls).find(t=>t!==String(tid));
-    const myScore=(ls[tid]||ls[String(tid)]||[]).reduce((a,b)=>a+b,0);
-    const oppScore=oppTid?(ls[oppTid]||[]).reduce((a,b)=>a+b,0):null;
-    return `F · ${p.teamAb} ${myScore}${oppScore!=null?"-"+gi.opp+" "+oppScore:""}`;
+    const ts=gs.teamScores||{};
+    const oppTid=Object.keys(ts).find(t=>t!==String(tid));
+    const myScore=ts[tid]!=null?ts[tid]:ts[String(tid)];
+    const oppScore=oppTid?ts[oppTid]:null;
+    return `F · ${p.teamAb} ${myScore!=null?myScore:"?"}${oppScore!=null?"-"+gi.opp+" "+oppScore:""}`;
   }
   if(gs.period>=1){
     return `Q${gs.period}${gs.clock?" "+gs.clock:""} ${gi.home?"vs":"@"} ${gi.opp}`;
@@ -3065,12 +3065,19 @@ async function fetchGameBoxFP(eventId){
       });
     });
   });
-  const linescores={};
+  const linescores={}, teamScores={};
   (comp.competitors||[]).forEach(c=>{
     const tid=String((c.team&&c.team.id)||"");
     linescores[tid]=(c.linescores||[]).map(l=>l.value||0);
+    // "Total points allowed so far" reads simplest and most reliably from
+    // the opponent's current overall score, not a sum of per-quarter
+    // linescores — ESPN doesn't always fill in the CURRENT (still in
+    // progress) quarter's linescore entry until that quarter actually
+    // ends, so PIT giving up 17 to a live BUF team could sum to 0 mid-Q3
+    // even though the real score already reflects it.
+    teamScores[tid]=Number(c.score)||0;
   });
-  return {period, final, clock, byAthlete, linescores, teamStats};
+  return {period, final, clock, byAthlete, linescores, teamScores, teamStats};
 }
 // Poll ESPN for every real player in the current matchup and persist real
 // per-quarter fantasy points. Any manager's open app contributes a poll —
@@ -3123,13 +3130,12 @@ async function pollRealStats(){
   }));
   teamIds.forEach((teamId,idx)=>{
     const box=boxes[idx]; if(!box) return;
-    app.playerGameState[teamId]={period:box.period, final:box.final, clock:box.clock, linescores:box.linescores};
+    app.playerGameState[teamId]={period:box.period, final:box.final, clock:box.clock, teamScores:box.teamScores};
     for(const p of byTeam[teamId]){
       let curFp, curQtd=0, curBonus=0, curBonusTd=0, curRaw=null, curSacks=0, curInts=0, totalAllowed=null;
       if(p.pos==="DEF"){
-        const opp=Object.keys(box.linescores).find(t=>t!==teamId);
-        const oppLs=opp?box.linescores[opp]:[];
-        totalAllowed = oppLs.slice(0, box.period).reduce((s,v)=>s+v,0);
+        const opp=Object.keys(box.teamScores).find(t=>t!==teamId);
+        totalAllowed = opp!=null ? (box.teamScores[opp]||0) : 0;
         const bonus=teamDefenseBonusFP(box.teamStats[teamId]);
         curBonus=bonus.fp; curBonusTd=bonus.td; curSacks=bonus.sacks; curInts=bonus.ints;
         curFp = defBracket(totalAllowed) + curBonus;
