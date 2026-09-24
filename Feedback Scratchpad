@@ -1,13 +1,17 @@
-When selecting a power up and then selecting a player, a confirmation box comes up prior to selecting which quarter. We should first select which quarter and then be prompted for confirmation.
+All ARI and CHI players were missing from draft. Doesn't matter now but investigate why that might have been and make sure the next draft goes corrcetly. 
+Need to update to automatically put drafted players into starting lineup if a position they can fit in is empty. Once the lineup and/or position is filled then the players go to the bench. 
+Update draft board layout -- need to be able to see the full board. Also add filter to be able to see players that have been taken. 
+Add filter button for Flex position
+Update My Roster and My Team menus to include Bye week next to players' name
+Not every player is pulling last season stats in the draft list
+When I click on my team no bench is showing in the draft tab
 
-Emergency sub seems off it automatically gave me another one right after using it. You only get 1 a week. Also I subbed in the 49ers for the Steelers defense when the steelers were in Q1 and it worked but then I check back later and the Steelers defense was in my lineup. 
-Also defensive stats seems to be working for sacks, ints,etc...but Steelers still show 0 points allowed, 10 fp but the game is PIT 14 BUF 10 right now. This should be updating as the game goes on so whatever gicing up 10 points to BUF it should show that in the points breakdown box anywhere it is needed.
+Update matchup screen score in the middle where it shows 14 live games when none had started yet. All games that have not started should be in upcoming until they kickoff where they then become live and then once they finish they go to final
 
-Make power up buttons on matchup page smaller so that we can see all 4 without having to scroll on phones
+Need to update app so a player is locked in starting lineup or bench after their game has started. Currently, I can put Puka on the bench even though he already played
 
-Improve formatting on matchup page so that the faces of the players on “your starters” are all aligned top to bottom like they are under “their starters”. Make it so the matchups tab has the faces directly next to the position icon on either side so they are straight down. 
-Also on the matchups tab when a player is in a game we should see the Q1 12:32 vs CLE or Q4 5:41 vs BUF. We want to know live as the game is going what quarter our player is in and who they are matched up against and this should change as the game is live. 
-Once the game is over you put an F for final and the team names and final score.
+We can’t use a power up on someone at all if they already have a power up even if it’s for separate quarters
+One of our users reported it let him use his freeze on Stafford for a different quarter even though someone else used the 2x on stafford already.
 
-Currently when a player has been frozen by the opponent for a certain quarter, the user is unable to select them for other power ups (double points or hot start) but they should be allowed to. For double points the user should only be able to select the quarters that the player is not frozen. 
-So if the opponent uses the freeze on Dillion Gabriel for Q2, the user should be able to use double points for Q1, Q3, or Q4. If they click Q2 in this scenario it should say "Your opponent has frozen this quarter. Choose another quarter or choose a different player to use the power up on."
+Powerup usage symbols should persist when I go back and look at any matchup from a previous week. I need to be able to see if Team A and Team B played and how they used their power ups by the symbols next to the players same way I need to be able to look at my team vs Team C
+
