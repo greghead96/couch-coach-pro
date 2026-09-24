@@ -175,10 +175,11 @@ async function fetchGameBox(eventId) {
   // in Q1" for a game that hasn't kicked off (same bug fixed client-side).
   const period = final ? 4 : state === "pre" ? 0 : (status.period || 1);
   const scoringPlays = d.scoringPlays || [];
-  const byAthlete = {}, teamStats = {};
+  const byAthlete = {}, teamStats = {}, boxAthletes = {}, teamIds = [];
   ((d.boxscore && d.boxscore.players) || []).forEach((tm) => {
     const tid = String((tm.team && tm.team.id) || "");
-    if (tid) teamStats[tid] = tm.statistics || [];
+    if (tid) { teamStats[tid] = tm.statistics || []; teamIds.push(tid); boxAthletes[tid] = boxAthletes[tid] || []; }
+    (tm.statistics || []).forEach((g) => (g.athletes || []).forEach((a) => { const ath = a.athlete || {}; if (ath.id && tid && !boxAthletes[tid].some((x) => x.id === String(ath.id))) boxAthletes[tid].push({ id: String(ath.id), name: ath.displayName || "", first: ath.firstName, last: ath.lastName }); }));
     (tm.statistics || []).forEach((g) => {
       (g.athletes || []).forEach((a) => {
         const id = String((a.athlete && a.athlete.id) || ""); if (!id) return;
@@ -202,97 +203,492 @@ async function fetchGameBox(eventId) {
     // CURRENT (still in progress) quarter's linescore entry until it ends.
     teamScores[tid] = Number(c.score) || 0;
   });
-  return { period, final, byAthlete, linescores, teamScores, teamStats, scoringPlays, drives: d.drives };
+  return { period, final, byAthlete, linescores, teamScores, teamStats, scoringPlays, drives: d.drives, boxAthletes, teamIds };
 }
-// "D."/"F.Lastname" abbreviation ESPN uses in play-by-play text, from a
-// roster player's full display name — mirrors index.html's identical
-// function. Kept in sync manually since this file has no shared-module
-// setup with the client script.
-function abbrevName(full) {
-  const parts = String(full || "").trim().split(/\s+/); if (parts.length < 2) return null;
-  const suffixes = new Set(["jr.", "jr", "sr.", "sr", "ii", "iii", "iv", "v"]);
-  let last = parts[parts.length - 1];
-  if (suffixes.has(last.toLowerCase()) && parts.length > 2) last = parts[parts.length - 2];
-  return parts[0][0] + "." + last;
+// ============================================================================
+// CCF PLAY-BY-PLAY PARSER — shared verbatim between index.html and
+// scripts/poll-scores.js (generated from the audit scratchpad; edit BOTH).
+// Every rule exists because a real ESPN play broke the previous version.
+// Reconciled 2026-09-23 against ESPN box scores for all 32 week 1–2 games:
+// 590/590 offense players, 64/64 kickers, 64/64 defenses.
+//
+// Input: drives = ESPN summary.drives; athletesByTeam = { [espnTeamId]: [{id,name,first,last}] }
+// built from the game's box score athletes MERGED with each team's full roster
+// (so a surname-only fallback can tell "M.Brown" is Hollywood Brown).
+// Output ids are ESPN athlete ids (no "e" prefix).
+// ============================================================================
+// Rewritten play-by-play stat parser (to be ported into index.html + poll-scores.js).
+// Every rule below was added because a real ESPN play broke the previous
+// version; see audit notes. Reconciled against ESPN per-player box scores.
+//
+// athletesByTeam: { [teamId]: [{ id, name, first?, last? }] } — from the game's
+// own box score so names are ESPN's exact forms.
+
+const SUFFIXES = new Set(["jr.", "jr", "sr.", "sr", "ii", "iii", "iv", "v"]);
+const RUSH_VERB = "(?:up the middle|left (?:end|tackle|guard)|right (?:end|tackle|guard)|scrambles|kneels|rushes|runs|for -?\\d+ yards?|for no gain|pushed ob|ran ob)";
+
+function splitName(a) {
+  if (a.first && a.last) return { first: a.first, last: a.last.replace(/\s+(Jr\.|Sr\.|II|III|IV|V)$/i, "") };
+  const parts = String(a.name || "").trim().split(/\s+/);
+  if (parts.length < 2) return null;
+  let end = parts.length;
+  if (SUFFIXES.has(parts[end - 1].toLowerCase()) && end > 2) end--;
+  return { first: parts[0], last: parts.slice(1, end).join(" ") };
 }
-function playerAbbrevMap(players) {
-  const map = {};
-  (players || []).forEach((p) => { const ab = abbrevName(p.name || p.player_name); if (ab) map[ab] = p; });
-  return map;
-}
-// Direct, exact per-quarter offense stats from real play-by-play — mirrors
-// index.html's identical function (statsFromDrives), verified there
-// against live ESPN data: summed stats exactly matched the box score
-// total, and TD attribution matched real broadcast-quarter results.
-// Fumbles lost and 2-point conversions still use boxAthleteRaw's
-// cumulative totals (see pollLeague) — real fumble play text has more
-// variation than was safe to commit to without more testing.
-function statsFromDrives(drives, rosterByAbbrev) {
-  const namePat = "([A-Z][A-Za-z'-]*\\.[A-Za-z.'-]+)";
-  const out = {};
-  const ensure = (pid) => { if (!out[pid]) out[pid] = { quarters: { 1: { stats: {} }, 2: { stats: {} }, 3: { stats: {} }, 4: { stats: {} } }, qtdEvents: [] }; return out[pid]; };
-  const bump = (pid, q, key, amt) => { const b = ensure(pid).quarters[q]; b.stats[key] = (b.stats[key] || 0) + amt; };
-  const markTd = (pid, q, wallclock) => { ensure(pid).qtdEvents.push({ period: q, wallclock }); };
-  const list = [...((drives && drives.previous) || []), ...(drives && drives.current ? [drives.current] : [])];
-  // ESPN's own drives.current is frequently the SAME drive object as the
-  // last entry in drives.previous (confirmed live: identical drive id,
-  // every play id duplicated) rather than a genuinely separate in-progress
-  // drive — concatenating both without deduplication processed that whole
-  // drive's plays twice, doubling every stat including TD counts. Guard by
-  // play id, not drive id, since a real still-active drive legitimately
-  // keeps growing new plays each poll on top of ones already seen.
-  const seenPlayIds = new Set();
-  list.forEach((d) => {
-    (d.plays || []).forEach((play) => {
-      if (play.id) { if (seenPlayIds.has(play.id)) return; seenPlayIds.add(play.id); }
-      const type = (play.type && play.type.text) || "";
-      const text = String(play.text || "").trim().replace(/^\([^)]*\)\s*/, "").trim();
-      const period = (play.period && play.period.number) || null;
-      if (!period || period < 1 || period > 4) return;
-      const yds = play.statYardage || 0;
-      const wallclock = play.wallclock || null;
-      // Roster objects passed in vary by caller — this file's are raw
-      // draft_picks rows (.player_id), index.html's are simPlayer-shaped
-      // (.id) — support both rather than silently bucketing every match
-      // under an "undefined" key (the live bug: every offense player's
-      // computed stats came back null, and the caller's null-fallback
-      // overwrote real q_pts with all-zero stats).
-      const pidOf = (p) => p.player_id || p.id;
-      if (type === "Rush" || type === "Rushing Touchdown") {
-        const m = new RegExp("^" + namePat + "\\s").exec(text);
-        if (!m) return;
-        const p = rosterByAbbrev[m[1]]; if (!p) return;
-        const pid = pidOf(p);
-        bump(pid, period, "rushYds", yds);
-        if (type === "Rushing Touchdown") { bump(pid, period, "rushTD", 1); markTd(pid, period, wallclock); }
-      } else if (type === "Pass Reception" || type === "Passing Touchdown") {
-        const m = new RegExp("^" + namePat + "\\spass\\s.*?\\bto\\s" + namePat + "\\b").exec(text);
-        if (!m) return;
-        const passer = rosterByAbbrev[m[1]], receiver = rosterByAbbrev[m[2]];
-        const isTd = type === "Passing Touchdown";
-        if (passer) { const pid = pidOf(passer); bump(pid, period, "passYds", yds); if (isTd) bump(pid, period, "passTD", 1); }
-        if (receiver) {
-          const pid = pidOf(receiver);
-          bump(pid, period, "rec", 1); bump(pid, period, "recYds", yds);
-          if (isTd) { bump(pid, period, "recTD", 1); markTd(pid, period, wallclock); }
-        }
-      } else if (type === "Pass Interception Return") {
-        const m = new RegExp("^" + namePat + "\\spass\\s(?:short|deep)").exec(text);
-        if (m) { const passer = rosterByAbbrev[m[1]]; if (passer) bump(pidOf(passer), period, "passInt", 1); }
-      }
-    });
+function reEsc(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+
+function buildMatchers(athletes) {
+  const abbrev = [], full = [], byLast = {};
+  athletes.forEach((a) => {
+    const nm = splitName(a); if (!nm) return;
+    const first = nm.first.replace(/\./g, "");
+    const prefixes = []; for (let i = 1; i <= Math.min(4, first.length); i++) prefixes.push(reEsc(first.slice(0, i)));
+    abbrev.push({ a, re: new RegExp("^(?:" + prefixes.join("|") + ")\\." + reEsc(nm.last) + "(?![A-Za-z])"), lastRe: new RegExp("^[A-Z][a-z]{0,3}\\." + reEsc(nm.last) + "(?![A-Za-z])") });
+    full.push({ a, re: new RegExp("^" + reEsc(String(a.name)) + "(?![A-Za-z])") });
+    (byLast[nm.last] = byLast[nm.last] || []).push(a);
   });
+  const longer = (x, y) => y.a.name.length - x.a.name.length;
+  abbrev.sort(longer); full.sort(longer);
+  return { abbrev, full, byLast };
+}
+// Which athlete's name begins at text[idx]? Tries exact "prefix.Last", then
+// the full display name (ESPN's alternate scoring-play text format), then a
+// last-name-only fallback when that surname is unique on the team (covers
+// nickname players like Hollywood/"M.Brown", Bam/"Z.Knight").
+function matchAt(M, text, idx) {
+  const s = text.slice(idx);
+  for (const m of M.abbrev) { const r = m.re.exec(s); if (r) return { a: m.a, len: r[0].length }; }
+  for (const m of M.full) { const r = m.re.exec(s); if (r) return { a: m.a, len: r[0].length }; }
+  for (const m of M.abbrev) { const r = m.lastRe.exec(s); if (r) { const cands = M.byLast[splitName(m.a).last]; if (cands && cands.length === 1) return { a: m.a, len: r[0].length }; } }
+  return null;
+}
+
+function coreClause(text) {
+  let t = String(text || "").trim();
+  // Replay reversal: "... TOUCHDOWN.The Replay Official reviewed ..., and the
+  // play was REVERSED.(Shotgun) J.Williams right tackle to NYG 1 for no gain"
+  // — only the text after the LAST "REVERSED." describes the play that stands.
+  const rv = t.lastIndexOf("REVERSED.");
+  if (rv >= 0) t = t.slice(rv + "REVERSED.".length).trim();
+  for (let i = 0; i < 6; i++) {
+    const before = t;
+    t = t.replace(/^\([^)]*\)\s*/, "");                              // (Shotgun) (No Huddle, Shotgun)
+    // "L.Borom reported in as eligible." / "A, B and C reported in as eligible."
+    // — lazy .*? because the names themselves contain dots.
+    t = t.replace(/^.*?\breported (?:in )?as eligible\.\s*/, "");
+    t = t.replace(/^Direct snap to \S+\.\s*/, "");                    // "Direct snap to D.Henry."
+    if (t === before) break;
+  }
+  return t.trim();
+}
+function yardsFromText(t) {
+  const m = /\bfor (-?\d+) (?:yards?|Yds?)\b/i.exec(t); if (m) return parseInt(m[1], 10);
+  if (/\bfor no gain\b/i.test(t)) return 0;
+  return null;
+}
+const NULLIFIED = /\bNo Play\b|NULLIFIED/i;
+
+// Spot foul on the offense DURING a run / catch-and-run ("PENALTY on CAR-R.Hunt,
+// Offensive Holding, 10 yards, enforced at CAR 36."): the play is not nullified,
+// but official yardage only counts from the line of scrimmage to the spot of the
+// foul. ESPN's box score does exactly this; play text still says "for 12 yards".
+// Returns the credited yards. Defensive penalties never reduce credit.
+// Offense-relative field position helpers. start.yardLine is an absolute
+// field coordinate (flips by possession); yardsToEndzone is always
+// offense-relative, so LOS = 100 - yardsToEndzone. The offense's abbreviation
+// in play TEXT (ESPN uses "BLT"/"HST"/"WAS"/"ARZ"/"CLV", not the API codes) is
+// read off possessionText: "KC 29" with LOS 29 → KC is the offense.
+function fieldCtx(play, text) {
+  const st = play && play.start; if (!st || typeof st.yardsToEndzone !== "number") return null;
+  const los = 100 - st.yardsToEndzone;
+  // Which text abbreviation is the offense? Solve it from the play's own
+  // "(to|at) ABBR N for K yards" clause: the side that makes N - LOS === K.
+  // (possessionText uses API codes like "ARI"/"LAR"; play text uses "ARZ"/"LA".)
+  let offAbbr = null;
+  const m = /\b(?:to|at) ([A-Z]{2,3}) (\d+) for (?:(-?\d+) yards?|(no gain))/.exec(String(text || ""));
+  if (m) {
+    const n = +m[2], k = m[4] ? 0 : +m[3];
+    if (n !== 50) { if (n - los === k) offAbbr = m[1]; else if ((100 - n) - los === k) offAbbr = "!" + m[1]; }
+  }
+  return { los, offAbbr };
+}
+// Convert "ABBR N" from text to offense-relative yards; null when unknown.
+function spotYards(ctx, abbr, n) {
+  if (!abbr) return 50;
+  if (!ctx.offAbbr) return null;
+  if (ctx.offAbbr[0] === "!") return abbr === ctx.offAbbr.slice(1) ? 100 - n : n;
+  return abbr === ctx.offAbbr ? n : 100 - n;
+}
+
+// Spot foul on the offense DURING a run / catch-and-run ("PENALTY on CAR-R.Hunt,
+// Offensive Holding, 10 yards, enforced at CAR 36."): the play is not nullified,
+// but official yardage only counts from the line of scrimmage to the spot of the
+// foul. ESPN's box score does exactly this; play text still says "for 12 yards".
+// Returns the credited yards. Defensive penalties never reduce credit.
+function spotFoulCredit(M, full, play, yards) {
+  if (yards == null || !/\bPENALTY on\b/.test(full)) return yards;
+  const ctx = fieldCtx(play, full); if (!ctx) return yards;
+  const re = /PENALTY on ([A-Z]{2,3})-([^,]+),[^.]*?enforced at (?:([A-Z]{2,3}) )?(\d+)/g;
+  let m;
+  while ((m = re.exec(full))) {
+    // Must be the OFFENSE's penalty: team abbreviation must match the offense
+    // when known, and the player must be on the offense roster.
+    const isOff = ctx.offAbbr ? (ctx.offAbbr[0] === "!" ? m[1] !== ctx.offAbbr.slice(1) : m[1] === ctx.offAbbr) : !!matchAt(M, m[2].trim(), 0);
+    if (!isOff) continue;
+    const spot = spotYards({ los: ctx.los, offAbbr: ctx.offAbbr || m[1] }, m[3], parseInt(m[4], 10));
+    if (spot == null) continue;
+    const credit = spot - ctx.los;
+    return credit < yards ? Math.max(0, credit) : yards;
+  }
+  return yards;
+}
+
+// Fumble plays. ESPN's box score does NOT simply use the "for N yards" of the
+// first sentence. Convention observed across every week 1–2 fumble (25+ plays):
+//   fumbleSpot = the "touched at X" spot when present, else the recovery spot
+//   carrier recovers it himself ("and recovers at"): credit = (his advance end ?? recovery spot) - LOS
+//     "to DAL 31 for 7 yards. FUMBLES, and recovers at DAL 29. C.Skattebo to DAL 28 for 1 yard" → 10
+//   anyone else recovers (teammate or opponent): credit = min(text yards, fumbleSpot - LOS)
+//     "to TB 32 for 7 yards. FUMBLES, RECOVERED by CIN-B.Mafe at TB 33"        → 7
+//     "to ARZ 31 for -1 yards. FUMBLES, RECOVERED by ARZ-W.Johnson at ARZ 34"  → -4
+//     "to CLV 36 for 17 yards. FUMBLES, recovered by JAX-B.Tuten at CLV 41"    → 12
+//     "to GB 43 for -3 yards. FUMBLES, touched at GB 42, recovered by GB-J.Love at GB 38" → -4
+// clauseIdx: where the parsed rush/catch clause starts; the rule only applies
+// when that clause comes BEFORE the FUMBLES (the fumbler's own play).
+function fumbleSpotYards(M, text, play, carrier, textYards, clauseIdx) {
+  const ctx = fieldCtx(play, text); if (!ctx) return null;
+  const fm = /\bFUMBLES\b/.exec(text); if (!fm) return null;
+  if (clauseIdx != null && clauseIdx > fm.index) return null;
+  const tail = text.slice(fm.index);
+  const rm = /(?:recovered by [A-Z]{2,3}-\S+ at|(and )?recovers at) (?:([A-Z]{2,3}) )?(\d+)/i.exec(tail);
+  if (!rm) return null;
+  const selfRecovery = /recovers at/i.test(rm[0]);
+  const tm = /\btouched at (?:([A-Z]{2,3}) )?(\d+)/.exec(tail.slice(0, rm.index));
+  let spot = spotYards(ctx, rm[2], +rm[3]); if (spot == null) return null;
+  if (!selfRecovery) {
+    if (tm) { const ts = spotYards(ctx, tm[1], +tm[2]); if (ts != null) spot = ts; }
+    return textYards == null ? spot - ctx.los : Math.min(textYards, spot - ctx.los);
+  }
+  const after = tail.slice(rm.index + rm[0].length);
+  const am = /^\.\s+(?=[A-Z])/.exec(after);
+  if (am && carrier) {
+    const who = matchAt(M, after, am[0].length);
+    if (who && who.a.id === carrier.a.id) {
+      const adv = /^\s*(?:to|pushed ob at|ran ob at) (?:([A-Z]{2,3}) )?(\d+) for /.exec(after.slice(am[0].length + who.len));
+      if (adv) { const s2 = spotYards(ctx, adv[1], +adv[2]); if (s2 != null) spot = s2; }
+    }
+  }
+  return spot - ctx.los;
+}
+function statsFromDrives(drives, athletesByTeam) {
+  const Mby = {}; Object.keys(athletesByTeam).forEach((t) => { Mby[t] = buildMatchers(athletesByTeam[t]); });
+  const out = {}; const unmatched = [];
+  const ensure = (id) => { if (!out[id]) out[id] = { quarters: { 1: { stats: {} }, 2: { stats: {} }, 3: { stats: {} }, 4: { stats: {} } }, qtdEvents: [] }; return out[id]; };
+  const bump = (id, q, key, amt) => { const b = ensure(id).quarters[q]; b.stats[key] = (b.stats[key] || 0) + amt; };
+  const markTd = (id, q, wc) => { ensure(id).qtdEvents.push({ period: q, wallclock: wc }); };
+
+  const list = [...((drives && drives.previous) || []), ...(drives && drives.current ? [drives.current] : [])];
+  const seen = new Set();
+  list.forEach((d) => (d.plays || []).forEach((play) => {
+    if (play.id) { if (seen.has(play.id)) return; seen.add(play.id); }
+    const type = (play.type && play.type.text) || "";
+    const rawPeriod = (play.period && play.period.number) || 0;
+    if (rawPeriod < 1) return;
+    const q = Math.min(4, rawPeriod); // overtime folds into Q4
+    const wc = play.wallclock || null;
+    const off = (play.teamParticipants || []).find((t) => t.type === "offense");
+    const teamId = off ? String(off.id) : (d.team && String(d.team.id)) || null;
+    const M = teamId && Mby[teamId]; if (!M) return;
+    const full = String(play.text || "");
+    if (type === "Penalty" || NULLIFIED.test(full)) return; // play didn't count
+
+    // The 2-pt conversion text is appended after the TD sentence; split it off.
+    const [mainText, twoPtText] = full.split(/TWO-POINT CONVERSION ATTEMPT\./);
+    const text = coreClause(mainText);
+    const isRushType = type === "Rush" || type === "Rushing Touchdown";
+    const isPassType = type === "Pass Reception" || type === "Passing Touchdown";
+    const isFumbleType = /^Fumble Recovery|^Muffed Punt|^Sack Opp Fumble/.test(type);
+    const isTd = /Touchdown$/.test(type) || /\bTOUCHDOWN\b/.test(text);
+
+    // ---- completion: "{Passer} pass … to {Receiver} … for N yards" (anywhere in clause on fumble plays) ----
+    let handled = false;
+    let carrier = null, carrierIdx = -1; // for fumLost attribution
+    if (isPassType || isFumbleType) {
+      const pm = /(^|\.\s+)((?:[A-Z][A-Za-z'-]*\.)?[A-Z][A-Za-z.' -]*?) pass (?!incomplete)/.exec(text);
+      if (pm && !/\bintended for\b|\bINTERCEPTED\b/.test(text.slice(pm.index, pm.index + 120))) {
+        const passer = matchAt(M, text, pm.index + pm[1].length);
+        const afterPass = pm.index + pm[0].length;
+        const rel = text.slice(afterPass).search(/\bto\s+[A-Z]/);
+        if (passer && rel >= 0) {
+          const recvIdx = afterPass + rel + 3;
+          const receiver = matchAt(M, text, recvIdx);
+          const rawYds = yardsFromText(text.slice(afterPass)) ?? ((isPassType && play.statYardage != null) ? play.statYardage : 0);
+          let yds = spotFoulCredit(M, full, play, rawYds);
+          if (isFumbleType && receiver) { const fy = fumbleSpotYards(M, text, play, receiver, rawYds, pm.index); if (fy != null) yds = fy; }
+          // Lateral after the catch: "... to K.Coleman to HST 33 for 1 yard.
+          // Lateral to K.Shakir pushed ob at HST 23 for 10 yards" — lateral yards
+          // are receiving yards for the lateral recipient (no catch) and passing
+          // yards for the QB.
+          let latYds = 0, lateral = null;
+          const lm = /\bLateral to\s+(?=[A-Z])/.exec(text.slice(afterPass));
+          if (lm) { lateral = matchAt(M, text, afterPass + lm.index + lm[0].length); latYds = yardsFromText(text.slice(afterPass + lm.index)) || 0; }
+          bump(passer.a.id, q, "passYds", yds + latYds); if (isTd) bump(passer.a.id, q, "passTD", 1);
+          if (receiver) { bump(receiver.a.id, q, "rec", 1); bump(receiver.a.id, q, "recYds", yds); if (isTd && !lateral) { bump(receiver.a.id, q, "recTD", 1); markTd(receiver.a.id, q, wc); } }
+          else unmatched.push({ why: "receiver", type, text: full });
+          carrier = lateral || receiver; carrierIdx = pm.index;
+          if (lateral) { bump(lateral.a.id, q, "recYds", latYds); if (isTd) { bump(lateral.a.id, q, "recTD", 1); markTd(lateral.a.id, q, wc); } }
+          handled = true;
+        } else if (isPassType) unmatched.push({ why: "passer", type, text: full });
+      }
+      // ESPN alternate formats: "R 46 Yd pass from P (K Kick)" / "P Pass Complete for 21 Yds to R …"
+      if (!handled) {
+        let am = /^(.+?) (\d+) Yd pass from (.+?)(?: \(|$)/.exec(text);
+        if (am) {
+          const recv = matchAt(M, am[1], 0), pass = matchAt(M, am[3], 0), yds = +am[2];
+          if (pass) { bump(pass.a.id, q, "passYds", yds); if (isTd) bump(pass.a.id, q, "passTD", 1); }
+          if (recv) { bump(recv.a.id, q, "rec", 1); bump(recv.a.id, q, "recYds", yds); if (isTd) { bump(recv.a.id, q, "recTD", 1); markTd(recv.a.id, q, wc); } }
+          handled = !!(pass || recv); if (recv) { carrier = recv; carrierIdx = 0; }
+        }
+        am = /^(.+?) Pass Complete for (-?\d+) Yds to (.+?)(?:\s\1|\s[A-Z][a-z]+ [A-Z][a-z]+ Fumble|$)/.exec(text);
+        if (!handled && am) {
+          const pass = matchAt(M, am[1], 0), yds = +am[2];
+          const recv = matchAt(M, am[3], 0);
+          if (pass) { bump(pass.a.id, q, "passYds", yds); if (isTd) bump(pass.a.id, q, "passTD", 1); }
+          if (recv) { bump(recv.a.id, q, "rec", 1); bump(recv.a.id, q, "recYds", yds); if (isTd) { bump(recv.a.id, q, "recTD", 1); markTd(recv.a.id, q, wc); } }
+          handled = !!(pass || recv); if (recv) { carrier = recv; carrierIdx = 0; }
+        }
+      }
+    }
+    // ---- rush: "{Rusher} <rush verb> … for N yards" — verb required so aborted snaps ("C.Humphrey to KC 46") don't count ----
+    // Aborted snap the QB recovers and ADVANCES ("C.Williams FUMBLES (Aborted) at
+    // CHI 37, and recovers at CHI 36. C.Williams to MIN 45 for 19 yards") is an
+    // official rush from the line of scrimmage — statYardage carries that. A
+    // plain recovery with no advance is not a rush.
+    if (!handled && isFumbleType && /FUMBLES \(Aborted\)/.test(text)) {
+      const am = /(?:recovers|RECOVERED by [A-Z]{2,3}-)[^.]*\.\s+(?=[A-Z])/.exec(text);
+      if (am) {
+        const adv = matchAt(M, text, am.index + am[0].length);
+        const rest = adv ? text.slice(am.index + am[0].length + adv.len) : "";
+        if (adv && /^\s+(?:to|pushed ob|ran ob)\b.*\bfor (-?\d+) yards?/.test(rest) && play.statYardage != null) {
+          bump(adv.a.id, q, "rushYds", play.statYardage); if (isTd) { bump(adv.a.id, q, "rushTD", 1); markTd(adv.a.id, q, wc); }
+          handled = true;
+        }
+      }
+    }
+    if (!handled && (isRushType || isFumbleType) && !/\bsacked\b|FUMBLES \(Aborted\)/.test(text.slice(0, 80))) {
+      const rusher = matchAt(M, text, 0);
+      if (rusher && new RegExp("^\\s*" + RUSH_VERB).test(text.slice(rusher.len))) {
+        const rawYds = yardsFromText(text) ?? ((isRushType && play.statYardage != null) ? play.statYardage : 0);
+        let yds = spotFoulCredit(M, full, play, rawYds);
+        if (isFumbleType) { const fy = fumbleSpotYards(M, text, play, rusher, rawYds, 0); if (fy != null) yds = fy; }
+        bump(rusher.a.id, q, "rushYds", yds); if (isTd) { bump(rusher.a.id, q, "rushTD", 1); markTd(rusher.a.id, q, wc); }
+        carrier = rusher; carrierIdx = 0;
+        handled = true;
+      } else if (!handled) {
+        const am = /^(.+?) (\d+) Yd (?:Rush|Run)\b/.exec(text); // alternate format
+        if (am) { const r = matchAt(M, am[1], 0); if (r) { bump(r.a.id, q, "rushYds", +am[2]); if (isTd) { bump(r.a.id, q, "rushTD", 1); markTd(r.a.id, q, wc); } carrier = r; carrierIdx = 0; handled = true; } }
+        if (!handled && isRushType) unmatched.push({ why: "rusher", type, text: full });
+      }
+    }
+    // ---- interception thrown (incl. pick-six) ----
+    if (type === "Pass Interception Return" || type === "Interception Return Touchdown") {
+      const pm = /(^|\.\s+)((?:[A-Z][A-Za-z'-]*\.)?[A-Z][A-Za-z.' -]*?) pass /.exec(text);
+      const passer = pm && matchAt(M, text, pm.index + pm[1].length);
+      if (passer) bump(passer.a.id, q, "passInt", 1); else unmatched.push({ why: "int-passer", type, text: full });
+    }
+    // ---- fumble lost (recovered by the other team) ----
+    const fIdx = text.search(/\bFUMBLES\b/);
+    if (fIdx >= 0) {
+      const lostTypes = /\(Opponent\)|^Sack Opp Fumble Recovery$/.test(type);
+      if (lostTypes) {
+        let fumbler = null;
+        if (carrier && carrierIdx >= 0 && carrierIdx < fIdx) fumbler = carrier;
+        else {
+          // start of the sentence containing FUMBLES, then the one before it
+          const starts = [0]; const re = /\.\s+(?=[A-Z(])/g; let m2;
+          while ((m2 = re.exec(text))) starts.push(m2.index + m2[0].length);
+          const before = starts.filter((i) => i <= fIdx);
+          for (let i = before.length - 1; i >= 0 && !fumbler && i >= before.length - 2; i--) {
+            const cc = coreClause(text.slice(before[i]));
+            const at = text.indexOf(cc, before[i]);
+            fumbler = matchAt(M, text, at >= 0 ? at : before[i]);
+          }
+        }
+        if (fumbler) bump(fumbler.a.id, q, "fumLost", 1); else unmatched.push({ why: "fumbler", type, text: full });
+      }
+    }
+    // Alternate-format text has "Fumble" (no FUMBLES): the parsed carrier lost it.
+    if (fIdx < 0 && /\(Opponent\)/.test(type) && /\bFumble\b/.test(text) && carrier) bump(carrier.a.id, q, "fumLost", 1);
+    // Kickoff / punt return fumble recovered by the kicking team (the play's "offense"):
+    // the returner is on the defense side of the play.
+    if (fIdx >= 0 && (type === "Kickoff" || type === "Punt")) {
+      const rm = /RECOVERED by [A-Z]{2,3}-(\S+) at\b/.exec(text.slice(fIdx)); // greedy: the name itself contains a dot
+      // ESPN's "offense" on a kick play isn't reliably the kicking team, so find
+      // which side the recoverer is on; the returner is on the other side.
+      const dfnId0 = Object.keys(athletesByTeam).find((t) => t !== teamId);
+      let recoverer = rm ? matchAt(M, rm[1], 0) : null, MM = dfnId0 && Mby[dfnId0];
+      if (!recoverer && rm && MM) { const r2 = matchAt(MM, rm[1], 0); if (r2) { recoverer = r2; MM = M; } }
+      if (recoverer) {
+        let returner = null;
+        if (MM) {
+          const starts = [0]; const re = /\.\s+(?=[A-Z(])/g; let m2;
+          while ((m2 = re.exec(text))) starts.push(m2.index + m2[0].length);
+          const before = starts.filter((i) => i <= fIdx);
+          for (let i = before.length - 1; i >= 0 && !returner && i >= before.length - 2; i--) returner = matchAt(MM, text, before[i]);
+        }
+        if (returner) bump(returner.a.id, q, "fumLost", 1); else unmatched.push({ why: "returner", type, text: full });
+      }
+    }
+    // Muffed punt / kickoff: the returner (on the play's DEFENSE side) loses it when the kicking team recovers.
+    if (/\bMUFFS\b/.test(text) && /\(Opponent\)/.test(type)) {
+      const mIdx = text.search(/\s+MUFFS\b/);
+      const toks = text.slice(0, mIdx).trim().split(/\s+/);
+      const dfnId = Object.keys(athletesByTeam).find((t) => t !== teamId);
+      const MM = dfnId && Mby[dfnId];
+      let who = null;
+      for (let n = 1; n <= 3 && !who && MM; n++) { const cand = toks.slice(-n).join(" "); const r = matchAt(MM, cand, 0); if (r && r.len === cand.length) who = r; }
+      if (who) bump(who.a.id, q, "fumLost", 1); else unmatched.push({ why: "muffer", type, text: full });
+    }
+    // ---- two-point conversion: passer + converter each get credit (ESPN default) ----
+    if (twoPtText && /ATTEMPT SUCCEEDS/.test(twoPtText)) {
+      const c = twoPtText.split("ATTEMPT SUCCEEDS")[0].trim();
+      const who = matchAt(M, c, 0);
+      const toIdx = c.search(/\bto\s+[A-Z]/);
+      if (/\spass\s/.test(" " + c)) { if (who) bump(who.a.id, q, "twoPt", 1); const r = toIdx >= 0 ? matchAt(M, c, toIdx + 3) : null; if (r) bump(r.a.id, q, "twoPt", 1); }
+      else if (who) bump(who.a.id, q, "twoPt", 1);
+    }
+  }));
+  return { out, unmatched };
+}
+
+// Kicker + team-defense per-quarter stats from play-by-play (companion to parser2.js).
+// Kicker stat keys match the app (fgMade0_39, fgMade40_49, fgMade50p, fgMissed, xpMade, xpMissed).
+// DEF keys: sacks, ints, defTD (what the app scores today) plus fumRec, defSafety,
+// blockedKick (in league settings but never auto-scored by the app — reported separately).
+
+function kickDefFromDrives(drives, athletesByTeam, teamIds) {
+  const Mby = {}; Object.keys(athletesByTeam).forEach((t) => { Mby[t] = buildMatchers(athletesByTeam[t]); });
+  const k = {}, def = {};
+  const ensureK = (id) => (k[id] = k[id] || { quarters: { 1: { stats: {} }, 2: { stats: {} }, 3: { stats: {} }, 4: { stats: {} } } });
+  const ensureD = (t) => (def[t] = def[t] || { quarters: { 1: { stats: {} }, 2: { stats: {} }, 3: { stats: {} }, 4: { stats: {} } }, tdEvents: [] });
+  const bumpK = (id, q, key) => { const b = ensureK(id).quarters[q].stats; b[key] = (b[key] || 0) + 1; };
+  const bumpD = (t, q, key) => { const b = ensureD(t).quarters[q].stats; b[key] = (b[key] || 0) + 1; };
+  teamIds.forEach(ensureD);
+  const unmatched = [];
+
+  const list = [...((drives && drives.previous) || []), ...(drives && drives.current ? [drives.current] : [])];
+  const seen = new Set();
+  list.forEach((d) => (d.plays || []).forEach((play) => {
+    if (play.id) { if (seen.has(play.id)) return; seen.add(play.id); }
+    const type = (play.type && play.type.text) || "";
+    const rawPeriod = (play.period && play.period.number) || 0;
+    if (rawPeriod < 1) return;
+    const q = Math.min(4, rawPeriod);
+    const full = String(play.text || "");
+    const offP = (play.teamParticipants || []).find((t) => t.type === "offense");
+    const off = offP ? String(offP.id) : (d.team && String(d.team.id)) || null;
+    const dfn = teamIds.find((t) => t !== off) || null;
+    if (!off || !dfn) return;
+    const M = Mby[off];
+    if (type === "Penalty" || NULLIFIED.test(full)) return;
+    const text = coreClause(full.split(/TWO-POINT CONVERSION ATTEMPT\./)[0]);
+    const isTd = /\bTOUCHDOWN\b/.test(text);
+
+    // ---------------- kicker ----------------
+    if (type === "Field Goal Good" || type === "Field Goal Missed" || type === "Blocked Field Goal") {
+      const km = /^(.+?) (\d+) yard field goal is (GOOD|No Good|BLOCKED)/i.exec(text);
+      const who = km && M ? matchAt(M, km[1], 0) : null;
+      if (who) {
+        if (/^GOOD$/i.test(km[3])) { const dist = +km[2]; bumpK(who.a.id, q, dist >= 50 ? "fgMade50p" : dist >= 40 ? "fgMade40_49" : "fgMade0_39"); }
+        else bumpK(who.a.id, q, "fgMissed");
+      } else unmatched.push({ why: "kicker-fg", type, text: full });
+      if (type === "Blocked Field Goal") bumpD(dfn, q, "blockedKick");
+    }
+    // XP: the kicker's name is the token(s) right before "extra point is". The
+    // kicking team is whoever scored the TD — the OFFENSE normally, but the
+    // DEFENSE on a pick-six / fumble-return TD. Injury sentences can sit between
+    // the TD and the XP ("MIN-I.Rodgers was injured during the play. T.Smack
+    // extra point is No Good"), so walk back from the phrase instead of
+    // anchoring on sentence starts.
+    const xm = /\s+extra point is (GOOD|No Good|Blocked|Aborted)/.exec(text);
+    if (xm) {
+      const toks = text.slice(0, xm.index).trim().split(/\s+/);
+      let who = null, kickTeam = null;
+      for (const tid of [off, dfn]) {
+        const MM = Mby[tid]; if (!MM) continue;
+        for (let n = 1; n <= 3 && !who; n++) { const cand = toks.slice(-n).join(" "); const r = matchAt(MM, cand, 0); if (r && r.len === cand.length) { who = r; kickTeam = tid; } }
+        if (who) break;
+      }
+      if (who) bumpK(who.a.id, q, xm[1] === "GOOD" ? "xpMade" : "xpMissed"); else unmatched.push({ why: "kicker-xp", type, text: full });
+      if (xm[1] === "Blocked" && kickTeam) bumpD(teamIds.find((t) => t !== kickTeam), q, "blockedKick");
+    }
+    // ESPN's alternate scoring-play text: "Denzel Boston 46 Yd pass from Deshaun
+    // Watson (Andre Szmyt Kick)" / "(Spencer Shrader PAT Failed)" — full names.
+    const pm2 = /\(([A-Z][^()]*?) (Kick|PAT Failed|Kick Failed|PAT Blocked|PAT Missed)\)\.?\s*$/.exec(text);
+    if (pm2 && !xm) {
+      let who = null;
+      for (const tid of [off, dfn]) { const MM = Mby[tid]; if (!MM) continue; const r = matchAt(MM, pm2[1], 0); if (r && r.len === pm2[1].length) { who = r; break; } }
+      if (who) bumpK(who.a.id, q, pm2[2] === "Kick" ? "xpMade" : "xpMissed"); else unmatched.push({ why: "kicker-xp-paren", type, text: full });
+    }
+
+    // ---------------- defense (the team NOT on offense for this play) ----------------
+    // Sacks by TEXT, not type: a QB "sacked … FUMBLES … recovered by [own team]" is
+    // typed "Fumble Recovery (Own)", and one was even typed "Pass Incompletion".
+    // Team sacks with no credited tackler ("B.Nix sacked at KC 15 for -6 yards.")
+    // are real sacks too — the per-player box score omits them (the app's old
+    // box-score path under-counted DEF sacks for exactly that reason).
+    if (/\bsacked\b/.test(text)) bumpD(dfn, q, "sacks");
+    if (type === "Pass Interception Return" || type === "Interception Return Touchdown") bumpD(dfn, q, "ints");
+    if (type === "Fumble Recovery (Opponent)" || type === "Sack Opp Fumble Recovery") bumpD(dfn, q, "fumRec");
+    if (type === "Blocked Punt") bumpD(dfn, q, "blockedKick");
+    if (/\bSAFETY\b/.test(text) && !/NULLIFIED/.test(full)) bumpD(dfn, q, "defSafety");
+    // Defensive TD: a touchdown on a turnover / blocked-kick play belongs to the defense.
+    if (isTd && (type === "Interception Return Touchdown" || type === "Fumble Recovery (Opponent)" || type === "Sack Opp Fumble Recovery" || type === "Blocked Punt" || type === "Blocked Field Goal")) {
+      bumpD(dfn, q, "defTD"); ensureD(dfn).tdEvents.push({ period: q, wallclock: play.wallclock || null });
+    }
+    // Muffed punt recovered by the punting team for a TD is that team's D/ST TD (punting team is "offense" on the play).
+    if (isTd && type === "Muffed Punt Recovery (Opponent)") { bumpD(off, q, "defTD"); bumpD(off, q, "fumRec"); }
+    else if (type === "Muffed Punt Recovery (Opponent)") bumpD(off, q, "fumRec");
+  }));
+  return { k, def, unmatched };
+}
+// ============================== END SHARED PARSER ==============================
+
+// Full ESPN roster for one team (all groups incl. IR/practice squad), cached
+// per session. Merged with the game's own box-score athletes to form the name
+// universe the parser matches play text against.
+async function getTeamRosterAthletes(teamId){
+  const cache=(globalThis.__rosterCache=globalThis.__rosterCache||{});
+  if(cache[teamId]) return cache[teamId];
+  try{
+    const d=await espnFetch(`${ESPN}/teams/${teamId}/roster`);
+    const all=[];
+    (d.athletes||[]).forEach(g=>(g.items||[]).forEach(a=>{ if(a&&a.id) all.push({id:String(a.id), name:a.displayName||((a.firstName||"")+" "+(a.lastName||"")).trim(), first:a.firstName, last:a.lastName}); }));
+    cache[teamId]=all;
+  }catch(e){ cache[teamId]=[]; } // fall back to box-score athletes only
+  return cache[teamId];
+}
+async function athletesByTeamForGame(box){
+  const out={};
+  for(const tid of box.teamIds){
+    const roster=(await getTeamRosterAthletes(tid)).slice();
+    (box.boxAthletes[tid]||[]).forEach(a=>{ if(!roster.some(x=>x.id===a.id)) roster.push(a); });
+    out[tid]=roster;
+  }
   return out;
 }
+function countPlays(drives){ let n=0; [...((drives&&drives.previous)||[]), ...(drives&&drives.current?[drives.current]:[])].forEach(d=>{ n+=(d.plays||[]).length; }); return n; }
 // Same hardcoded "informational only" point values used elsewhere in this
 // file (real per-league settings are applied client-side) — position-
 // agnostic since a stats object only ever has the fields relevant to
 // whoever it belongs to populated in the first place.
 function infoFpFromStats(stats) {
-  return (stats.passYds || 0) / 25 + (stats.passTD || 0) * 4 + (stats.passInt || 0) * -2
+  return Math.round(((stats.passYds || 0) / 25 + (stats.passTD || 0) * 4 + (stats.passInt || 0) * -2
     + (stats.rushYds || 0) / 10 + (stats.rushTD || 0) * 6
     + (stats.rec || 0) * 0.5 + (stats.recYds || 0) / 10 + (stats.recTD || 0) * 6
-    + (stats.fumLost || 0) * -2;
+    + (stats.fumLost || 0) * -2 + (stats.twoPt || 0) * 2
+    + (stats.fgMade0_39 || 0) * 3 + (stats.fgMade40_49 || 0) * 4 + (stats.fgMade50p || 0) * 5 + (stats.fgMissed || 0) * -1 + (stats.xpMade || 0)
+    + (stats.sacks || 0) + (stats.ints || 0) * 2 + (stats.defTD || 0) * 6 + (stats.fumRec || 0) * 2 + (stats.defSafety || 0) * 2 + (stats.blockedKick || 0) * 2) * 10) / 10;
 }
 
 async function pollLeague(league) {
@@ -300,7 +696,8 @@ async function pollLeague(league) {
   if (!wk || wk < 1) return;
   const testPreseason = !!(league.settings && league.settings.league && league.settings.league.testPreseason);
   const seasonType = testPreseason ? 1 : 2;
-  const picks = await sb(`draft_picks?select=player_id,pos,team&league_id=eq.${league.id}`);
+  if (testPreseason && globalThis.__regularSeasonLive) { console.log(`league ${league.id}: preseason-test league skipped during the regular season (shared stat rows)`); return; }
+  const picks = await sb(`draft_picks?select=player_id,player_name,pos,team&league_id=eq.${league.id}`);
   const offense = picks.filter((p) => p.pos !== "DEF" && p.team && TEAM_ID_BY_AB[p.team]);
   const defenses = picks.filter((p) => p.pos === "DEF" && p.team && TEAM_ID_BY_AB[p.team]);
   const byTeam = {};
@@ -316,22 +713,29 @@ async function pollLeague(league) {
     let box;
     try { box = await fetchGameBox(eventId); }
     catch (e) { if (e instanceof RateLimitedError) throw e; console.error(`box fetch failed for ${ab}`, e.message); continue; }
-    // Built once per team: exact per-quarter offense stats straight from
-    // play-by-play (statsFromDrives) — this drives pass/rush/rec
-    // yards+TDs+INT below now, not the box-score diff.
-    const offenseRoster = byTeam[ab].filter((p) => p.pos !== "DEF");
-    const computedByPid = statsFromDrives(box.drives, playerAbbrevMap(offenseRoster));
+    // Name universe for this game: both teams' full rosters (cached per run) + box athletes.
+    let athletesByTeam;
+    try { athletesByTeam = await athletesByTeamForGame(box); } catch (e) { console.error(`roster build failed for ${ab}`, e.message); continue; }
+    // A live game whose play list came back EMPTY is a transient/partial ESPN
+    // response — writing it would zero everyone. Skip this team this cycle.
+    if (box.period > 0 && countPlays(box.drives) === 0) { console.log(`${ab}: empty play list, skipping this cycle`); continue; }
+    // EVERYTHING comes from play-by-play, recomputed fresh from the complete
+    // play list every cycle (mirrors index.html's pollRealStats exactly).
+    const offense = statsFromDrives(box.drives, athletesByTeam).out;
+    const kdef = kickDefFromDrives(box.drives, athletesByTeam, box.teamIds);
     for (const p of byTeam[ab]) {
       if (p.pos === "DEF") {
         const athleteId = `def_${teamId}`;
         const opp = Object.keys(box.teamScores).find((t) => t !== String(teamId));
-        const totalAllowed = opp != null ? (box.teamScores[opp] || 0) : 0;
-        const bonus = teamDefenseBonusRaw(box.teamStats[String(teamId)]);
-        updates.push({ athleteId, week: wk, period: box.period, isDef: true, totalAllowed, bonus });
+        const d = kdef.def[String(teamId)] || { quarters: { 1: { stats: {} }, 2: { stats: {} }, 3: { stats: {} }, 4: { stats: {} } }, tdEvents: [] };
+        updates.push({ athleteId, isDef: true, quarters: d.quarters, tdEvents: d.tdEvents || [], totalAllowed: opp != null ? (box.teamScores[opp] || 0) : 0 });
       } else {
         const espnId = String(p.player_id || "").replace(/^e/, "");
-        const r = box.byAthlete[espnId]; if (!r) continue;
-        updates.push({ athleteId: p.player_id, week: wk, period: box.period, isDef: false, raw: r.raw, computed: computedByPid[p.player_id] || null });
+        const o = offense[espnId], k = kdef.k[espnId];
+        if (!o && !k && !box.byAthlete[espnId]) continue; // not in this game (inactive) — leave row absent
+        const quarters = {};
+        for (let q = 1; q <= 4; q++) quarters[q] = { stats: { ...((o && o.quarters[q].stats) || {}), ...((k && k.quarters[q].stats) || {}) } };
+        updates.push({ athleteId: p.player_id, isDef: false, quarters, tdEvents: (o && o.qtdEvents) || [] });
       }
     }
   }
@@ -343,98 +747,29 @@ async function pollLeague(league) {
 
   const rows = updates.map((u) => {
     const prev = byId[u.athleteId];
-    const qpts = (prev && prev.q_pts) ? { ...prev.q_pts } : {};
-    const prevStats = (prev && prev.prev_stats) ? prev.prev_stats : {};
-    let prevQtd = prev ? (prev.prev_qtd || 0) : 0, prevBonus = prev ? (prev.prev_bonus || 0) : 0, newPrevStats = prevStats, prevTotalOut = 0, firstQtdAtOut = null;
-    const hadQtdBefore = prevQtd > 0; // captured before prevQtd gets reused below to hold the new cumulative total
-    if (u.isDef) {
-      const safeTotalAllowed = Math.max(u.totalAllowed, (prev && prev.q_pts && prev.q_pts.pa && prev.q_pts.pa.allowed) || 0);
-      qpts.pa = { allowed: safeTotalAllowed, fp: defBracket(safeTotalAllowed) };
-      const curBonusFp = u.bonus.sacks + u.bonus.ints * 2 + u.bonus.td * 6; // informational only, clients recompute with real settings
-      const bonusDelta = Math.max(0, curBonusFp - prevBonus);
-      const tdDelta = Math.max(0, u.bonus.td - prevQtd);
-      const sackDelta = Math.max(0, u.bonus.sacks - (prevStats.sacks || 0));
-      const intDelta = Math.max(0, u.bonus.ints - (prevStats.ints || 0));
-      const cur = qpts[u.period] || { fp: 0, qtd: 0, stats: {} };
-      qpts[u.period] = {
-        fp: Math.round((cur.fp + bonusDelta) * 10) / 10,
-        qtd: (cur.qtd || 0) + tdDelta,
-        stats: { sacks: (cur.stats && cur.stats.sacks || 0) + sackDelta, ints: (cur.stats && cur.stats.ints || 0) + intDelta, defTD: (cur.stats && cur.stats.defTD || 0) + tdDelta },
-      };
-      prevBonus = curBonusFp; prevQtd = u.bonus.td;
-      newPrevStats = { sacks: u.bonus.sacks, ints: u.bonus.ints };
-      firstQtdAtOut = (!hadQtdBefore && prevQtd > 0) ? new Date().toISOString() : null;
-    } else {
-      // Offense stats now come directly from play-by-play (statsFromDrives)
-      // instead of diffing the cumulative box score — exact per-quarter
-      // attribution for yardage AND touchdowns, recomputed fresh every poll
-      // from the complete play list, so there's no "previous snapshot" to
-      // drift out of sync for these fields at all. Mirrors index.html's
-      // identical rework.
-      const computed = u.computed || { quarters: { 1: { stats: {} }, 2: { stats: {} }, 3: { stats: {} }, 4: { stats: {} } }, qtdEvents: [] };
-      let totalFp = 0;
-      for (let q = 1; q <= 4; q++) {
-        const stats = { ...(computed.quarters[q] && computed.quarters[q].stats) };
-        const prevQ = prev && prev.q_pts && prev.q_pts[q];
-        const newIsEmpty = Object.keys(stats).length === 0;
-        const prevHadData = prevQ && prevQ.stats && Object.keys(prevQ.stats).length > 0;
-        if (newIsEmpty && prevHadData) {
-          // This quarter came back with no plays at all despite already
-          // having real recorded stats — keep what's there instead of
-          // wiping it. Not a "fp can't decrease" rule (it legitimately
-          // does, from an INT/fumble/negative play) — this only fires when
-          // play-by-play found NOTHING for an already-scoring player,
-          // which is the signature of a transient/incomplete fetch or a
-          // race with a fresher concurrent write, never a real game event.
-          qpts[q] = prevQ;
-          totalFp += prevQ.fp;
-        } else {
-          const qtd = (stats.rushTD || 0) + (stats.recTD || 0);
-          const fp = infoFpFromStats(stats);
-          qpts[q] = { fp, qtd, stats };
-          totalFp += fp;
-        }
-      }
-      // Fields play-by-play doesn't cover — fumbles lost, and (for
-      // kickers, who share this same branch) FG/XP makes and misses —
-      // still use the old box-score-diff approach, credited to whichever
-      // quarter is currently live. Kickers never match any Rush/Pass
-      // Reception pattern, so `computed` is empty for them and this is
-      // the ONLY place their stats come from; nothing regresses.
-      const PLAY_BY_PLAY_FIELDS = new Set(["passYds", "passTD", "passInt", "rushYds", "rushTD", "rec", "recYds", "recTD"]);
-      const leftoverStatsDelta = {};
-      Object.keys(u.raw || {}).forEach((k) => { if (!PLAY_BY_PLAY_FIELDS.has(k)) leftoverStatsDelta[k] = Math.max(0, (u.raw[k] || 0) - (prevStats[k] || 0)); });
-      if (Object.keys(leftoverStatsDelta).some((k) => leftoverStatsDelta[k])) {
-        const cur = qpts[u.period];
-        const mergedStats = { ...cur.stats };
-        Object.keys(leftoverStatsDelta).forEach((k) => { mergedStats[k] = (mergedStats[k] || 0) + leftoverStatsDelta[k]; });
-        const before = infoFpFromStats(cur.stats), after = infoFpFromStats(mergedStats);
-        cur.stats = mergedStats;
-        cur.fp = Math.round((cur.fp + (after - before)) * 10) / 10;
-        totalFp += (after - before);
-      }
-      // Hot Start needs the REAL chronological moment a qualifying TD
-      // happened — now available directly from the play itself (wallclock)
-      // instead of approximating it as "whenever we happened to poll and
-      // noticed the cumulative count went up".
-      const earliestTd = computed.qtdEvents.reduce((min, e) => (e.wallclock && (!min || e.wallclock < min)) ? e.wallclock : min, null);
-      prevQtd = computed.qtdEvents.length; // informational only — nothing diffs against this for offense anymore
-      newPrevStats = u.raw || {};
-      prevTotalOut = Math.round(totalFp * 10) / 10;
-      firstQtdAtOut = earliestTd || ((!hadQtdBefore && prevQtd > 0) ? new Date().toISOString() : null);
+    const qpts = {}; let total = 0, tds = 0, bonus = 0; const sum = {};
+    for (let q = 1; q <= 4; q++) {
+      const stats = {}; Object.keys(u.quarters[q].stats).forEach((k) => { if (u.quarters[q].stats[k] !== 0) stats[k] = u.quarters[q].stats[k]; });
+      Object.keys(stats).forEach((k) => { sum[k] = (sum[k] || 0) + stats[k]; });
+      const fp = infoFpFromStats(stats); // informational — clients recompute with league settings
+      const qtd = u.isDef ? (stats.defTD || 0) : (stats.rushTD || 0) + (stats.recTD || 0);
+      qpts[q] = { fp, qtd, stats }; total += fp; tds += qtd; if (u.isDef) bonus += fp;
     }
-    // Hot Start needs real chronological order across DIFFERENT games (a Q1
-    // score in the 8pm game happens later in real time than a Q4 score in a
-    // 1pm game), which quarter number alone can't express. Set once and
-    // never overwritten after that.
-    const firstQtdAt = (prev && prev.first_qtd_at) ? prev.first_qtd_at : firstQtdAtOut;
+    if (u.isDef) {
+      const allowed = Math.max(u.totalAllowed, (prev && prev.q_pts && prev.q_pts.pa && prev.q_pts.pa.allowed) || 0);
+      qpts.pa = { allowed, fp: defBracket(allowed) }; total += qpts.pa.fp;
+    }
+    // Hot Start: real chronological moment of the first qualifying TD, from the
+    // play's own wallclock, recomputed every cycle from the full play list.
+    const earliest = u.tdEvents.reduce((min, e) => (e.wallclock && (!min || e.wallclock < min)) ? e.wallclock : min, null);
     return {
       athlete_id: u.athleteId, week: wk, season: 2026, q_pts: qpts,
-      prev_total: u.isDef ? 0 : prevTotalOut, prev_qtd: prevQtd, prev_bonus: prevBonus, prev_stats: newPrevStats,
-      first_qtd_at: firstQtdAt, season_type: testPreseason ? "preseason" : "regular",
+      prev_total: Math.round(total * 10) / 10, prev_qtd: tds, prev_bonus: Math.round(bonus * 10) / 10, prev_stats: sum,
+      first_qtd_at: earliest || (prev && prev.first_qtd_at) || null, season_type: testPreseason ? "preseason" : "regular",
     };
   }).filter(Boolean);
   if (!rows.length) { console.log(`league ${league.id}: nothing to write for week ${wk} (all rows guarded/skipped)`); return; }
+  if (process.env.DRY_RUN) { console.log(`DRY_RUN league ${league.id} week ${wk}: ${rows.length} rows`); globalThis.__dryRows = (globalThis.__dryRows || []).concat(rows); return; }
 
   await sb("player_week_stats", { method: "POST", headers: { Prefer: "resolution=merge-duplicates" }, body: JSON.stringify(rows) });
   console.log(`league ${league.id}: polled ${rows.length} players for week ${wk}`);
@@ -703,13 +1038,24 @@ async function resolveExpiredTradeReviews() {
 // costs nothing — the actual safeguard against ever being rate-limited is
 // doing this ONLY while a game is actually live (see anyGameLiveOrStartingSoon
 // above), which cuts total request volume by 90%+ compared to running 24/7.
-const LOOP_BUDGET_MS = 270_000; // 4.5 min — leaves headroom before the next 5-min trigger
-const POLL_INTERVAL_MS = 20_000;
+// One scheduled run now covers an entire game window. GitHub's cron proved
+// unreliable (2026-09-21: from ~6 runs/hour to ~1 run every 3–5 hours, mid
+// Monday-night game), so instead of trusting the next trigger to show up in 5
+// minutes, a run keeps cycling while any game is live, keeps going through a
+// final pass after the LAST game ends (so the closing plays / overtime land),
+// and only then exits. Hard cap sits under GitHub's 6-hour job limit; the
+// `concurrency` group in the workflow queues the next trigger behind us.
+const LOOP_BUDGET_MS = 5 * 60 * 60 * 1000 + 40 * 60 * 1000; // 5h40m
+const POLL_INTERVAL_MS = 30_000;
+const RATE_LIMIT_BACKOFF_MS = 120_000;
 
 async function main() {
-  await autoAdvanceWeeks();
-  await processWaivers();
-  await resolveExpiredTradeReviews();
+  if (!process.env.DRY_RUN) { // DRY_RUN=<file>: compute rows only, write nothing anywhere
+    await autoAdvanceWeeks();
+    await processWaivers();
+    await resolveExpiredTradeReviews();
+  }
+  try { globalThis.__regularSeasonLive = (await getEspnRegularSeasonWeek()) != null; } catch (e) { globalThis.__regularSeasonLive = true; }
 
   let live;
   try { live = await anyGameLiveOrStartingSoon(); }
@@ -717,10 +1063,10 @@ async function main() {
     console.log(`scoreboard check failed (${e.message}) — skipping this run, next one retries in 5 min.`);
     return;
   }
-  if (!live) { console.log("no NFL games live or starting soon — skipping this run."); return; }
+  if (!live && !process.env.DRY_RUN) { console.log("no NFL games live or starting soon — skipping this run."); return; }
 
   const start = Date.now();
-  let cycle = 0;
+  let cycle = 0, quietChecks = 0;
   while (true) {
     cycle++;
     try {
@@ -728,14 +1074,20 @@ async function main() {
       console.log(`cycle ${cycle}: polled ${n} league(s), ${((Date.now() - start) / 1000).toFixed(0)}s elapsed`);
     } catch (e) {
       if (e instanceof RateLimitedError) {
-        console.log(`Got a 429 from ESPN on cycle ${cycle} — backing off for the rest of this run. Next scheduled run retries in ~5 min.`);
-        break;
-      }
-      console.error(`cycle ${cycle} failed:`, e.message);
+        console.log(`429 from ESPN on cycle ${cycle} — backing off ${RATE_LIMIT_BACKOFF_MS / 1000}s.`);
+        await new Promise((r) => setTimeout(r, RATE_LIMIT_BACKOFF_MS));
+      } else console.error(`cycle ${cycle} failed:`, e.message);
     }
-    if (Date.now() - start >= LOOP_BUDGET_MS) break;
+    if (process.env.DRY_RUN) break;
+    if (Date.now() - start >= LOOP_BUDGET_MS) { console.log("run budget reached — next scheduled run takes over."); break; }
+    // Stop only after two consecutive "nothing live" checks following the last
+    // poll, so the final whistle's plays are captured by one more full cycle.
+    let stillLive = true;
+    try { stillLive = await anyGameLiveOrStartingSoon(); } catch (e) { stillLive = true; }
+    if (stillLive) quietChecks = 0; else if (++quietChecks >= 2) { console.log("no games live — final pass done, exiting."); break; }
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
   }
+  if (process.env.DRY_RUN) require("fs").writeFileSync(process.env.DRY_RUN, JSON.stringify(globalThis.__dryRows || []));
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
