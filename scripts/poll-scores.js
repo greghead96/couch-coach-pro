@@ -723,6 +723,7 @@ async function pollLeague(league) {
     // Name universe for this game: both teams' full rosters (cached per run) + box athletes.
     let athletesByTeam;
     try { athletesByTeam = await athletesByTeamForGame(box); } catch (e) { console.error(`roster build failed for ${ab}`, e.message); continue; }
+    if (!(box.period > 0)) continue; // pregame: nothing to record yet (a DEF row now would show +10 points allowed before kickoff)
     // A live game whose play list came back EMPTY is a transient/partial ESPN
     // response — writing it would zero everyone. Skip this team this cycle.
     if (box.period > 0 && countPlays(box.drives) === 0) { console.log(`${ab}: empty play list, skipping this cycle`); continue; }
