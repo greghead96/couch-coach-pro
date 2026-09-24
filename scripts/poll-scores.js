@@ -57,7 +57,14 @@ async function sb(path, opts) {
     },
   });
   if (!r.ok) throw new Error(`Supabase ${path} -> ${r.status}: ${await r.text()}`);
-  return r.status === 204 ? null : r.json();
+  // Inserts/upserts answer 201 with an EMPTY body (no return=representation),
+  // and r.json() on an empty body throws "Unexpected end of JSON input".
+  // That exception is what silently killed autoAdvanceWeeks every week (the
+  // weekly_lineups snapshot upsert threw right before the current_week PATCH,
+  // so leagues never advanced) and made every successful stats upsert log as
+  // a failure. Parse only when there is something to parse.
+  const txt = await r.text();
+  return txt ? JSON.parse(txt) : null;
 }
 
 function defBracket(pa) {

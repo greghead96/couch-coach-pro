@@ -228,7 +228,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260923a";
+const BUILD_ID = "20260923b";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -3778,10 +3778,17 @@ function slotPlayerIds(uid, wk){
 }
 // Reconstructs a manager's real weekly score from real per-quarter stats +
 // whatever power-ups were actually spent on those specific players/quarters.
-function computeRealTeamScore(uid, wk){
+// `swing` (optional): a uid -> points map that accumulates the net fantasy
+// points each MANAGER's power-ups swung this week — feeds Coach Eff on the
+// Standings tab. Double = the extra copy of that quarter; Freeze = the
+// opponent's points prevented (credited to the freezer, not the frozen
+// team); Emergency Sub = sub-in minus sub-out from the swap quarter on (can
+// be negative); Hot Start = the bonus when it hits.
+function computeRealTeamScore(uid, wk, swing){
+  const credit=(who,pts)=>{ if(swing && who) swing[who]=(swing[who]||0)+pts; };
   const picksWk=app.powerupPicks.filter(p=>p.week===wk);
   const byPlayerPU={}; picksWk.forEach(p=>{ byPlayerPU[p.player_id]=p; });
-  const subOut={}; picksWk.filter(p=>p.powerup_key==="sub" && p.target_player_id).forEach(p=>{ subOut[p.target_player_id]={inId:p.player_id, q:p.quarter}; });
+  const subOut={}; picksWk.filter(p=>p.powerup_key==="sub" && p.target_player_id).forEach(p=>{ subOut[p.target_player_id]={inId:p.player_id, q:p.quarter, uid:p.user_id}; });
   const hotStartPick=picksWk.find(p=>p.powerup_key==="hotstart" && p.user_id===uid);
   const starterIds=slotPlayerIds(uid, wk).filter(Boolean);
   let total=0, bestTD=null;
@@ -3791,8 +3798,12 @@ function computeRealTeamScore(uid, wk){
       const contributor=(swap && q>=swap.q) ? swap.inId : pid;
       const rq=realQuarterly(contributor, wk);
       let fp=rq.q[q];
+      if(swap && q>=swap.q) credit(swap.uid, fp-realQuarterly(pid, wk).q[q]);
       const pu=byPlayerPU[contributor];
-      if(pu && Number(pu.quarter)===q){ if(pu.powerup_key==="double") fp*=2; else if(pu.powerup_key==="freeze") fp=0; }
+      if(pu && Number(pu.quarter)===q){
+        if(pu.powerup_key==="double"){ credit(pu.user_id, fp); fp*=2; }
+        else if(pu.powerup_key==="freeze"){ credit(pu.user_id, fp); fp=0; }
+      }
       total+=fp;
       if(q===1 && rq.pa) total+=rq.pa.fp; // whole-game DEF component, added once (not per-quarter, not power-up eligible)
       // "First" means real chronological order across the WHOLE week, not
@@ -3807,7 +3818,7 @@ function computeRealTeamScore(uid, wk){
       }
     }
   });
-  if(hotStartPick && bestTD && bestTD.pid===hotStartPick.player_id) total+=2*(app.settings.scoring.rushTD||6);
+  if(hotStartPick && bestTD && bestTD.pid===hotStartPick.player_id){ const bonus=2*(app.settings.scoring.rushTD||6); total+=bonus; credit(uid, bonus); }
   return Math.round(total*10)/10;
 }
 // Per-player real total (power-up adjusted) for display on the roster rows.
@@ -3834,15 +3845,25 @@ function getRealStandings(wkCap){
   const cap = wkCap!=null ? wkCap : (app.currentWeek||1);
   const rows=(app.members||[]).map(m=>({team:m.team_name||"Team", w:0,l:0,t:0, pf:0, pa:0, me:m.user_id===(app.user&&app.user.id), uid:m.user_id}));
   const byUid={}; rows.forEach(r=>byUid[r.uid]=r);
+  const swing={}, results={}; // Coach Eff accumulator; per-team W/L/T sequence for Strk
   for(let wk=1; wk<cap; wk++){
     app.schedule.filter(g=>g.week===wk).forEach(g=>{
       const H=byUid[g.home_user], A=byUid[g.away_user]; if(!H||!A) return;
-      const hs=computeRealTeamScore(g.home_user,wk), as=computeRealTeamScore(g.away_user,wk);
+      const hs=computeRealTeamScore(g.home_user,wk,swing), as=computeRealTeamScore(g.away_user,wk,swing);
       H.pf+=hs; H.pa+=as; A.pf+=as; A.pa+=hs;
-      if(hs>as){ H.w++; A.l++; } else if(as>hs){ A.w++; H.l++; } else { H.t++; A.t++; }
+      const hr= hs>as?"W":as>hs?"L":"T";
+      if(hr==="W"){ H.w++; A.l++; } else if(hr==="L"){ A.w++; H.l++; } else { H.t++; A.t++; }
+      (results[H.uid]=results[H.uid]||[]).push(hr); (results[A.uid]=results[A.uid]||[]).push(hr==="W"?"L":hr==="L"?"W":"T");
     });
   }
-  rows.forEach(r=>{ r.pf=Math.round(r.pf*10)/10; r.pa=Math.round(r.pa*10)/10; });
+  rows.forEach(r=>{
+    r.pf=Math.round(r.pf*10)/10; r.pa=Math.round(r.pa*10)/10;
+    // Strk: current run of identical results ending with the latest completed
+    // week — W3 = three straight wins, L1 = just lost after any run.
+    const seq=results[r.uid]||[]; let n=0; for(let i=seq.length-1;i>=0 && seq[i]===seq[seq.length-1];i--) n++;
+    r.streak= seq.length ? seq[seq.length-1]+n : "—";
+    r.pu=Math.round((swing[r.uid]||0)*10)/10;
+  });
   // Tiebreak on point differential (PF-PA), not raw PF — a team that wins
   // low-scoring games shouldn't out-rank one that's actually outscoring
   // opponents by more, at the same record.
@@ -4168,7 +4189,7 @@ function renderLeague(){
     let html=`<table class="std"><tr><th>#</th><th>Team</th>${app.realLeague?"<th>Manager</th>":""}<th>W-L</th><th>PF</th><th>PA</th><th>Strk</th><th>Coach&nbsp;Eff</th></tr>`;
     getStandings().forEach((t,i)=>{
       const st=t.streak||""; const sc= st[0]==="W"?"var(--you)":st[0]==="L"?"var(--opp)":"var(--muted)";
-      const pu=(t.pu!=null)?("+"+t.pu.toFixed(1)):"—";
+      const pu=(t.pu!=null)?((t.pu>=0?"+":"")+t.pu.toFixed(1)):"—";
       const mgrTd = app.realLeague ? `<td class="muted" style="font-size:12px">${usernameOf(t.uid)||"—"}</td>` : "";
       const teamTd = (app.realLeague && t.uid && !t.me) ? `<td data-uid="${t.uid}" style="cursor:pointer;text-decoration:underline dotted">${t.team}</td>` : `<td>${t.team}</td>`;
       html+=`<tr class="${t.me?'me':''}"><td>${i+1}</td>${teamTd}${mgrTd}<td>${t.w}-${t.l}</td><td>${t.pf}</td><td>${t.pa||"—"}</td><td style="color:${sc};font-weight:700">${st||"—"}</td><td style="color:var(--gold);font-weight:700;white-space:nowrap">${pu}</td></tr>`;
