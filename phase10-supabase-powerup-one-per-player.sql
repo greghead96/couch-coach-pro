@@ -10,9 +10,13 @@
 drop index if exists public.powerup_picks_quarter_uq;
 
 -- Re-establish the hard guarantee at the storage level (player_id only —
--- the sub-out target is enforced in the function below).
+-- the sub-out target is enforced in the function below). Partial from week 3
+-- on: weeks 1–2 were played under the per-quarter rule and legitimately hold
+-- several picks on one player (e.g. J.Taylor wk2: freeze Q1 + double Q2 +
+-- hot start) — those stay as scored.
+drop index if exists public.powerup_picks_player_week_uq;
 create unique index if not exists powerup_picks_player_week_uq
-  on public.powerup_picks(league_id, week, player_id);
+  on public.powerup_picks(league_id, week, player_id) where week >= 3;
 
 create or replace function public.log_powerup(lid uuid, wk int, pid text, pname text, key text, q int, target text default null)
 returns void language plpgsql security definer set search_path = public as $$
