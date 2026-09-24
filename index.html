@@ -210,12 +210,14 @@
   .dcell.now { box-shadow:0 0 0 2px var(--gold) inset; }
   .dcell .pk { color:var(--muted); font-size:8px; }
   .dcell .pn { font-weight:700; font-size:10px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .dboard.full { max-height:70vh; overflow:auto; }
-  .dboard.full .dgrid { gap:2px; min-width:0; }
-  .dboard.full .dcell { min-height:34px; padding:2px 3px; }
-  .dboard.full .dcell .pk { font-size:7px; }
-  .dboard.full .dcell .pn { font-size:8px; white-space:normal; line-height:1.1; max-height:2.2em; }
-  .dboard.full .dhead { font-size:8px; padding:2px 1px; overflow:hidden; text-overflow:ellipsis; }
+  .dboard.fit { overflow-x:hidden; }
+  .dboard.fit.full { max-height:75vh; overflow-y:auto; }
+  .dboard.fit .dgrid { gap:2px; min-width:0; }
+  .dboard.fit .dcell { min-height:40px; padding:3px; min-width:0; }
+  .dboard.fit .dcell .pk { font-size:7px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .dboard.fit .dcell .pn { font-size:9px; white-space:normal; line-height:1.15; word-break:break-word; }
+  .dboard.fit .dhead { font-size:8px; padding:2px 1px; overflow:hidden; text-overflow:ellipsis; }
+  @media (min-width:720px){ .dboard.fit .dcell { min-height:56px; padding:5px; } .dboard.fit .dcell .pn { font-size:12px; } .dboard.fit .dcell .pk { font-size:9px; } .dboard.fit .dhead { font-size:11px; } }
   /* enlarged draft board */
   .dboard.big .dhead { font-size:11px; padding:5px 3px; }
   .dboard.big .dcell { min-height:58px; padding:6px; }
@@ -234,7 +236,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260923c";
+const BUILD_ID = "20260923d";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -1692,6 +1694,7 @@ function renderViewTeam(){
 // ============================ PLAYERS (in-app add/drop — no Sleeper) ============================
 const POS_ORDER={RB:0,WR:1,QB:2,TE:3,K:4,DEF:5};
 function ensurePool(){ if(!app.pool && !app.poolLoading && !app.poolError) loadPool(); }
+const SEASON_YEAR=2026; // current NFL season; "Last Season" = SEASON_YEAR-1
 const NFL_TEAM_IDS=[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,33,34];
 // Static ESPN team ids by abbreviation (mirrors scripts/poll-scores.js). teamIdForAb
 // used to depend entirely on the player pool having loaded — until those 32 roster
@@ -1770,7 +1773,7 @@ async function openPlayerDetail(p){
   if(!isDef){
     const base="https://site.web.api.espn.com/apis/common/v3/sports/football/nfl/athletes/"+p.espnId;
     try{ data=await (await fetch(base+"/overview")).json(); }catch(e){}
-    try{ gl=await (await fetch(base+"/gamelog")).json(); }catch(e){}
+    try{ gl=await (await fetch(base+"/gamelog?season="+(SEASON_YEAR-1))).json(); }catch(e){}
   }
   let schedOk=false;
   try{ // seasontype=2 forces the full regular-season slate — without it ESPN's
@@ -1850,11 +1853,16 @@ function showDetailModal(){
   else {
     const d=D.data||{}, f=d.fantasy||{}, st=d.statistics||{}, ro=d.rotowire||{};
     const bio=[p.age?("Age "+p.age):"", p.exp!=null?(p.exp+" yr exp"):"", p.college||"", (p.injury&&p.injury!=="ACTIVE")?("⚠ "+p.injury):""].filter(Boolean).join(" · ");
-    const sp=(st.splits&&st.splits[0]&&st.splits[0].stats)||null, labels=st.labels||[];
     let lastHtml="";
-    if(sp) lastHtml=`<div style="overflow-x:auto"><table class="std"><tr>${labels.slice(0,8).map(l=>`<th>${l}</th>`).join("")}</tr><tr>${sp.slice(0,8).map(v=>`<td>${v}</td>`).join("")}</tr></table></div>`;
     let wkHtml=""; const wk=gamelogWeekly(D.gl);
     if(wk && wk.rows.length){
+      // Season totals line for last season, summed from the game log itself
+      // (same numbers the weekly table below is built from).
+      const tot={}; wk.rows.forEach(r=>{ (r.stats||[]).forEach((v,i)=>{ const n=parseFloat(String(v).replace(/,/g,"")); if(!isNaN(n)) tot[i]=(tot[i]||0)+n; }); });
+      const fpTot=Math.round(wk.rows.reduce((a,r)=>a+(r.fp||0),0)*10)/10;
+      const show=[["passingYards","PASS YDS"],["passingTouchdowns","PASS TD"],["interceptions","INT"],["rushingYards","RUSH YDS"],["rushingTouchdowns","RUSH TD"],["receptions","REC"],["receivingYards","REC YDS"],["receivingTouchdowns","REC TD"],["fieldGoalsMade","FG"],["extraPointsMade","XP"]]
+        .map(([k,l])=>{ const i=wk.names.indexOf(k); return i>=0 && tot[i] ? `<th>${l}</th><td>${Math.round(tot[i]*10)/10}</td>` : ""; }).filter(Boolean).join("");
+      lastHtml=sec((SEASON_YEAR-1)+" Season · "+wk.rows.length+" games · "+fpTot+" FP (our scoring)")+`<div style="overflow-x:auto"><table class="std"><tr>${show}</table></div>`;
       const groups=statGroups(wk.names);
       const tabs=(wk.cats&&wk.cats.length)?wk.cats:[{name:"passing",display:"Stats"}];
       let active=app.pStatTab; if(!tabs.find(t=>t.name===active)) active=tabs[0].name;
@@ -1910,7 +1918,7 @@ function showDetailModal(){
     const detailTabs=`<div class="chips" id="pDetailTabs">
       <div class="chip${dTab==="season"?' on':''}" data-t="season">This Season</div>
       <div class="chip${dTab==="last"?' on':''}" data-t="last">Last Season</div></div>`;
-    const tabBody = dTab==="season" ? seasonHtml : (lastHtml+wkHtml || '<div class="muted" style="font-size:12px">No prior-season stats available.</div>');
+    const tabBody = dTab==="season" ? seasonHtml : (lastHtml+wkHtml || `<div class="muted" style="font-size:12px">No ${SEASON_YEAR-1} NFL games on record${p.exp===0||p.exp==null?" — rookie or first NFL season":""}.</div>`);
     body=`${bio?`<div style="font-size:12px;margin-top:10px">${bio}</div>`:""}
       ${D.bye?`<div class="muted" style="font-size:12px;margin-top:4px">Bye: <b style="color:var(--txt)">Week ${D.bye}</b></div>`:""}
       ${(f.draftRank||f.positionRank)?`<div style="font-size:12px;margin-top:6px">ESPN draft #${f.draftRank||"—"} · ${p.pos}${f.positionRank||"—"} · ${f.percentOwned||0}% rostered</div>`:""}
@@ -4118,7 +4126,8 @@ function renderDraft(){
       c.appendChild(row);
     });
     s.appendChild(c);
-    if(bench.length){ const bc=el("div","card"); bc.appendChild(el("h2","title","Bench"));
+    { const bc=el("div","card"); bc.appendChild(el("h2","title","Bench ("+bench.length+")"));
+      if(!bench.length) bc.appendChild(el("div","muted","<div style='font-size:12px'>Nobody on the bench yet — a pick lands here once every slot he fits is already filled.</div>"));
       bench.forEach(pk=>{ const row=el("div","plr"); row.style.gridTemplateColumns="46px 1fr auto"; row.innerHTML=`<div class="pos">BN</div><div><div class="nm">${pk.player_name}</div><div class="meta2">${pk.pos} · ${pk.team||""}${byeTag(pk.team)}</div></div><div></div>`; bc.appendChild(row); });
       s.appendChild(bc); }
     return;
@@ -4128,11 +4137,14 @@ function renderDraft(){
   // one) and shrinks cells so all teams fit on screen; "Taken" swaps the
   // available-players list below for the players already drafted.
   const ctl=el("div","chips"); ctl.style.marginBottom="6px";
-  [["fullBoard","Full board"],["showTaken","Taken players"]].forEach(([k,lab])=>{ const c=el("div","chip"+(app[k]?" on":"")); c.textContent=lab; c.onclick=()=>{ app[k]=!app[k]; renderDraft(); }; ctl.appendChild(c); });
+  [["fullBoard","All rounds"],["showTaken","Taken players"]].forEach(([k,lab])=>{ const c=el("div","chip"+(app[k]?" on":"")); c.textContent=lab; c.onclick=()=>{ app[k]=!app[k]; renderDraft(); }; ctl.appendChild(c); });
   s.appendChild(ctl);
   const rounds = (done||app.fullBoard)?ROUNDS:Math.min(ROUNDS, Math.floor((pno-1)/N)+2);
-  const board=el("div","dboard"+(app.fullBoard?" full":" big")); const grid=el("div","dgrid");
-  grid.style.gridTemplateColumns = app.fullBoard ? `24px repeat(${N},minmax(0,1fr))` : `30px repeat(${N},minmax(96px,1fr))`;
+  // Every team column always fits the screen width (names wrap inside the
+  // cell) — no sideways scrolling on any device. On a desktop window the
+  // cells are simply bigger. "Full board" only controls how many rounds show.
+  const board=el("div","dboard fit"+(app.fullBoard?" full":"")); const grid=el("div","dgrid");
+  grid.style.gridTemplateColumns = `24px repeat(${N},minmax(0,1fr))`;
   grid.appendChild(el("div","dhead",""));
   order.forEach(uid=> grid.appendChild(el("div","dhead"+(uid===(app.user&&app.user.id)?" me":""), (D.memMap[uid]||"Team").split(" ")[0])));
   const byNo={}; D.picks.forEach(p=>byNo[p.pick_no]=p);
