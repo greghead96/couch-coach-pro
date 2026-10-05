@@ -1,17 +1,23 @@
-All ARI and CHI players were missing from draft. Doesn't matter now but investigate why that might have been and make sure the next draft goes corrcetly. 
-Need to update to automatically put drafted players into starting lineup if a position they can fit in is empty. Once the lineup and/or position is filled then the players go to the bench. 
-Update draft board layout -- need to be able to see the full board. Also add filter to be able to see players that have been taken. 
-Add filter button for Flex position
-Update My Roster and My Team menus to include Bye week next to players' name
-Not every player is pulling last season stats in the draft list
-When I click on my team no bench is showing in the draft tab
+When looking at avalible players to pick up, it does not display their game log. Any page that has a player and the capability to click into them should show their stats week to week. 
+Also every player shown needs a status symbol on every page a player is shown:
+•  The player is fifty-fifty or less than 100% healthy to play.
+• D (Doubtful): The player is unlikely to play in the upcoming game.
+• O (Out): The player will definitely not play in the upcoming game.
+• IR (Injured Reserve): The player is placed on the NFL team's official long-term injured list and can be moved to an IR roster slot.
+• Any others that are used by ESPN
 
-Update matchup screen score in the middle where it shows 14 live games when none had started yet. All games that have not started should be in upcoming until they kickoff where they then become live and then once they finish they go to final
+okay we had issues with subbing for multiple users (Week 4):
+"5 min before this stupid London game and I can’t swap out scary Terry for someone on my bench."
+"Yea same with stefon diggs and i tried like 40 mins before game."
 
-Need to update app so a player is locked in starting lineup or bench after their game has started. Currently, I can put Puka on the bench even though he already played
+Also a couple of users had their hot start power up applied and the fastest TD was that player but they did not get their 3x TD (Week 3):
+"Jamarr Chase should have the 3x applied to his TD. Thank you in advance" (Bengals vs Steelers)
+"Kenneth Walker needs the 3x hot start TD versus the Dolphins"
+For these you will need to retroactively update the Week 3 scores and adjust win loss if needed after the changes. Double check scoring for all teams just to check your work on how things are going so far.
 
-We can’t use a power up on someone at all if they already have a power up even if it’s for separate quarters
-One of our users reported it let him use his freeze on Stafford for a different quarter even though someone else used the 2x on stafford already.
 
-Powerup usage symbols should persist when I go back and look at any matchup from a previous week. I need to be able to see if Team A and Team B played and how they used their power ups by the symbols next to the players same way I need to be able to look at my team vs Team C
+Had users find separate subbing bugs (Week 3):
+"Shouldn’t be able to use emergency sub on player whose game has already started. I subbed in Shaheed for Collins"
+"Shouldn’t be able to drop or pickup players that already played"
 
+We also want to tweak it so you can use a power up on a player that already has a power up on them and just make sure it can't be the same quarter. That way I can still double my best player in Q2 if someone froze his Q4
