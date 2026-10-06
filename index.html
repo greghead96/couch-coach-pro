@@ -210,6 +210,10 @@
   .dcell.now { box-shadow:0 0 0 2px var(--gold) inset; }
   .dcell .pk { color:var(--muted); font-size:8px; }
   .dcell .pn { font-weight:700; font-size:10px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .inj { display:inline-block; font-size:9px; font-weight:800; padding:0 4px; border-radius:4px; margin-left:4px; line-height:14px; vertical-align:middle; letter-spacing:.2px; }
+  .inj-q { background:#fbbf24; color:#1a1300; } .inj-d { background:#fb923c; color:#1f0d00; } .inj-o { background:#ef4444; color:#fff; }
+  .inj-ir { background:transparent; color:#f87171; border:1px solid #f87171; } .inj-sus { background:#7f1d1d; color:#fff; }
+  .inj-ps { background:transparent; color:var(--muted); border:1px solid var(--line); } .inj-p { background:#34d399; color:#04210f; }
   .dboard.fit { overflow-x:hidden; }
   .dboard.fit.full { max-height:75vh; overflow-y:auto; }
   .dboard.fit .dgrid { gap:2px; min-width:0; }
@@ -236,7 +240,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20260923e";
+const BUILD_ID = "20261005a";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -472,7 +476,7 @@ function ord(n){ return n===1?"st":n===2?"nd":n===3?"rd":"th"; }
 function currentQuarter(){ if(!app.sim.running && app.sim.gameSec===0) return 0; if(app.sim.gameSec>=4*QSEC) return 5; return Math.min(4,Math.floor(app.sim.gameSec/QSEC)+1); }
 function findPlayer(id){ return [...myStarters,...oppStarters,...myBench,...oppBench].find(p=>p.id===id); }
 function playerAssigned(pid){
-  if(app.realLeague && app.powerupPicks.some(x=>x.week===app.currentWeek && (x.player_id===pid || x.target_player_id===pid))) return true;
+  if(app.realLeague && app.powerupPicks.some(x=>x.week===app.currentWeek && x.player_id===pid)) return true;
   return app.sim.scheduled.some(x=>x.pid===pid) || app.sim.hotStart===pid;
 }
 function realGameStatusSummary(){
@@ -569,7 +573,26 @@ function getStandings(){
     ? app.leagueData.standings
     : LEAGUE.slice().sort((a,b)=>b.w-a.w||b.pf-a.pf);
 }
+// ESPN injury designations → badge. Questionable (Q) = roughly 50/50 or less than 100%,
+// Doubtful (D) = unlikely to play, Out (O) = will not play, IR = on the injured-reserve list.
+const INJ_MAP={ "questionable":["Q","q"], "doubtful":["D","d"], "out":["O","o"], "injured reserve":["IR","ir"], "day-to-day":["DTD","q"],
+  "suspension":["SUS","sus"], "suspended":["SUS","sus"], "probable":["P","p"], "physically unable to perform":["PUP","ir"], "pup":["PUP","ir"],
+  "non-football injury":["NFI","ir"], "reserve/pup":["PUP","ir"], "reserve/nfi":["NFI","ir"], "practice squad":["PS","ps"] };
+function poolById(id){
+  if(app._poolByIdFor!==app.pool){ app._poolByIdFor=app.pool; app._poolById={}; (app.pool||[]).forEach(x=>{ app._poolById[x.id]=x; }); }
+  return app._poolById[id];
+}
+function injBadge(idOrPlayer){
+  const id = (idOrPlayer && typeof idOrPlayer==="object") ? (idOrPlayer.player_id||idOrPlayer.id) : idOrPlayer;
+  if(!id || String(id).startsWith("def_") || String(id).startsWith("e_")) return "";
+  const pl=poolById(id); if(!pl) return "";
+  const raw=(pl.injury && pl.injury!=="ACTIVE") ? pl.injury : (pl.rosterStatus==="practice-squad" ? "Practice Squad" : "");
+  if(!raw) return "";
+  const m=INJ_MAP[String(raw).toLowerCase()] || [String(raw).split(/[\s-]+/).map(w=>w[0]).join("").toUpperCase().slice(0,3), "q"];
+  return `<span class="inj inj-${m[1]}" title="${raw}">${m[0]}</span>`;
+}
 function statusTag(p){
+  { const b=injBadge(p); if(b) return b; }
   if(!p.status) return "";
   const map={Q:["Q","#fbbf24"],OUT:["OUT","#f87171"],IR:["IR","#f87171"],news:["NEWS","#60a5fa"]};
   const m=map[p.status]||["•","#8b97c4"];
@@ -698,7 +721,9 @@ async function usePUConfirmed(k,p){
     // so checking them here never actually blocked a live real player.
     const started = app.realLeague ? realCurrentQuarterFor(p)>0 : (app.sim.gameSec>0 || app.sim.running);
     if(started){ toast("Set Hot Start before "+p.name+"'s game kicks off"); return; }
-    if(playerAssigned(p.id)){ toast(p.name+" already has a power-up this week"); return; }
+    // Hot Start has no quarter, so it can sit alongside a Double/Freeze on the same player;
+    // only a second Hot Start on him is a conflict (and only his own manager can place one).
+    if(app.realLeague ? app.powerupPicks.some(x=>x.week===app.currentWeek && x.player_id===p.id && x.powerup_key==="hotstart") : app.sim.hotStart===p.id){ toast(p.name+" already has a Hot Start"); return; }
     if(app.realLeague){ const ok=await persistPowerup("hotstart",p.id,p.name,1); if(!ok) return; }
     app.inv.hotstart--; app.sim.hotStart=p.id; app.armed=null;
     logPU("me","hotstart",p.name,false,1);
@@ -710,10 +735,9 @@ async function usePUConfirmed(k,p){
     if(cq<1 || cq>2){ toast(app.realLeague?"Emergency Sub: only while that player's real game is in Q1-Q2":"Emergency Sub: first half of a live game only"); return; }
     openSubModal(p); return;
   }
-  // Double / Freeze — ONE power-up per player per week, from anyone: if the
-  // opponent already froze him (any quarter), you can't Double him either.
-  // (Server enforces the same rule in log_powerup — phase10 SQL.)
-  if(playerAssigned(p.id)){ toast(p.name+" already has a power-up this week"); app.armed=null; renderMatchup(); return; }
+  // Double / Freeze — several power-ups may stack on one player in a week (your Double
+  // in Q2 + their Freeze in Q4), but never the SAME quarter. Quarters that already hold
+  // one are excluded below (and enforced server-side in log_powerup — phase11 SQL).
   const cq=app.realLeague ? realCurrentQuarterFor(p) : currentQuarter();
   const used=usedQuartersFor(p.id);
   const allowed=[], blockedByOther=[];
@@ -730,7 +754,11 @@ function openSubModal(starter){
   const si=myStarters.indexOf(starter);
   const slot=SLOTS[si]; // same eligibility rule as setting a lineup slot — FLEX allows RB/WR/TE, everything else must match exactly
   const eligible=myBench.map((p,i)=>({p,i})).filter(o=>!slot || slot.pos.includes(o.p.pos));
-  const list=eligible.map(o=>`<button class="btn sec subOpt" data-i="${o.i}" style="width:100%;text-align:left;margin-top:6px">${o.p.pos} · ${o.p.name} <span class="muted" style="font-size:11px">· not kicked off</span></button>`).join("");
+  // The player coming IN must not have kicked off (by the real clock OR by live game
+  // state) — otherwise you could sub in someone whose game is already underway/over.
+  const startedBench=(bp)=> lockStateForTeam(bp.teamAb)!=="open" || (app.realLeague && realCurrentQuarterFor(bp)>0);
+  const list=eligible.map(o=>{ const st=startedBench(o.p);
+    return `<button class="btn sec${st?" disabled":" subOpt"}" ${st?"disabled":`data-i="${o.i}"`} style="width:100%;text-align:left;margin-top:6px">${o.p.pos} · ${o.p.name}${injBadge(o.p.id)} <span class="muted" style="font-size:11px">${st?"· 🔒 game already started":"· not kicked off"}</span></button>`; }).join("");
   ov.innerHTML=`<div class="modal"><div class="box" style="max-width:360px">
     <div style="font-weight:800">🔁 Emergency Sub</div>
     <div class="muted" style="font-size:12px;margin:6px 0 8px">Sub in for <b style="color:var(--txt)">${starter.name}</b> (${starter.pos}, game underway). Pick a ${slot?slot.pos.join("/"):starter.pos} on your bench who hasn't kicked off — they start fresh:</div>
@@ -738,6 +766,7 @@ function openSubModal(starter){
     <button class="btn sec" id="subCancel" style="width:100%;margin-top:12px">Cancel</button></div></div>`;
   ov.querySelectorAll(".subOpt").forEach(b=> b.onclick=async ()=>{
     const bp=myBench[+b.dataset.i];
+    if(startedBench(bp)){ toast("🔒 "+bp.name+"'s game already started — can't sub them in"); return; }
     const bi=myBench.indexOf(bp);
     const subQ=app.realLeague ? realCurrentQuarterFor(starter) : currentQuarter();
     // Persist BEFORE mutating anything client-side — this used to fire the
@@ -1512,8 +1541,9 @@ function openPlayerBoxScore(p, wk, returnTo){
   for(let q=1;q<=4;q++){
     const qd=row && row.q_pts && (row.q_pts[q]||row.q_pts[String(q)]);
     const lines=quarterStatLines(p.pos, qd&&qd.stats);
-    const isPuQ=pu && Number(pu.quarter)===q; const cfg=isPuQ?POWERUPS[pu.powerup_key]:null;
-    const mult = cfg&&pu.powerup_key==="double" ? 2 : (cfg&&pu.powerup_key==="freeze" ? 0 : 1);
+    const puQ=app.powerupPicks.find(x=>x.week===wk && x.player_id===p.id && x.powerup_key!=="hotstart" && Number(x.quarter)===q);
+    const isPuQ=!!puQ; const cfg=isPuQ?POWERUPS[puQ.powerup_key]:null;
+    const mult = cfg&&puQ.powerup_key==="double" ? 2 : (cfg&&puQ.powerup_key==="freeze" ? 0 : 1);
     let qTotal=0;
     const lineHtml = lines.length ? lines.map(l=>{
       const adj=Math.round(l.pts*mult*10)/10; qTotal+=adj;
@@ -1523,6 +1553,8 @@ function openPlayerBoxScore(p, wk, returnTo){
     rows+=`<tr><td style="vertical-align:top">Q${q}</td><td style="font-size:12px">${lineHtml}</td><td style="text-align:right;font-weight:700;vertical-align:top">${qTotal.toFixed(1)}</td></tr>`;
     total+=qTotal;
   }
+  let hotRow="";
+  { const hb=hotStartBonusFor(p.id, wk); if(hb>0){ total+=hb; hotRow=`<tr style="border-top:1px solid var(--line)"><td>🔥</td><td style="font-size:12px"><b>Hot Start</b> — first touchdown in the lineup, 3× (bonus on top of the TD points above)</td><td style="text-align:right;font-weight:700">+${hb.toFixed(1)}</td></tr>`; } }
   let paRow="";
   if(row && row.q_pts && row.q_pts.pa){
     const pa=row.q_pts.pa; total+=pa.fp;
@@ -1533,7 +1565,7 @@ function openPlayerBoxScore(p, wk, returnTo){
   ov.innerHTML=`<div class="modal"><div class="box" style="max-width:440px;text-align:left">
     <div class="modal-x" id="pbClose">✕</div>
     <div style="display:flex;align-items:center;gap:10px">${pic}<div><div style="font-weight:800">${p.name}</div><div class="muted" style="font-size:12px">${teamLine}</div></div></div>
-    <div style="overflow-x:auto;margin-top:12px"><table class="std"><tr><th>Qtr</th><th>Stats</th><th style="text-align:right">FP</th></tr>${rows}${paRow}
+    <div style="overflow-x:auto;margin-top:12px"><table class="std"><tr><th>Qtr</th><th>Stats</th><th style="text-align:right">FP</th></tr>${rows}${hotRow}${paRow}
       <tr style="border-top:2px solid var(--line)"><td colspan="2" style="font-weight:800">Total</td><td style="text-align:right;font-weight:800;color:var(--gold)">${total.toFixed(1)}</td></tr>
     </table></div>
     ${noData}
@@ -1593,7 +1625,7 @@ function renderTeam(){
     SLOTS.forEach((slot,i)=>{
       const p=app.lineup[i]?pickById(app.lineup[i]):null;
       const row=el("div","plr"+(edit?" tappable":"")); row.style.gridTemplateColumns="42px 34px 1fr auto"; row.style.cursor="pointer";
-      if(p) row.innerHTML=`<div class="pos">${slot.lbl}</div>${avatarHTML({pos:p.pos,name:p.player_name,headshot:p.headshot})}<div><div class="nm">${isPlayerLocked(p)?"🔒 ":""}${p.player_name}</div><div class="meta2">${metaFor(p)}</div></div><div class="muted" style="font-size:11px">${edit?"change":"ⓘ"}</div>`;
+      if(p) row.innerHTML=`<div class="pos">${slot.lbl}</div>${avatarHTML({pos:p.pos,name:p.player_name,headshot:p.headshot})}<div><div class="nm">${isPlayerLocked(p)?"🔒 ":""}${p.player_name}${injBadge(p.player_id)}</div><div class="meta2">${metaFor(p)}</div></div><div class="muted" style="font-size:11px">${edit?"change":"ⓘ"}</div>`;
       else row.innerHTML=`<div class="pos">${slot.lbl}</div><div class="avatar" style="background:var(--ink)"></div><div><div class="nm muted">— empty</div><div class="meta2">needs a ${slot.pos.join("/")}</div></div><div class="muted" style="font-size:11px">set</div>`;
       row.onclick=()=>{ if(edit || !p) openLineupChooser(i); else playerActionModal(p); };
       sc.appendChild(row);
@@ -1604,7 +1636,7 @@ function renderTeam(){
     const bc=el("div","card"); bc.appendChild(el("h2","title","Bench ("+bench.length+")"));
     if(!bench.length) bc.appendChild(el("div","muted","<div style='font-size:13px'>No bench players.</div>"));
     bench.forEach(p=>{ const row=el("div","plr tappable"); row.style.gridTemplateColumns="34px 26px 1fr auto"; row.style.cursor="pointer";
-      row.innerHTML=`${avatarHTML({pos:p.pos,name:p.player_name,headshot:p.headshot})}<div class="pos">${p.pos}</div><div><div class="nm">${isPlayerLocked(p)?"🔒 ":""}${p.player_name}</div><div class="meta2">${metaFor(p)}</div></div><div class="muted" style="font-size:11px">${edit?"move":"ⓘ"}</div>`;
+      row.innerHTML=`${avatarHTML({pos:p.pos,name:p.player_name,headshot:p.headshot})}<div class="pos">${p.pos}</div><div><div class="nm">${isPlayerLocked(p)?"🔒 ":""}${p.player_name}${injBadge(p.player_id)}</div><div class="meta2">${metaFor(p)}</div></div><div class="muted" style="font-size:11px">${edit?"move":"ⓘ"}</div>`;
       row.onclick=()=>{ if(edit) openBenchMove(p); else playerActionModal(p); };
       bc.appendChild(row); });
     s.appendChild(bc);
@@ -1674,7 +1706,7 @@ function renderViewTeam(){
   SLOTS.forEach((slot,i)=>{
     const p=startersOut[i]; const isEmpty=!p || !p.id || p.id.indexOf("e_")===0;
     const row=el("div","plr"+(isEmpty?"":" tappable")); row.style.gridTemplateColumns="42px 34px 1fr auto"; row.style.cursor="pointer";
-    if(!isEmpty) row.innerHTML=`<div class="pos">${slot.lbl}</div>${avatarHTML({pos:p.pos,name:p.name,headshot:p.headshot})}<div><div class="nm">${p.name}</div><div class="meta2">${metaFor(p)}</div></div><div class="muted" style="font-size:11px">ⓘ</div>`;
+    if(!isEmpty) row.innerHTML=`<div class="pos">${slot.lbl}</div>${avatarHTML({pos:p.pos,name:p.name,headshot:p.headshot})}<div><div class="nm">${p.name}${injBadge(p.id)}</div><div class="meta2">${metaFor(p)}</div></div><div class="muted" style="font-size:11px">ⓘ</div>`;
     else row.innerHTML=`<div class="pos">${slot.lbl}</div><div class="avatar" style="background:var(--ink)"></div><div><div class="nm muted">— empty</div></div><div></div>`;
     if(!isEmpty) row.onclick=()=>playerActionModal(toPick(p));
     sc.appendChild(row);
@@ -1684,7 +1716,7 @@ function renderViewTeam(){
   if(!bench.length) bc.appendChild(el("div","muted","<div style='font-size:13px'>No bench players.</div>"));
   bench.forEach(p=>{
     const row=el("div","plr tappable"); row.style.gridTemplateColumns="34px 26px 1fr auto"; row.style.cursor="pointer";
-    row.innerHTML=`${avatarHTML({pos:p.pos,name:p.name,headshot:p.headshot})}<div class="pos">${p.pos}</div><div><div class="nm">${p.name}</div><div class="meta2">${metaFor(p)}</div></div><div class="muted" style="font-size:11px">ⓘ</div>`;
+    row.innerHTML=`${avatarHTML({pos:p.pos,name:p.name,headshot:p.headshot})}<div class="pos">${p.pos}</div><div><div class="nm">${p.name}${injBadge(p.id)}</div><div class="meta2">${metaFor(p)}</div></div><div class="muted" style="font-size:11px">ⓘ</div>`;
     row.onclick=()=>playerActionModal(toPick(p));
     bc.appendChild(row);
   });
@@ -1694,6 +1726,23 @@ function renderViewTeam(){
 // ============================ PLAYERS (in-app add/drop — no Sleeper) ============================
 const POS_ORDER={RB:0,WR:1,QB:2,TE:3,K:4,DEF:5};
 function ensurePool(){ if(!app.pool && !app.poolLoading && !app.poolError) loadPool(); }
+// Injury designations change daily (and Fri/Sat/Sun morning), but the player pool is loaded
+// once per session — re-read the rosters every 20 minutes and update in place.
+async function refreshPoolInjuries(){
+  if(!app.pool || app._injRefreshing) return; app._injRefreshing=true;
+  try{
+    const byId={}; app.pool.forEach(x=>{ byId[x.id]=x; });
+    await Promise.all(NFL_TEAM_IDS.map(async id=>{
+      try{ const r=await fetch(ESPN+"/teams/"+id+"/roster"); if(!r.ok) return; const rd=await r.json();
+        (rd.athletes||[]).forEach(grp=>(grp.items||[]).forEach(a=>{ const pl=byId["e"+a.id]; if(!pl) return;
+          pl.injury=(a.injuries&&a.injuries[0]&&a.injuries[0].status)||(grp.position==="injuredReserveOrOut"?"Injured Reserve":""); pl.rosterStatus=(a.status&&a.status.type)||""; }));
+      }catch(e){}
+    }));
+    app._injRefreshedAt=Date.now();
+    if(["draft","players","team","matchup"].includes(app.tab)){ const f={draft:renderDraft,players:renderPlayers,team:renderTeam,matchup:renderMatchup}[app.tab]; if(f && !document.querySelector("#overlay .modal")) f(); }
+  }finally{ app._injRefreshing=false; }
+}
+setInterval(()=>{ if(app.pool && !document.hidden) refreshPoolInjuries(); }, 20*60*1000);
 const SEASON_YEAR=2026; // current NFL season; "Last Season" = SEASON_YEAR-1
 const NFL_TEAM_IDS=[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,33,34];
 // Static ESPN team ids by abbreviation (mirrors scripts/poll-scores.js). teamIdForAb
@@ -1728,7 +1777,7 @@ async function loadPool(){
         pool.push({ id:"e"+a.id, espnId:a.id, name:a.displayName, pos, teamAb:ab, teamId:id,
           headshot:(a.headshot&&a.headshot.href)||"", jersey:a.jersey, num:a.jersey||0, age:a.age,
           exp:(a.experience&&a.experience.years), college:(a.college&&a.college.name)||"",
-          injury:(a.injuries&&a.injuries[0]&&a.injuries[0].status)||"", proj:0 });
+          injury:(a.injuries&&a.injuries[0]&&a.injuries[0].status)||(grp.position==="injuredReserveOrOut"?"Injured Reserve":""), rosterStatus:(a.status&&a.status.type)||"", proj:0 });
       }));
     });
     // Reputable ADP (Fantasy Football Calculator), committed in-repo so it loads same-origin
@@ -1765,7 +1814,7 @@ async function openPlayerDetail(p){
   // trade (tradeBuilder state itself survives, but nothing re-renders it).
   const returnTo = app.tradeBuilder ? renderTradeBuilder : null;
   app.pDetail={p, loading:true, returnTo}; app.pDetailTab="season"; app.pSeasonStatTab=null; showDetailModal();
-  let data=null, gl=null, sched=[], bye="";
+  let data=null, gl=null, gl26=null, sched=[], bye="";
   // Roster/lineup views only pass {espnId, teamAb, ...} (no teamId) — fall
   // back to the pool-derived ab->id map so the schedule fetch below doesn't
   // silently hit /teams/undefined/schedule.
@@ -1774,6 +1823,7 @@ async function openPlayerDetail(p){
     const base="https://site.web.api.espn.com/apis/common/v3/sports/football/nfl/athletes/"+p.espnId;
     try{ data=await (await fetch(base+"/overview")).json(); }catch(e){}
     try{ gl=await (await fetch(base+"/gamelog?season="+(SEASON_YEAR-1))).json(); }catch(e){}
+    try{ gl26=await (await fetch(base+"/gamelog?season="+SEASON_YEAR)).json(); }catch(e){}
   }
   let schedOk=false;
   try{ // seasontype=2 forces the full regular-season slate — without it ESPN's
@@ -1784,14 +1834,58 @@ async function openPlayerDetail(p){
     (sd.events||[]).forEach(e=>{ const w=e.week&&e.week.number; if(w)weeks.add(w);
       const c=(e.competitions&&e.competitions[0])||{}; const comps=c.competitors||[];
       const opp=comps.find(x=>String((x.team||{}).id)!==String(teamId));
-      sched.push({ wk:w, opp:((opp&&opp.team&&opp.team.abbreviation))||"", done:!!(c.status&&c.status.type&&c.status.type.completed) });
+      sched.push({ wk:w, id:e.id, opp:((opp&&opp.team&&opp.team.abbreviation))||"", done:!!(c.status&&c.status.type&&c.status.type.completed) });
     });
     for(let w=1;w<=18;w++){ if(!weeks.has(w)){ bye=w; break; } }
     schedOk=true;
   }catch(e){}
   const ok = isDef ? schedOk : !!data;
-  app.pDetail = ok ? {p, data, gl, sched, bye, loading:false, isDef, returnTo} : {p, error:true, loading:false, returnTo};
+  app.pDetail = ok ? {p, data, gl, gl26, sched, bye, loading:false, isDef, returnTo} : {p, error:true, loading:false, returnTo};
   showDetailModal();
+  // A defense has no athlete game log — build its week-by-week from the games themselves.
+  if(ok && isDef && teamId!=null){
+    const cur=app.pDetail;
+    fetchDefWeeksFromEspn(teamId, sched).then(w=>{ if(app.pDetail===cur){ cur.defWeeks=w; showDetailModal(); } }).catch(()=>{});
+  }
+}
+// Map one ESPN game-log row onto OUR stat keys, so the This Season table shows week-by-week
+// stats for ANY player — including free agents nobody in the league has ever rostered
+// (the table used to read only our own tracked rows, so those showed all dashes).
+function espnRowToStats(names, stats){
+  const gi=(n)=>{ const i=names.indexOf(n); return i>=0?(parseFloat(String(stats[i]).replace(/,/g,""))||0):0; };
+  const ratio=(n)=>{ const i=names.indexOf(n); if(i<0) return {m:0,a:0}; const mt=/^(\d+)\/(\d+)$/.exec(String(stats[i]||"")); return mt?{m:+mt[1],a:+mt[2]}:{m:0,a:0}; };
+  const fg=ratio("fieldGoalsMade-fieldGoalAttempts"), xp=ratio("extraPointsMade-extraPointAttempts");
+  const b=(n)=>ratio(n).m;
+  const fg039=b("fieldGoalsMade1_19-fieldGoalAttempts1_19")+b("fieldGoalsMade20_29-fieldGoalAttempts20_29")+b("fieldGoalsMade30_39-fieldGoalAttempts30_39");
+  return { passYds:gi("passingYards"), passTD:gi("passingTouchdowns"), passInt:gi("interceptions"), rushYds:gi("rushingYards"), rushTD:gi("rushingTouchdowns"),
+    rec:gi("receptions"), recYds:gi("receivingYards"), recTD:gi("receivingTouchdowns"), fumLost:gi("fumblesLost"),
+    fgMade0_39:fg039, fgMade40_49:b("fieldGoalsMade40_49-fieldGoalAttempts40_49"), fgMade50p:b("fieldGoalsMade50-fieldGoalAttempts50"), fgMissed:fg.a-fg.m, xpMade:xp.m, xpMissed:xp.a-xp.m };
+}
+// Season weeks from ESPN for a player: { [wk]: {stats, fp} } (our scoring settings applied).
+function espnSeasonWeeks(pos, gl){
+  const out={}; if(!gl) return out;
+  const wk=gamelogWeekly(gl); if(!wk) return out;
+  wk.rows.forEach(r=>{ if(!r.wk) return; const stats=espnRowToStats(wk.names, r.stats||[]);
+    out[r.wk]={ stats, fp: quarterFpFromStats(pos, stats) }; });
+  return out;
+}
+// Defense week-by-week: run the same play-by-play parser the live scorer uses over each
+// completed game, plus points allowed from the final score.
+async function fetchDefWeeksFromEspn(teamId, sched){
+  const out={}; app._summaryCache=app._summaryCache||{};
+  await Promise.all((sched||[]).filter(g=>g.done && g.id).map(async g=>{
+    try{
+      let d=app._summaryCache[g.id]; if(!d){ d=await (await fetch(ESPN+"/summary?event="+g.id)).json(); app._summaryCache[g.id]=d; }
+      const comp=(d.header&&d.header.competitions&&d.header.competitions[0])||{};
+      const tids=((d.boxscore&&d.boxscore.players)||[]).map(t=>String(t.team.id)); if(tids.length<2) return;
+      const abt={}; tids.forEach(t=>abt[t]=[]);
+      const {def}=kickDefFromDrives(d.drives, abt, tids); const mine=def[String(teamId)]; if(!mine) return;
+      const stats={}; for(let q=1;q<=4;q++) Object.keys(mine.quarters[q].stats).forEach(k=>{ stats[k]=(stats[k]||0)+mine.quarters[q].stats[k]; });
+      let allowed=null; (comp.competitors||[]).forEach(c=>{ if(String(c.team.id)!==String(teamId)) allowed=Number(c.score)||0; });
+      out[g.wk]={ stats, allowed, fp: Math.round((quarterFpFromStats("DEF",stats)+(allowed!=null?defBracket(allowed):0))*10)/10 };
+    }catch(e){}
+  }));
+  return out;
 }
 // Matchup/spectate rows only carry {id, name, pos, teamAb, headshot} — no
 // espnId — so rebuild it the same way the roster-action modals already do
@@ -1844,7 +1938,7 @@ function showDetailModal(){
     : (p.logo?`<img src="${p.logo}" style="width:48px;height:48px;object-fit:contain">`:avatarHTML(p));
   const rk = p.rank?` · <span style="color:var(--gold)">ESPN #${p.rank}</span>`:"";
   const head=`<div style="display:flex;align-items:center;gap:12px">${pic}
-    <div><div style="font-weight:800;font-size:18px">${p.name}</div>
+    <div><div style="font-weight:800;font-size:18px">${p.name}${injBadge(p.id||(p.espnId?"e"+p.espnId:""))}</div>
       <div class="muted" style="font-size:12px">${p.pos} · ${p.teamAb||""}${p.jersey?" · #"+p.jersey:""}${rk}</div></div></div>`;
   const sec=(t)=>`<div style="font-size:12px;font-weight:700;color:var(--gold);margin:12px 0 4px">${t}</div>`;
   let body="";
@@ -1895,12 +1989,18 @@ function showDetailModal(){
       seasonTabsHtml=`<div class="chips" id="pSeasonStatTabs">${tabs.map(t=>`<div class="chip${t[0]===active?' on':''}" data-t="${t[0]}">${t[1]}</div>`).join("")}</div>`;
     }
     const seasonColspan=2+seasonCols.length+(p.pos==="DEF"?1:0);
+    // ESPN's own week-by-week for this player (offense/K from the game log, D/ST from the
+    // games) — used for any week our league tracking has no row for.
+    const espnW = D.isDef ? (D.defWeeks||{}) : espnSeasonWeeks(p.pos, D.gl26);
     const seasonRows=[]; for(let w=1;w<=18;w++){
       if(w===D.bye){ seasonRows.push(`<tr><td>${w}</td><td class="muted" colspan="${seasonColspan}">BYE</td></tr>`); continue; }
       const g=byWk[w]; const oppTxt=g&&g.opp?("vs "+g.opp):"—";
       let scoreTxt='<span class="muted">—</span>';
-      const raw = (app.realLeague && p.id) ? realWeekRawStats(p.id,w) : null;
+      let raw = (app.realLeague && p.id) ? realWeekRawStats(p.id,w) : null;
+      let usedEspn=false;
       if(app.realLeague && p.id){ const sc=playerWeekScore(p.id,w); if(sc!=null) scoreTxt=`<b class="pdWkPt" data-wk="${w}" style="color:var(--gold);cursor:pointer;text-decoration:underline dotted">${sc.toFixed(1)}</b>`; }
+      if(!raw && espnW[w]){ raw={stats:espnW[w].stats, allowed:espnW[w].allowed!=null?espnW[w].allowed:null}; usedEspn=true;
+        scoreTxt=`<span style="color:var(--gold)" title="from ESPN game data">${espnW[w].fp.toFixed(1)}</span>`; }
       const statCells=seasonCols.map(([key])=>{
         // No row at all for this week yet = not played/not polled = blank.
         // A row that DOES exist but never accrued this specific stat
@@ -1913,7 +2013,7 @@ function showDetailModal(){
       seasonRows.push(`<tr><td>${w}</td><td>${oppTxt}</td><td>${scoreTxt}</td>${statCells}${paCell}</tr>`);
     }
     const paHeader = p.pos==="DEF" ? "<th>PA</th>" : "";
-    const seasonHtml=`${seasonTabsHtml}<div style="overflow-x:auto;max-height:44vh;overflow-y:auto"><table class="std"><tr><th>Wk</th><th>Opp</th><th>FP</th>${seasonCols.map(([,lbl])=>`<th>${lbl}</th>`).join("")}${paHeader}</tr>${seasonRows.join("")}</table></div>`;
+    const seasonHtml=`${seasonTabsHtml}${D.isDef && !D.defWeeks ? '<div class="muted" style="font-size:11px;margin-bottom:4px">Loading game-by-game stats…</div>':''}<div style="overflow-x:auto;max-height:44vh;overflow-y:auto"><table class="std"><tr><th>Wk</th><th>Opp</th><th>FP</th>${seasonCols.map(([,lbl])=>`<th>${lbl}</th>`).join("")}${paHeader}</tr>${seasonRows.join("")}</table></div>`;
     const dTab=app.pDetailTab==="last" ? "last" : "season";
     const detailTabs=`<div class="chips" id="pDetailTabs">
       <div class="chip${dTab==="season"?' on':''}" data-t="season">This Season</div>
@@ -2022,7 +2122,7 @@ function faRow(p, btnLabel, btnCls, onClick, showBye, scoreMode){
     else { const proj=playerProjEstimate(p.id); if(proj!=null) scoreHtml=`<div style="text-align:right;color:var(--muted);font-size:11px">Est. ${proj.toFixed(1)}</div>`; }
   }
   row.innerHTML=`${avatarHTML(p)}<div class="pos">${p.pos}</div>
-    <div><div class="nm">${rk}${inj}${p.name}</div><div class="meta2">${meta}</div></div><div>${scoreHtml}</div>`;
+    <div><div class="nm">${rk}${p.name}${injBadge(p.id||p.player_id)}</div><div class="meta2">${meta}</div></div><div>${scoreHtml}</div>`;
   row.lastElementChild.style.cssText="display:flex;flex-direction:column;align-items:flex-end;gap:4px";
   row.onclick=()=>openPlayerDetail(p);
   const b=el("button","btn sm"+(btnCls||"")); b.textContent=btnLabel; b.style.marginLeft="auto";
@@ -2113,7 +2213,7 @@ function renderPlayersList(){
     const mine=draftPicks.filter(p=>p.user_id===(app.user&&app.user.id)).filter(posFilterOK);
     if(!mine.length) rc.appendChild(el("div","muted","<div style='font-size:13px'>No players yet — draft your team in the 🐍 Draft tab.</div>"));
     mine.forEach(p=>{ const row=el("div","plr"); row.style.gridTemplateColumns="34px 26px 1fr auto";
-      row.innerHTML=`${avatarHTML({pos:p.pos,name:p.player_name,headshot:p.headshot})}<div class="pos">${p.pos}</div><div><div class="nm">${p.player_name}</div><div class="meta2">${p.team||""}</div></div><div></div>`;
+      row.innerHTML=`${avatarHTML({pos:p.pos,name:p.player_name,headshot:p.headshot})}<div class="pos">${p.pos}</div><div><div class="nm">${p.player_name}${injBadge(p.player_id)}</div><div class="meta2">${p.team||""}</div></div><div></div>`;
       row.onclick=()=>playerActionModal(p); rc.appendChild(row); });
   } else {
     [...myStarters,...myBench].filter(posFilterOK).forEach(p=> rc.appendChild(faRow(p,"Drop"," sec",()=>dropPlayer(p))));
@@ -2140,9 +2240,19 @@ function openRealAddModal(p){
   const cap=app.settings.league.rosterSize||16;
   const mine=myDraftPicks();
   const needsDrop=mine.length>=cap;
-  const dropOptions=mine.map((pk,i)=>`<button class="btn sec radOpt" data-i="${i}" style="width:100%;text-align:left;margin-top:6px">${pk.pos} · ${pk.player_name}</button>`).join("");
+  const dropOptions=mine.map((pk,i)=>{ const st=!onWaivers && lockState({team:pk.team, player_name:pk.player_name})!=="open";
+    return `<button class="btn sec radOpt${st?" disabled":""}" ${st?"disabled":""} data-i="${i}" style="width:100%;text-align:left;margin-top:6px">${pk.pos} · ${pk.player_name}${injBadge(pk.player_id)}${st?' <span class="muted" style="font-size:11px">· 🔒 game started</span>':""}</button>`; }).join("");
   const doIt=async(dropPk)=>{
-    const btn=ov.querySelector("#radGo"); if(btn){ btn.disabled=true; btn.textContent="…"; }
+    const btn=ov.querySelector("#radGo");
+    // A player whose game has started this week can't be picked up, and a rostered
+    // player whose game has started can't be dropped, via an immediate add. (A waiver
+    // CLAIM only resolves at the next waiver run, after the week is over, so it's allowed.)
+    if(!onWaivers){
+      const addSt=lockStateForTeam(p.teamAb);
+      if(addSt!=="open"){ toast(addSt==="unknown"?"Loading "+p.name+"'s game time — try again in a moment":"🔒 "+p.name+"'s game already started this week — can't be added"); return; }
+      if(dropPk){ const dSt=lockState({team:dropPk.team, player_name:dropPk.player_name}); if(dSt!=="open"){ toast(dSt==="unknown"?"Loading "+dropPk.player_name+"'s game time — try again in a moment":"🔒 "+dropPk.player_name+"'s game already started this week — can't be dropped"); return; } }
+    }
+    if(btn){ btn.disabled=true; btn.textContent="…"; }
     try{
       if(onWaivers){
         const {error}=await sb.rpc("submit_waiver_claim",{lid:app.sbLeagueId, add_pid:p.id, add_pname:p.name, add_ppos:p.pos, add_pteam:p.teamAb||"", add_phead:p.headshot||p.logo||"",
@@ -2327,6 +2437,7 @@ function playerActionModal(pick){
   ov.querySelector("#paInfo").onclick=()=> openPlayerDetail({id:pick.player_id,espnId:(pick.player_id||"").replace(/^e/,""),name:pick.player_name,pos:pick.pos,teamAb:pick.team,headshot:pick.headshot});
   ov.querySelector("#paTrade").onclick=()=> openTradeBuilder(pick);
   ov.querySelector("#paDrop").onclick=async ()=>{
+    { const st=lockState(pick); if(st!=="open"){ toast(st==="unknown"?"Loading "+pick.player_name+"'s game time — try again in a moment":"🔒 "+pick.player_name+"'s game already started this week — can't be dropped"); return; } }
     if(!confirm("Drop "+pick.player_name+"? They become a free agent.")) return;
     try{ const {error}=await sb.rpc("drop_player",{lid:app.sbLeagueId, pid:pick.player_id}); if(error) throw error;
       if(Array.isArray(app.lineup)){ const j=app.lineup.indexOf(pick.player_id); if(j>=0){ app.lineup[j]=null; saveLineup(); } }
@@ -2431,7 +2542,7 @@ function openTradeBuilderForTarget(pick){
 function tbRow(p, selected, onToggle){
   const row=el("div","plr"); row.style.gridTemplateColumns="30px 26px 1fr auto"; row.style.cursor="pointer";
   if(selected) row.style.borderColor="var(--gold)";
-  row.innerHTML=`<div style="text-align:center;font-weight:800;color:${selected?'var(--gold)':'var(--muted)'}">${selected?'✓':'○'}</div><div class="pos">${p.pos}</div><div><div class="nm">${p.player_name}</div><div class="meta2">${p.team||""}</div></div><div></div>`;
+  row.innerHTML=`<div style="text-align:center;font-weight:800;color:${selected?'var(--gold)':'var(--muted)'}">${selected?'✓':'○'}</div><div class="pos">${p.pos}</div><div><div class="nm">${p.player_name}${injBadge(p.player_id)}</div><div class="meta2">${p.team||""}</div></div><div></div>`;
   row.onclick=onToggle;
   const info=el("button","btn sm sec"); info.textContent="ⓘ"; info.style.marginLeft="auto";
   info.onclick=(e)=>{ e.stopPropagation(); openPlayerDetail({id:p.player_id,espnId:(p.player_id||"").replace(/^e/,""),name:p.player_name,pos:p.pos,teamAb:p.team,headshot:p.headshot}); };
@@ -2663,15 +2774,16 @@ function renderTrades(s){
 // time yet (treated as not editable, with a retry hint, rather than as open —
 // the old code returned false here, which is how a player whose game was over
 // could still be benched). "open" = safe to move. Bye week = open.
-function lockState(pick){
-  if(!app.realLeague || !pick || !pick.team) return "open";
-  const tid=teamIdForAb(pick.team); if(tid==null) return "unknown";
+function lockStateForTeam(teamAb){
+  if(!app.realLeague || !teamAb) return "open";
+  const tid=teamIdForAb(teamAb); if(tid==null) return "unknown";
   const wk=app.currentWeek||1;
   const gi=app._teamGameInfo && app._teamGameInfo[tid+"_"+wk];
-  if(gi===undefined){ ensureCurrentWeekInfo(); return "unknown"; }
+  if(gi===undefined){ ensureCurrentWeekInfo(); fetchTeamsWeekInfo([teamAb], wk).then(ch=>{ if(ch && app.tab==="team") renderTeam(); }); return "unknown"; }
   if(!gi || !gi.date) return "open"; // bye week / no game scheduled
   return new Date(gi.date).getTime() <= Date.now() ? "locked" : "open";
 }
+function lockState(pick){ return (!pick || !pick.team) ? "open" : lockStateForTeam(pick.team); }
 function isPlayerLocked(pick){ return lockState(pick)!=="open"; }
 function lockToast(pick){
   toast(lockState(pick)==="unknown" ? "Loading "+pick.player_name+"'s game time — try again in a moment" : "🔒 "+pick.player_name+"'s game already started — locked for the week");
@@ -2696,7 +2808,7 @@ function openLineupChooser(i){
   const ov=$("overlay");
   const items=eligible.map(p=>{ const here=app.lineup[i]===p.player_id; const elsewhere=app.lineup.includes(p.player_id)&&!here;
     const locked=!here && isPlayerLocked(p);
-    return `<button class="btn sec${locked?" disabled":" lc"}" ${locked?"disabled":`data-id="${p.player_id}"`} style="width:100%;text-align:left;margin-top:6px${here?';border-color:var(--gold)':''}">${p.pos} · ${p.player_name} <span class="muted" style="font-size:11px">${p.team||""}${here?" · here":locked?" · 🔒 game started":elsewhere?" · starting elsewhere":""}</span></button>`; }).join("");
+    return `<button class="btn sec${locked?" disabled":" lc"}" ${locked?"disabled":`data-id="${p.player_id}"`} style="width:100%;text-align:left;margin-top:6px${here?';border-color:var(--gold)':''}">${p.pos} · ${p.player_name}${injBadge(p.player_id)} <span class="muted" style="font-size:11px">${p.team||""}${here?" · here":locked?" · 🔒 game started":elsewhere?" · starting elsewhere":""}</span></button>`; }).join("");
   ov.innerHTML=`<div class="modal"><div class="box" style="max-width:360px;text-align:left">
     <div style="font-weight:800">Set ${slot.lbl}</div>
     <div class="muted" style="font-size:12px;margin:4px 0 8px">Choose a ${slot.pos.join("/")}:</div>
@@ -2882,9 +2994,9 @@ function boxAthleteFP(groupName, labels, stats){
     if(car>0){ fp+=yds/(sc.rushYdsPerPt||10); fp+=td*(sc.rushTD||6); qtd+=td;
       raw.rushYds=yds; raw.rushTD=td; } }
   else if(groupName==="receiving"){ const rec=gi("REC"),yds=gi("YDS"),td=gi("TD");
-    // Same defensive gate, mirrored: a receiving line with 0 catches but
-    // nonzero yards/TD would be the reverse of the bug above.
-    if(rec>0){ fp+=rec*(sc.ppr||0); fp+=yds/(sc.recYdsPerPt||10); fp+=td*(sc.recTD||6); qtd+=td;
+    // 0 catches with nonzero yards/TD is a LATERAL recipient (ESPN credits the yards
+    // and the TD but no reception — Deebo Samuel's 80-yd lateral TD, wk 3).
+    if(rec>0 || yds!==0 || td>0){ fp+=rec*(sc.ppr||0); fp+=yds/(sc.recYdsPerPt||10); fp+=td*(sc.recTD||6); qtd+=td;
       raw.rec=rec; raw.recYds=yds; raw.recTD=td; } }
   else if(groupName==="fumbles"){ const lost=gi("LOST"); fp+=lost*(sc.fumLost||-2); raw.fumLost=lost; }
   return {fp,qtd,raw};
@@ -2924,14 +3036,22 @@ async function findGameId(teamId, wk){
   app._teamGameInfo = app._teamGameInfo || {};
   const ck=teamId+"_"+wk+"_"+stype; if(app._gameIdCache[ck]!==undefined) return app._gameIdCache[ck];
   try{
-    const sd=await (await fetch(ESPN+"/teams/"+teamId+"/schedule")).json();
+    const sd=await (await fetch(ESPN+"/teams/"+teamId+"/schedule?seasontype="+stype)).json();
     const ev=(sd.events||[]).find(e=>e.week && e.week.number===wk && e.seasonType && e.seasonType.type===stype);
     app._gameIdCache[ck]=ev?ev.id:null;
-    if(ev && ev.shortName){
-      const parts=ev.shortName.split(" @ "); const myAb=(sd.team&&sd.team.abbreviation)||"";
-      if(parts.length===2 && myAb){ const home=parts[1]===myAb; app._teamGameInfo[teamId+"_"+wk]={opp:home?parts[0]:parts[1], home, date:ev.date||null}; }
+    const infoKey=teamId+"_"+wk;
+    if(!ev){ app._teamGameInfo[infoKey]=null; } // bye week: a KNOWN "no game" (lockState treats null as open, undefined as not-loaded-yet)
+    else {
+      // Opponent / home-away from the game's own competitors, NOT by splitting the short
+      // name on " @ ": neutral-site games read "IND VS WSH" (the London game), which made
+      // the old parse record nothing — so those teams' kickoff time was never known.
+      const c=(ev.competitions&&ev.competitions[0])||{}; const comps=c.competitors||[];
+      const me=comps.find(x=>String((x.team||{}).id)===String(teamId)), opp=comps.find(x=>String((x.team||{}).id)!==String(teamId));
+      let oppAb=opp&&opp.team&&opp.team.abbreviation, home=!!(me&&me.homeAway==="home");
+      if(!oppAb && ev.shortName){ const parts=ev.shortName.split(/\s+(?:@|VS|vs\.?)\s+/); const myAb=(sd.team&&sd.team.abbreviation)||""; if(parts.length===2 && myAb){ home=parts[1]===myAb; oppAb=home?parts[0]:parts[1]; } }
+      app._teamGameInfo[infoKey]={opp:oppAb||"", home: home && !c.neutralSite, date:ev.date||null, neutral:!!c.neutralSite};
     }
-  }catch(e){ app._gameIdCache[ck]=null; }
+  }catch(e){ delete app._gameIdCache[ck]; return null; } // transient failure: don't cache it — retry on the next call
   return app._gameIdCache[ck];
 }
 function weekGameInfo(p, wk){
@@ -3236,6 +3356,12 @@ function yardsFromText(t) {
   return null;
 }
 const NULLIFIED = /\bNo Play\b|NULLIFIED/i;
+// The text of the play that actually STANDS: after a replay "REVERSED." only what
+// follows counts. "No Play" in it = the flag was accepted and the play erased.
+// "TOUCHDOWN NULLIFIED by Penalty" WITHOUT "No Play" is a foul at the spot: the
+// carry/catch still counts up to the spot of the foul (see spotFoulCredit), only
+// the touchdown is wiped. (Week 3-4: Tuten, Perine, Purdy, Ty Johnson.)
+function standingText(full) { const i = full.lastIndexOf("REVERSED."); return i >= 0 ? full.slice(i + 9) : full; }
 
 // Spot foul on the offense DURING a run / catch-and-run ("PENALTY on CAR-R.Hunt,
 // Offensive Holding, 10 yards, enforced at CAR 36."): the play is not nullified,
@@ -3292,6 +3418,49 @@ function spotFoulCredit(M, full, play, yards) {
   return yards;
 }
 
+// Who fumbled and who recovered first, by roster side (M = the play's offense,
+// Md = its defense). A fumble is LOST when the first recovery is by the other
+// side than the fumbler's. Play TYPE is unreliable for this ("Fumble Recovery
+// (Own)" was used for a sack-strip the defense recovered; punt-return fumbles
+// are typed as plain fumble recoveries). lost === null → couldn't tell.
+function fumbleSides(M, Md, text, carrier, carrierIdx) {
+  const fIdx = text.search(/\bFUMBLES\b/); if (fIdx < 0) return null;
+  // Strict (exact "F.Last" / full name) match on BOTH rosters first; the fuzzy surname-only
+  // fallback only if neither matched strictly — otherwise "W.Johnson" (an ARI defender) gets
+  // fuzzily matched to some LAC Johnson on the offense and the fumble flips sides.
+  const strictAt = (MM, t, pos) => { const s = t.slice(pos); for (const m of MM.abbrev) { const r = m.re.exec(s); if (r) return { a: m.a, len: r[0].length }; } for (const m of MM.full) { const r = m.re.exec(s); if (r) return { a: m.a, len: r[0].length }; } return null; };
+  const hitAt = (pos, t) => {
+    const tx = t == null ? text : t;
+    const a = M && strictAt(M, tx, pos), b = Md && strictAt(Md, tx, pos);
+    if (a && !b) return { a: a.a, side: "off" }; if (b && !a) return { a: b.a, side: "def" }; if (a && b) return { a: a.a, side: "off" };
+    const fa = M && matchAt(M, tx, pos), fb = Md && matchAt(Md, tx, pos);
+    if (fa && !fb) return { a: fa.a, side: "off" }; if (fb && !fa) return { a: fb.a, side: "def" }; return null;
+  };
+  let fumbler = null;
+  if (carrier && carrierIdx >= 0 && carrierIdx < fIdx) fumbler = { a: carrier.a, side: "off" };
+  else {
+    const starts = [0]; const re = /\.\s+(?=[A-Z(])/g; let m2;
+    while ((m2 = re.exec(text))) starts.push(m2.index + m2[0].length);
+    const before = starts.filter((i) => i <= fIdx);
+    for (let i = before.length - 1; i >= 0 && !fumbler && i >= before.length - 2; i--) {
+      const cc = coreClause(text.slice(before[i])); const at = text.indexOf(cc, before[i]);
+      fumbler = hitAt(at >= 0 ? at : before[i]);
+    }
+  }
+  const tail = text.slice(fIdx);
+  const mRec = /(?:RECOVERED|recovered) by ([A-Z]{2,3})-(\S+) at\b/.exec(tail);
+  const mSelf = /\b(?:and )?recovers at\b/i.exec(tail);
+  const mOob = /ball out of bounds/i.exec(tail);
+  const first = [mRec, mSelf, mOob].filter(Boolean).sort((a, b) => a.index - b.index)[0];
+  let lost = null, recSide = null;
+  if (first === mSelf || first === mOob) { lost = false; recSide = fumbler && fumbler.side; }
+  else if (first === mRec && fumbler) {
+    const rh = hitAt(0, mRec[2]);
+    recSide = rh ? rh.side : null;
+    if (recSide) lost = recSide !== fumbler.side;
+  }
+  return { fumbler, lost, recSide };
+}
 // Fumble plays. ESPN's box score does NOT simply use the "for N yards" of the
 // first sentence. Convention observed across every week 1–2 fumble (25+ plays):
 //   fumbleSpot = the "touched at X" spot when present, else the recovery spot
@@ -3310,7 +3479,13 @@ function fumbleSpotYards(M, text, play, carrier, textYards, clauseIdx) {
   if (clauseIdx != null && clauseIdx > fm.index) return null;
   const tail = text.slice(fm.index);
   const rm = /(?:recovered by [A-Z]{2,3}-\S+ at|(and )?recovers at) (?:([A-Z]{2,3}) )?(\d+)/i.exec(tail);
-  if (!rm) return null;
+  if (!rm) {
+    // "FUMBLES, touched at TEN 14, ball out of bounds at TEN 14" — credited only to where it went out.
+    const om = /ball out of bounds at (?:([A-Z]{2,3}) )?(\d+)/.exec(tail);
+    if (!om) return null;
+    const os = spotYards(ctx, om[1], +om[2]); if (os == null) return null;
+    return textYards == null ? os - ctx.los : Math.min(textYards, os - ctx.los);
+  }
   const selfRecovery = /recovers at/i.test(rm[0]);
   const tm = /\btouched at (?:([A-Z]{2,3}) )?(\d+)/.exec(tail.slice(0, rm.index));
   let spot = spotYards(ctx, rm[2], +rm[3]); if (spot == null) return null;
@@ -3333,7 +3508,7 @@ function statsFromDrives(drives, athletesByTeam) {
   const Mby = {}; Object.keys(athletesByTeam).forEach((t) => { Mby[t] = buildMatchers(athletesByTeam[t]); });
   const out = {}; const unmatched = [];
   const ensure = (id) => { if (!out[id]) out[id] = { quarters: { 1: { stats: {} }, 2: { stats: {} }, 3: { stats: {} }, 4: { stats: {} } }, qtdEvents: [] }; return out[id]; };
-  const bump = (id, q, key, amt) => { const b = ensure(id).quarters[q]; b.stats[key] = (b.stats[key] || 0) + amt; };
+  const bump = (id, q, key, amt) => { const o = ensure(id); const b = o.quarters[q]; b.stats[key] = (b.stats[key] || 0) + amt; (o.last = o.last || {})[key] = q; };
   const markTd = (id, q, wc) => { ensure(id).qtdEvents.push({ period: q, wallclock: wc }); };
 
   const list = [...((drives && drives.previous) || []), ...(drives && drives.current ? [drives.current] : [])];
@@ -3349,15 +3524,19 @@ function statsFromDrives(drives, athletesByTeam) {
     const teamId = off ? String(off.id) : (d.team && String(d.team.id)) || null;
     const M = teamId && Mby[teamId]; if (!M) return;
     const full = String(play.text || "");
-    if (type === "Penalty" || NULLIFIED.test(full)) return; // play didn't count
+    const standing = standingText(full);
+    if (/\bNo Play\b/.test(standing)) return; // flag accepted — play erased
+    const tdNullified = /NULLIFIED by Penalty|TOUCHDOWN NULLIFIED/i.test(standing);
 
     // The 2-pt conversion text is appended after the TD sentence; split it off.
     const [mainText, twoPtText] = full.split(/TWO-POINT CONVERSION ATTEMPT\./);
     const text = coreClause(mainText);
-    const isRushType = type === "Rush" || type === "Rushing Touchdown";
-    const isPassType = type === "Pass Reception" || type === "Passing Touchdown";
+    // A "Penalty"-typed play whose flag did NOT erase it (e.g. replay reversed to a
+    // declined/after-the-fact penalty) is still a normal run or catch.
+    const isRushType = type === "Rush" || type === "Rushing Touchdown" || type === "Penalty";
+    const isPassType = type === "Pass Reception" || type === "Passing Touchdown" || type === "Penalty";
     const isFumbleType = /^Fumble Recovery|^Muffed Punt|^Sack Opp Fumble/.test(type);
-    const isTd = /Touchdown$/.test(type) || /\bTOUCHDOWN\b/.test(text);
+    const isTd = !tdNullified && (/Touchdown$/.test(type) || /\bTOUCHDOWN\b/.test(text));
 
     // ---- completion: "{Passer} pass … to {Receiver} … for N yards" (anywhere in clause on fumble plays) ----
     let handled = false;
@@ -3373,7 +3552,7 @@ function statsFromDrives(drives, athletesByTeam) {
           const receiver = matchAt(M, text, recvIdx);
           const rawYds = yardsFromText(text.slice(afterPass)) ?? ((isPassType && play.statYardage != null) ? play.statYardage : 0);
           let yds = spotFoulCredit(M, full, play, rawYds);
-          if (isFumbleType && receiver) { const fy = fumbleSpotYards(M, text, play, receiver, rawYds, pm.index); if (fy != null) yds = fy; }
+          if ((isFumbleType || /\bFUMBLES\b/.test(text)) && receiver) { const fy = fumbleSpotYards(M, text, play, receiver, rawYds, pm.index); if (fy != null) yds = fy; }
           // Lateral after the catch: "... to K.Coleman to HST 33 for 1 yard.
           // Lateral to K.Shakir pushed ob at HST 23 for 10 yards" — lateral yards
           // are receiving yards for the lateral recipient (no catch) and passing
@@ -3394,8 +3573,10 @@ function statsFromDrives(drives, athletesByTeam) {
         let am = /^(.+?) (\d+) Yd pass from (.+?)(?: \(|$)/.exec(text);
         if (am) {
           const recv = matchAt(M, am[1], 0), pass = matchAt(M, am[3], 0), yds = +am[2];
-          if (pass) { bump(pass.a.id, q, "passYds", yds); if (isTd) bump(pass.a.id, q, "passTD", 1); }
-          if (recv) { bump(recv.a.id, q, "rec", 1); bump(recv.a.id, q, "recYds", yds); if (isTd) { bump(recv.a.id, q, "recTD", 1); markTd(recv.a.id, q, wc); } }
+          // "R 13 Yd pass from P (K Kick)" only appears in scoring-play text: always a TD,
+          // whatever the play's type says (Darnold→Saubert was typed "Fumble Recovery (Own)").
+          if (pass) { bump(pass.a.id, q, "passYds", yds); bump(pass.a.id, q, "passTD", 1); }
+          if (recv) { bump(recv.a.id, q, "rec", 1); bump(recv.a.id, q, "recYds", yds); bump(recv.a.id, q, "recTD", 1); markTd(recv.a.id, q, wc); }
           handled = !!(pass || recv); if (recv) { carrier = recv; carrierIdx = 0; }
         }
         am = /^(.+?) Pass Complete for (-?\d+) Yds to (.+?)(?:\s\1|\s[A-Z][a-z]+ [A-Z][a-z]+ Fumble|$)/.exec(text);
@@ -3414,12 +3595,17 @@ function statsFromDrives(drives, athletesByTeam) {
     // official rush from the line of scrimmage — statYardage carries that. A
     // plain recovery with no advance is not a rush.
     if (!handled && isFumbleType && /FUMBLES \(Aborted\)/.test(text)) {
-      const am = /(?:recovers|RECOVERED by [A-Z]{2,3}-)[^.]*\.\s+(?=[A-Z])/.exec(text);
+      const am = /(?:and recovers at|recovered by [A-Z]{2,3}-\S+ at) (?:[A-Z]{2,3} )?-?\d+\.\s+(?=[A-Z])/i.exec(text);
       if (am) {
         const adv = matchAt(M, text, am.index + am[0].length);
         const rest = adv ? text.slice(am.index + am[0].length + adv.len) : "";
         if (adv && /^\s+(?:to|pushed ob|ran ob)\b.*\bfor (-?\d+) yards?/.test(rest) && play.statYardage != null) {
-          bump(adv.a.id, q, "rushYds", play.statYardage); if (isTd) { bump(adv.a.id, q, "rushTD", 1); markTd(adv.a.id, q, wc); }
+          // QB recovers his own aborted snap and runs → an official rush from the line of
+          // scrimmage (play yardage). A DIFFERENT player picking it up is NOT credited a
+          // rush by ESPN in 4 of 5 week 1-3 cases (Williams, Kraft, Etienne, Croskey-Merritt
+          // all 0); the one exception (J.Taylor) is corrected by the final-game box check.
+          const qb = matchAt(M, text, 0);
+          if (qb && qb.a.id === adv.a.id) { bump(adv.a.id, q, "rushYds", play.statYardage); if (isTd) { bump(adv.a.id, q, "rushTD", 1); markTd(adv.a.id, q, wc); } }
           handled = true;
         }
       }
@@ -3429,65 +3615,31 @@ function statsFromDrives(drives, athletesByTeam) {
       if (rusher && new RegExp("^\\s*" + RUSH_VERB).test(text.slice(rusher.len))) {
         const rawYds = yardsFromText(text) ?? ((isRushType && play.statYardage != null) ? play.statYardage : 0);
         let yds = spotFoulCredit(M, full, play, rawYds);
-        if (isFumbleType) { const fy = fumbleSpotYards(M, text, play, rusher, rawYds, 0); if (fy != null) yds = fy; }
+        if (isFumbleType || /\bFUMBLES\b/.test(text)) { const fy = fumbleSpotYards(M, text, play, rusher, rawYds, 0); if (fy != null) yds = fy; }
         bump(rusher.a.id, q, "rushYds", yds); if (isTd) { bump(rusher.a.id, q, "rushTD", 1); markTd(rusher.a.id, q, wc); }
         carrier = rusher; carrierIdx = 0;
         handled = true;
       } else if (!handled) {
         const am = /^(.+?) (\d+) Yd (?:Rush|Run)\b/.exec(text); // alternate format
-        if (am) { const r = matchAt(M, am[1], 0); if (r) { bump(r.a.id, q, "rushYds", +am[2]); if (isTd) { bump(r.a.id, q, "rushTD", 1); markTd(r.a.id, q, wc); } carrier = r; carrierIdx = 0; handled = true; } }
+        if (am) { const r = matchAt(M, am[1], 0); if (r) { bump(r.a.id, q, "rushYds", +am[2]); bump(r.a.id, q, "rushTD", 1); markTd(r.a.id, q, wc); carrier = r; carrierIdx = 0; handled = true; } }
         if (!handled && isRushType) unmatched.push({ why: "rusher", type, text: full });
       }
     }
     // ---- interception thrown (incl. pick-six) ----
-    if (type === "Pass Interception Return" || type === "Interception Return Touchdown") {
+    if (type === "Pass Interception Return" || type === "Interception Return Touchdown" || /\bINTERCEPTED by\b/.test(text)) {
       const pm = /(^|\.\s+)((?:[A-Z][A-Za-z'-]*\.)?[A-Z][A-Za-z.' -]*?) pass /.exec(text);
       const passer = pm && matchAt(M, text, pm.index + pm[1].length);
       if (passer) bump(passer.a.id, q, "passInt", 1); else unmatched.push({ why: "int-passer", type, text: full });
     }
-    // ---- fumble lost (recovered by the other team) ----
-    const fIdx = text.search(/\bFUMBLES\b/);
-    if (fIdx >= 0) {
-      const lostTypes = /\(Opponent\)|^Sack Opp Fumble Recovery$/.test(type);
-      if (lostTypes) {
-        let fumbler = null;
-        if (carrier && carrierIdx >= 0 && carrierIdx < fIdx) fumbler = carrier;
-        else {
-          // start of the sentence containing FUMBLES, then the one before it
-          const starts = [0]; const re = /\.\s+(?=[A-Z(])/g; let m2;
-          while ((m2 = re.exec(text))) starts.push(m2.index + m2[0].length);
-          const before = starts.filter((i) => i <= fIdx);
-          for (let i = before.length - 1; i >= 0 && !fumbler && i >= before.length - 2; i--) {
-            const cc = coreClause(text.slice(before[i]));
-            const at = text.indexOf(cc, before[i]);
-            fumbler = matchAt(M, text, at >= 0 ? at : before[i]);
-          }
-        }
-        if (fumbler) bump(fumbler.a.id, q, "fumLost", 1); else unmatched.push({ why: "fumbler", type, text: full });
-      }
+    // ---- fumble lost: decided by which side recovered it first (see fumbleSides) ----
+    const Md = (() => { const id2 = Object.keys(athletesByTeam).find((t) => t !== teamId); return id2 && Mby[id2]; })();
+    const fe = fumbleSides(M, Md, text, carrier, carrierIdx);
+    if (fe) {
+      const lost = fe.lost != null ? fe.lost : /\(Opponent\)|^Sack Opp Fumble Recovery$/.test(type);
+      if (lost) { if (fe.fumbler) bump(fe.fumbler.a.id, q, "fumLost", 1); else unmatched.push({ why: "fumbler", type, text: full }); }
     }
     // Alternate-format text has "Fumble" (no FUMBLES): the parsed carrier lost it.
-    if (fIdx < 0 && /\(Opponent\)/.test(type) && /\bFumble\b/.test(text) && carrier) bump(carrier.a.id, q, "fumLost", 1);
-    // Kickoff / punt return fumble recovered by the kicking team (the play's "offense"):
-    // the returner is on the defense side of the play.
-    if (fIdx >= 0 && (type === "Kickoff" || type === "Punt")) {
-      const rm = /RECOVERED by [A-Z]{2,3}-(\S+) at\b/.exec(text.slice(fIdx)); // greedy: the name itself contains a dot
-      // ESPN's "offense" on a kick play isn't reliably the kicking team, so find
-      // which side the recoverer is on; the returner is on the other side.
-      const dfnId0 = Object.keys(athletesByTeam).find((t) => t !== teamId);
-      let recoverer = rm ? matchAt(M, rm[1], 0) : null, MM = dfnId0 && Mby[dfnId0];
-      if (!recoverer && rm && MM) { const r2 = matchAt(MM, rm[1], 0); if (r2) { recoverer = r2; MM = M; } }
-      if (recoverer) {
-        let returner = null;
-        if (MM) {
-          const starts = [0]; const re = /\.\s+(?=[A-Z(])/g; let m2;
-          while ((m2 = re.exec(text))) starts.push(m2.index + m2[0].length);
-          const before = starts.filter((i) => i <= fIdx);
-          for (let i = before.length - 1; i >= 0 && !returner && i >= before.length - 2; i--) returner = matchAt(MM, text, before[i]);
-        }
-        if (returner) bump(returner.a.id, q, "fumLost", 1); else unmatched.push({ why: "returner", type, text: full });
-      }
-    }
+    if (!fe && /\(Opponent\)/.test(type) && /\bFumble\b/.test(text) && carrier) bump(carrier.a.id, q, "fumLost", 1);
     // Muffed punt / kickoff: the returner (on the play's DEFENSE side) loses it when the kicking team recovers.
     if (/\bMUFFS\b/.test(text) && /\(Opponent\)/.test(type)) {
       const mIdx = text.search(/\s+MUFFS\b/);
@@ -3539,9 +3691,12 @@ function kickDefFromDrives(drives, athletesByTeam, teamIds) {
     const dfn = teamIds.find((t) => t !== off) || null;
     if (!off || !dfn) return;
     const M = Mby[off];
-    if (type === "Penalty" || NULLIFIED.test(full)) return;
+    const standing = standingText(full);
+    if (/\bNo Play\b/.test(standing)) return;
+    const tdNullified = /NULLIFIED by Penalty|TOUCHDOWN NULLIFIED/i.test(standing);
     const text = coreClause(full.split(/TWO-POINT CONVERSION ATTEMPT\./)[0]);
-    const isTd = /\bTOUCHDOWN\b/.test(text);
+    const isTd = !tdNullified && /\bTOUCHDOWN\b/.test(text);
+    const Md = Mby[dfn];
 
     // ---------------- kicker ----------------
     if (type === "Field Goal Good" || type === "Field Goal Missed" || type === "Blocked Field Goal") {
@@ -3587,10 +3742,12 @@ function kickDefFromDrives(drives, athletesByTeam, teamIds) {
     // are real sacks too — the per-player box score omits them (the app's old
     // box-score path under-counted DEF sacks for exactly that reason).
     if (/\bsacked\b/.test(text)) bumpD(dfn, q, "sacks");
-    if (type === "Pass Interception Return" || type === "Interception Return Touchdown") bumpD(dfn, q, "ints");
-    if (type === "Fumble Recovery (Opponent)" || type === "Sack Opp Fumble Recovery") bumpD(dfn, q, "fumRec");
+    if (type === "Pass Interception Return" || type === "Interception Return Touchdown" || /\bINTERCEPTED by\b/.test(text)) bumpD(dfn, q, "ints");
+    { const fe = fumbleSides(M, Md, text, null, -1);
+      if (fe && fe.lost != null) { if (fe.lost) bumpD(fe.recSide === "def" ? dfn : off, q, "fumRec"); }
+      else if (type === "Fumble Recovery (Opponent)" || type === "Sack Opp Fumble Recovery") bumpD(dfn, q, "fumRec"); }
     if (type === "Blocked Punt") bumpD(dfn, q, "blockedKick");
-    if (/\bSAFETY\b/.test(text) && !/NULLIFIED/.test(full)) bumpD(dfn, q, "defSafety");
+    if (/\bSAFETY\b/.test(text) && !/NULLIFIED/.test(standing)) bumpD(dfn, q, "defSafety");
     // Defensive TD: a touchdown on a turnover / blocked-kick play belongs to the defense.
     if (isTd && (type === "Interception Return Touchdown" || type === "Fumble Recovery (Opponent)" || type === "Sack Opp Fumble Recovery" || type === "Blocked Punt" || type === "Blocked Field Goal")) {
       bumpD(dfn, q, "defTD"); ensureD(dfn).tdEvents.push({ period: q, wallclock: play.wallclock || null });
@@ -3600,6 +3757,30 @@ function kickDefFromDrives(drives, athletesByTeam, teamIds) {
     else if (type === "Muffed Punt Recovery (Opponent)") bumpD(off, q, "fumRec");
   }));
   return { k, def, unmatched };
+}
+// Final-game safety net. Once a game is OVER, ESPN's own box score is the official
+// stat line. If play-text parsing is off by a few yards for a player (a spot-of-foul
+// or fumble-spot convention we haven't seen yet), pull the player's yardage totals
+// to the box score, putting the difference in the quarter of his last play for that
+// stat. Yards only, small deltas only — TDs/INTs/fumbles/receptions are never
+// patched silently, they're returned as "skipped" for logging so a new play-text
+// pattern gets noticed and fixed properly. Live games are never touched (the box
+// can lag the play list by a poll).
+function reconcileYardsToBox(out, byAthlete, maxDelta) {
+  const lim = maxDelta == null ? 12 : maxDelta, fixes = [];
+  Object.keys(byAthlete || {}).forEach((id) => {
+    const raw = (byAthlete[id] && byAthlete[id].raw) || {};
+    ["passYds", "rushYds", "recYds"].forEach((k) => {
+      if (raw[k] == null) return;
+      const rec = out[id]; let sum = 0; if (rec) for (let q = 1; q <= 4; q++) sum += rec.quarters[q].stats[k] || 0;
+      const delta = raw[k] - sum; if (!delta) return;
+      if (Math.abs(delta) > lim) { fixes.push({ id, k, delta, skipped: true }); return; }
+      const o = rec || (out[id] = { quarters: { 1: { stats: {} }, 2: { stats: {} }, 3: { stats: {} }, 4: { stats: {} } }, qtdEvents: [] });
+      const q = (o.last && o.last[k]) || 4;
+      o.quarters[q].stats[k] = (o.quarters[q].stats[k] || 0) + delta; fixes.push({ id, k, delta, q });
+    });
+  });
+  return fixes;
 }
 // ============================== END SHARED PARSER ==============================
 
@@ -3687,6 +3868,8 @@ async function pollRealStats(){
     // play list every poll: offense (incl. fumbles lost + 2-pt), kickers (FG bands,
     // XP), and DEF (sacks/INT/def TD/fumble rec/safety/blocked kick, per quarter).
     const offense=statsFromDrives(box.drives, athletesByTeam).out;
+    // Final games only: pull yardage totals to ESPN's official box score (see reconcileYardsToBox).
+    if(box.final){ try{ reconcileYardsToBox(offense, box.byAthlete).forEach(f=>console.warn("[box reconcile]", teamId, f)); }catch(e){} }
     const kdef=kickDefFromDrives(box.drives, athletesByTeam, box.teamIds);
     for(const p of byTeam[teamId]){
       const empty={quarters:{1:{stats:{}},2:{stats:{}},3:{stats:{}},4:{stats:{}}}, qtdEvents:[]};
@@ -3791,7 +3974,6 @@ async function loadAllRealScoringData(){
 // when the persisted data (the actual source of truth) didn't match.
 async function persistPowerup(key,pid,pname,q,targetId){
   if(!app.realLeague) return true;
-  if(playerAssigned(pid) || (targetId && playerAssigned(targetId))){ toast((playerAssigned(pid)?pname:"That player")+" already has a power-up this week"); return false; }
   try{ const {error}=await sb.rpc("log_powerup",{lid:app.sbLeagueId, wk:app.currentWeek, pid, pname, key, q, target:targetId||null});
     if(error) throw error;
     await loadAllRealScoringData(); refreshRealInv(); return true; }
@@ -3832,10 +4014,17 @@ function realQuarterly(pid, wk){
     // off. A row with no quarter stats and 0 allowed while ESPN still says
     // pregame is a leftover from before kickoff, not a shutout in progress.
     if(row.q_pts.pa){
-      const tid=String(pid).startsWith("def_")?String(pid).slice(4):null;
-      const gs=tid && app.playerGameState && app.playerGameState[tid];
-      const anyStats=[1,2,3,4].some(i=>{ const v=row.q_pts[i]||row.q_pts[String(i)]; return v&&v.stats&&Object.keys(v.stats).length; });
-      const pregame = (gs ? !(gs.period>0) : false) || (!gs && !anyStats && !(row.q_pts.pa.allowed>0) && !defGameStarted(tid));
+      // ONLY the current week can be "pregame". The guard used to look at the live game
+      // state (which is always the CURRENT week's game) even when scoring a past week,
+      // so a finished week 1-3 DEF lost its points-allowed score whenever that team's
+      // week-4 game hadn't kicked off yet — silently dropping up to 10 pts from standings.
+      let pregame=false;
+      if(wk===(app.currentWeek||1)){
+        const tid=String(pid).startsWith("def_")?String(pid).slice(4):null;
+        const gs=tid && app.playerGameState && app.playerGameState[tid];
+        const anyStats=[1,2,3,4].some(i=>{ const v=row.q_pts[i]||row.q_pts[String(i)]; return v&&v.stats&&Object.keys(v.stats).length; });
+        pregame = (gs ? !(gs.period>0) : false) || (!gs && !anyStats && !(row.q_pts.pa.allowed>0) && !defGameStarted(tid));
+      }
       if(!pregame) pa={allowed:row.q_pts.pa.allowed||0, fp:defBracket(row.q_pts.pa.allowed||0)};
     }
   }
@@ -3873,6 +4062,28 @@ function slotPlayerIds(uid, wk){
 // opponent's points prevented (credited to the freezer, not the frozen
 // team); Emergency Sub = sub-in minus sub-out from the swap quarter on (can
 // be negative); Hot Start = the bonus when it hits.
+// Hot Start is for rush/receiving TDs by skill players — a defensive TD (stored in the same
+// "qtd" counter) and kickers must never count as the lineup's "first TD".
+function hotStartEligible(pid){ return !!pid && !String(pid).startsWith("def_") && posOfId(pid)!=="K"; }
+function posOfId(pid){ const pk=(app.draft&&app.draft.picks||[]).find(x=>x.player_id===pid); if(pk) return pk.pos; const pi=poolInfo(pid); return pi?pi.pos:null; }
+// Who won this manager's Hot Start race for the week (null if no TD qualified), and the bonus.
+function hotStartResult(uid, wk){
+  const picksWk=app.powerupPicks.filter(p=>p.week===wk);
+  const hot=picksWk.find(p=>p.powerup_key==="hotstart" && p.user_id===uid); if(!hot) return null;
+  const subOut={}; picksWk.filter(p=>p.powerup_key==="sub" && p.target_player_id).forEach(p=>{ subOut[p.target_player_id]={inId:p.player_id, q:p.quarter}; });
+  let best=null;
+  slotPlayerIds(uid, wk).filter(Boolean).forEach(pid=>{
+    const swap=subOut[pid];
+    for(let q=1;q<=4;q++){ const c=(swap && q>=swap.q)?swap.inId:pid; const rq=realQuarterly(c, wk);
+      if(rq.qtd[q]>0 && hotStartEligible(c)){ const key=rq.firstQtdAt!=null?rq.firstQtdAt:(1e15+q); if(!best||key<best.key) best={key,pid:c}; } }
+  });
+  const hit=!!(best && best.pid===hot.player_id);
+  return { pid:hot.player_id, winner:best?best.pid:null, hit, bonus: hit ? 2*(app.settings.scoring.rushTD||6) : 0 };
+}
+function hotStartBonusFor(pid, wk){
+  const pk=app.powerupPicks.find(p=>p.week===wk && p.powerup_key==="hotstart" && p.player_id===pid); if(!pk) return 0;
+  const r=hotStartResult(pk.user_id, wk); return r?r.bonus:0;
+}
 function computeRealTeamScore(uid, wk, swing){
   const credit=(who,pts)=>{ if(swing && who) swing[who]=(swing[who]||0)+pts; };
   const picksWk=app.powerupPicks.filter(p=>p.week===wk);
@@ -3888,8 +4099,10 @@ function computeRealTeamScore(uid, wk, swing){
       const rq=realQuarterly(contributor, wk);
       let fp=rq.q[q];
       if(swap && q>=swap.q) credit(swap.uid, fp-realQuarterly(pid, wk).q[q]);
-      const pu=byPlayerPU[contributor];
-      if(pu && Number(pu.quarter)===q){
+      // Every power-up targeting this player+quarter applies (a quarter holds at most one,
+      // so this is just "the one for quarter q" — but the player can carry several in a week).
+      const pu=picksWk.find(x=>x.player_id===contributor && x.powerup_key!=="hotstart" && Number(x.quarter)===q);
+      if(pu){
         if(pu.powerup_key==="double"){ credit(pu.user_id, fp); fp*=2; }
         else if(pu.powerup_key==="freeze"){ credit(pu.user_id, fp); fp=0; }
       }
@@ -3901,7 +4114,7 @@ function computeRealTeamScore(uid, wk, swing){
       // moment we detected it live) when available; a missing timestamp
       // (older data from before this was tracked) falls back to quarter
       // number and always loses to anything with a real timestamp.
-      if(rq.qtd[q]>0){
+      if(rq.qtd[q]>0 && hotStartEligible(contributor)){
         const key = rq.firstQtdAt!=null ? rq.firstQtdAt : (1e15+q);
         if(!bestTD || key<bestTD.key) bestTD={key,pid:contributor};
       }
@@ -3918,7 +4131,10 @@ function realPlayerAdjustedTotal(pid, wk){
   const pu=app.powerupPicks.find(p=>p.week===wk && p.player_id===pid);
   const rq=realQuarterly(pid, wk);
   let total=rq.pa?rq.pa.fp:0;
-  for(let q=1;q<=4;q++){ let fp=rq.q[q]; if(pu && Number(pu.quarter)===q){ if(pu.powerup_key==="double") fp*=2; else if(pu.powerup_key==="freeze") fp=0; } total+=fp; }
+  // Stacked power-ups: apply EACH one that targets the quarter being summed.
+  const pus=app.powerupPicks.filter(p=>p.week===wk && p.player_id===pid && p.powerup_key!=="hotstart");
+  for(let q=1;q<=4;q++){ let fp=rq.q[q]; pus.filter(x=>Number(x.quarter)===q).forEach(x=>{ if(x.powerup_key==="double") fp*=2; else if(x.powerup_key==="freeze") fp=0; }); total+=fp; }
+  total+=hotStartBonusFor(pid, wk); // the 3x TD bonus shows on the player who earned it
   return Math.round(total*10)/10;
 }
 function syncRealPointsToPlayers(){
@@ -4138,14 +4354,14 @@ function renderDraft(){
     const c=el("div","card"); c.appendChild(el("h2","title","Your Roster So Far"));
     filled.forEach(f=>{
       const row=el("div","plr"); row.style.gridTemplateColumns="46px 1fr auto";
-      if(f.p) row.innerHTML=`<div class="pos">${f.lbl}</div><div><div class="nm">${f.p.player_name}</div><div class="meta2">${f.p.pos} · ${f.p.team||""}${byeTag(f.p.team)}</div></div><div></div>`;
+      if(f.p) row.innerHTML=`<div class="pos">${f.lbl}</div><div><div class="nm">${f.p.player_name}${injBadge(f.p.player_id)}</div><div class="meta2">${f.p.pos} · ${f.p.team||""}${byeTag(f.p.team)}</div></div><div></div>`;
       else { row.style.opacity=".55"; row.innerHTML=`<div class="pos">${f.lbl}</div><div><div class="nm">— empty</div><div class="meta2">need a ${f.pos.join("/")}</div></div><div></div>`; }
       c.appendChild(row);
     });
     s.appendChild(c);
     { const bc=el("div","card"); bc.appendChild(el("h2","title","Bench ("+bench.length+")"));
       if(!bench.length) bc.appendChild(el("div","muted","<div style='font-size:12px'>Nobody on the bench yet — a pick lands here once every slot he fits is already filled.</div>"));
-      bench.forEach(pk=>{ const row=el("div","plr"); row.style.gridTemplateColumns="46px 1fr auto"; row.innerHTML=`<div class="pos">BN</div><div><div class="nm">${pk.player_name}</div><div class="meta2">${pk.pos} · ${pk.team||""}${byeTag(pk.team)}</div></div><div></div>`; bc.appendChild(row); });
+      bench.forEach(pk=>{ const row=el("div","plr"); row.style.gridTemplateColumns="46px 1fr auto"; row.innerHTML=`<div class="pos">BN</div><div><div class="nm">${pk.player_name}${injBadge(pk.player_id)}</div><div class="meta2">${pk.pos} · ${pk.team||""}${byeTag(pk.team)}</div></div><div></div>`; bc.appendChild(row); });
       s.appendChild(bc); }
     return;
   }
@@ -4174,7 +4390,7 @@ function renderDraft(){
       const now = !done && pnum===pno;
       const cell=el("div","dcell"+(pk?"":" empty")+(now?" now":""));
       if(pk){ cell.style.borderLeft="3px solid "+posHue(pk.pos);
-        cell.innerHTML=`<div class="pk">${pnum} · ${pk.pos} ${pk.team||""}</div><div class="pn">${pk.player_name}</div>`; }
+        cell.innerHTML=`<div class="pk">${pnum} · ${pk.pos} ${pk.team||""}</div><div class="pn">${pk.player_name}${injBadge(pk.player_id)}</div>`; }
       else cell.innerHTML=`<div class="pk">${pnum}</div>${now?'<div class="pn" style="color:var(--gold)">on clock</div>':''}`;
       grid.appendChild(cell);
     }
@@ -4707,7 +4923,7 @@ function detailCell(p,leftSide,live,wk){
   const tags = app.realLeague ? powerupTagsFor(p.id, wk||app.currentWeek||1) : "";
   const sub = live ? [tags, statLine(p)].filter(Boolean).join(" · ") : ("proj "+(p.proj||0));
   const av=avatarHTML(p);
-  const body=`<div class="mc-body"><div class="mc-nm">${p.name}</div><div class="mc-stat">${sub}</div><div class="mc-pt">${val}</div></div>`;
+  const body=`<div class="mc-body"><div class="mc-nm">${p.name}${injBadge(p.id)}</div><div class="mc-stat">${sub}</div><div class="mc-pt">${val}</div></div>`;
   cell.innerHTML= leftSide ? body+av : av+body;
   if(app.realLeague){ cell.style.cursor="pointer"; cell.onclick=()=>openPlayerCardFor(p); }
   return cell;
@@ -4717,7 +4933,7 @@ function detailCell(p,leftSide,live,wk){
 function renderStore(){
   const s=$("screen"); if(!s) return; s.innerHTML="";
   s.appendChild(el("div","card",`<h2 class="title">Your Power-Ups · Week ${app.realLeague?(app.currentWeek||1):11}</h2>
-    <div class="muted" style="font-size:13px">Everyone gets <b style="color:var(--gold)">one of each</b> power-up every week. Each player can only be assigned <b style="color:var(--txt)">one power-up per week</b> — so if you Double a guy, you can't also Hot Start him.</div>`));
+    <div class="muted" style="font-size:13px">Everyone gets <b style="color:var(--gold)">one of each</b> power-up every week. Power-ups can <b style="color:var(--txt)">stack on the same player</b> in a week (your Double in Q2 + their Freeze in Q4) — just never in the <b style="color:var(--txt)">same quarter</b>.</div>`));
 
   const inv=el("div","card"); inv.appendChild(el("h2","title","This Week's Power-Ups"));
   Object.entries(POWERUPS).forEach(([k,cfg])=>{

@@ -82,7 +82,8 @@ function boxAthleteRaw(groupName, labels, stats) {
   // boxAthleteFP, found live on Germie Bernard's box score). A genuine
   // zero-attempt line is 0 everything anyway, so this never drops real stats.
   if (groupName === "rushing") { const car = gi("CAR"); return car > 0 ? { rushYds: gi("YDS"), rushTD: gi("TD") } : {}; }
-  if (groupName === "receiving") { const rec = gi("REC"); return rec > 0 ? { rec, recYds: gi("YDS"), recTD: gi("TD") } : {}; }
+  // REC=0 with nonzero yards/TD = a lateral recipient (ESPN credits yards + TD, no catch).
+  if (groupName === "receiving") { const rec = gi("REC"), y = gi("YDS"), t = gi("TD"); return (rec > 0 || y !== 0 || t > 0) ? { rec, recYds: y, recTD: t } : {}; }
   if (groupName === "fumbles") return { fumLost: gi("LOST") };
   return {};
 }
@@ -294,6 +295,12 @@ function yardsFromText(t) {
   return null;
 }
 const NULLIFIED = /\bNo Play\b|NULLIFIED/i;
+// The text of the play that actually STANDS: after a replay "REVERSED." only what
+// follows counts. "No Play" in it = the flag was accepted and the play erased.
+// "TOUCHDOWN NULLIFIED by Penalty" WITHOUT "No Play" is a foul at the spot: the
+// carry/catch still counts up to the spot of the foul (see spotFoulCredit), only
+// the touchdown is wiped. (Week 3-4: Tuten, Perine, Purdy, Ty Johnson.)
+function standingText(full) { const i = full.lastIndexOf("REVERSED."); return i >= 0 ? full.slice(i + 9) : full; }
 
 // Spot foul on the offense DURING a run / catch-and-run ("PENALTY on CAR-R.Hunt,
 // Offensive Holding, 10 yards, enforced at CAR 36."): the play is not nullified,
@@ -350,6 +357,49 @@ function spotFoulCredit(M, full, play, yards) {
   return yards;
 }
 
+// Who fumbled and who recovered first, by roster side (M = the play's offense,
+// Md = its defense). A fumble is LOST when the first recovery is by the other
+// side than the fumbler's. Play TYPE is unreliable for this ("Fumble Recovery
+// (Own)" was used for a sack-strip the defense recovered; punt-return fumbles
+// are typed as plain fumble recoveries). lost === null → couldn't tell.
+function fumbleSides(M, Md, text, carrier, carrierIdx) {
+  const fIdx = text.search(/\bFUMBLES\b/); if (fIdx < 0) return null;
+  // Strict (exact "F.Last" / full name) match on BOTH rosters first; the fuzzy surname-only
+  // fallback only if neither matched strictly — otherwise "W.Johnson" (an ARI defender) gets
+  // fuzzily matched to some LAC Johnson on the offense and the fumble flips sides.
+  const strictAt = (MM, t, pos) => { const s = t.slice(pos); for (const m of MM.abbrev) { const r = m.re.exec(s); if (r) return { a: m.a, len: r[0].length }; } for (const m of MM.full) { const r = m.re.exec(s); if (r) return { a: m.a, len: r[0].length }; } return null; };
+  const hitAt = (pos, t) => {
+    const tx = t == null ? text : t;
+    const a = M && strictAt(M, tx, pos), b = Md && strictAt(Md, tx, pos);
+    if (a && !b) return { a: a.a, side: "off" }; if (b && !a) return { a: b.a, side: "def" }; if (a && b) return { a: a.a, side: "off" };
+    const fa = M && matchAt(M, tx, pos), fb = Md && matchAt(Md, tx, pos);
+    if (fa && !fb) return { a: fa.a, side: "off" }; if (fb && !fa) return { a: fb.a, side: "def" }; return null;
+  };
+  let fumbler = null;
+  if (carrier && carrierIdx >= 0 && carrierIdx < fIdx) fumbler = { a: carrier.a, side: "off" };
+  else {
+    const starts = [0]; const re = /\.\s+(?=[A-Z(])/g; let m2;
+    while ((m2 = re.exec(text))) starts.push(m2.index + m2[0].length);
+    const before = starts.filter((i) => i <= fIdx);
+    for (let i = before.length - 1; i >= 0 && !fumbler && i >= before.length - 2; i--) {
+      const cc = coreClause(text.slice(before[i])); const at = text.indexOf(cc, before[i]);
+      fumbler = hitAt(at >= 0 ? at : before[i]);
+    }
+  }
+  const tail = text.slice(fIdx);
+  const mRec = /(?:RECOVERED|recovered) by ([A-Z]{2,3})-(\S+) at\b/.exec(tail);
+  const mSelf = /\b(?:and )?recovers at\b/i.exec(tail);
+  const mOob = /ball out of bounds/i.exec(tail);
+  const first = [mRec, mSelf, mOob].filter(Boolean).sort((a, b) => a.index - b.index)[0];
+  let lost = null, recSide = null;
+  if (first === mSelf || first === mOob) { lost = false; recSide = fumbler && fumbler.side; }
+  else if (first === mRec && fumbler) {
+    const rh = hitAt(0, mRec[2]);
+    recSide = rh ? rh.side : null;
+    if (recSide) lost = recSide !== fumbler.side;
+  }
+  return { fumbler, lost, recSide };
+}
 // Fumble plays. ESPN's box score does NOT simply use the "for N yards" of the
 // first sentence. Convention observed across every week 1–2 fumble (25+ plays):
 //   fumbleSpot = the "touched at X" spot when present, else the recovery spot
@@ -368,7 +418,13 @@ function fumbleSpotYards(M, text, play, carrier, textYards, clauseIdx) {
   if (clauseIdx != null && clauseIdx > fm.index) return null;
   const tail = text.slice(fm.index);
   const rm = /(?:recovered by [A-Z]{2,3}-\S+ at|(and )?recovers at) (?:([A-Z]{2,3}) )?(\d+)/i.exec(tail);
-  if (!rm) return null;
+  if (!rm) {
+    // "FUMBLES, touched at TEN 14, ball out of bounds at TEN 14" — credited only to where it went out.
+    const om = /ball out of bounds at (?:([A-Z]{2,3}) )?(\d+)/.exec(tail);
+    if (!om) return null;
+    const os = spotYards(ctx, om[1], +om[2]); if (os == null) return null;
+    return textYards == null ? os - ctx.los : Math.min(textYards, os - ctx.los);
+  }
   const selfRecovery = /recovers at/i.test(rm[0]);
   const tm = /\btouched at (?:([A-Z]{2,3}) )?(\d+)/.exec(tail.slice(0, rm.index));
   let spot = spotYards(ctx, rm[2], +rm[3]); if (spot == null) return null;
@@ -391,7 +447,7 @@ function statsFromDrives(drives, athletesByTeam) {
   const Mby = {}; Object.keys(athletesByTeam).forEach((t) => { Mby[t] = buildMatchers(athletesByTeam[t]); });
   const out = {}; const unmatched = [];
   const ensure = (id) => { if (!out[id]) out[id] = { quarters: { 1: { stats: {} }, 2: { stats: {} }, 3: { stats: {} }, 4: { stats: {} } }, qtdEvents: [] }; return out[id]; };
-  const bump = (id, q, key, amt) => { const b = ensure(id).quarters[q]; b.stats[key] = (b.stats[key] || 0) + amt; };
+  const bump = (id, q, key, amt) => { const o = ensure(id); const b = o.quarters[q]; b.stats[key] = (b.stats[key] || 0) + amt; (o.last = o.last || {})[key] = q; };
   const markTd = (id, q, wc) => { ensure(id).qtdEvents.push({ period: q, wallclock: wc }); };
 
   const list = [...((drives && drives.previous) || []), ...(drives && drives.current ? [drives.current] : [])];
@@ -407,15 +463,19 @@ function statsFromDrives(drives, athletesByTeam) {
     const teamId = off ? String(off.id) : (d.team && String(d.team.id)) || null;
     const M = teamId && Mby[teamId]; if (!M) return;
     const full = String(play.text || "");
-    if (type === "Penalty" || NULLIFIED.test(full)) return; // play didn't count
+    const standing = standingText(full);
+    if (/\bNo Play\b/.test(standing)) return; // flag accepted — play erased
+    const tdNullified = /NULLIFIED by Penalty|TOUCHDOWN NULLIFIED/i.test(standing);
 
     // The 2-pt conversion text is appended after the TD sentence; split it off.
     const [mainText, twoPtText] = full.split(/TWO-POINT CONVERSION ATTEMPT\./);
     const text = coreClause(mainText);
-    const isRushType = type === "Rush" || type === "Rushing Touchdown";
-    const isPassType = type === "Pass Reception" || type === "Passing Touchdown";
+    // A "Penalty"-typed play whose flag did NOT erase it (e.g. replay reversed to a
+    // declined/after-the-fact penalty) is still a normal run or catch.
+    const isRushType = type === "Rush" || type === "Rushing Touchdown" || type === "Penalty";
+    const isPassType = type === "Pass Reception" || type === "Passing Touchdown" || type === "Penalty";
     const isFumbleType = /^Fumble Recovery|^Muffed Punt|^Sack Opp Fumble/.test(type);
-    const isTd = /Touchdown$/.test(type) || /\bTOUCHDOWN\b/.test(text);
+    const isTd = !tdNullified && (/Touchdown$/.test(type) || /\bTOUCHDOWN\b/.test(text));
 
     // ---- completion: "{Passer} pass … to {Receiver} … for N yards" (anywhere in clause on fumble plays) ----
     let handled = false;
@@ -431,7 +491,7 @@ function statsFromDrives(drives, athletesByTeam) {
           const receiver = matchAt(M, text, recvIdx);
           const rawYds = yardsFromText(text.slice(afterPass)) ?? ((isPassType && play.statYardage != null) ? play.statYardage : 0);
           let yds = spotFoulCredit(M, full, play, rawYds);
-          if (isFumbleType && receiver) { const fy = fumbleSpotYards(M, text, play, receiver, rawYds, pm.index); if (fy != null) yds = fy; }
+          if ((isFumbleType || /\bFUMBLES\b/.test(text)) && receiver) { const fy = fumbleSpotYards(M, text, play, receiver, rawYds, pm.index); if (fy != null) yds = fy; }
           // Lateral after the catch: "... to K.Coleman to HST 33 for 1 yard.
           // Lateral to K.Shakir pushed ob at HST 23 for 10 yards" — lateral yards
           // are receiving yards for the lateral recipient (no catch) and passing
@@ -452,8 +512,10 @@ function statsFromDrives(drives, athletesByTeam) {
         let am = /^(.+?) (\d+) Yd pass from (.+?)(?: \(|$)/.exec(text);
         if (am) {
           const recv = matchAt(M, am[1], 0), pass = matchAt(M, am[3], 0), yds = +am[2];
-          if (pass) { bump(pass.a.id, q, "passYds", yds); if (isTd) bump(pass.a.id, q, "passTD", 1); }
-          if (recv) { bump(recv.a.id, q, "rec", 1); bump(recv.a.id, q, "recYds", yds); if (isTd) { bump(recv.a.id, q, "recTD", 1); markTd(recv.a.id, q, wc); } }
+          // "R 13 Yd pass from P (K Kick)" only appears in scoring-play text: always a TD,
+          // whatever the play's type says (Darnold→Saubert was typed "Fumble Recovery (Own)").
+          if (pass) { bump(pass.a.id, q, "passYds", yds); bump(pass.a.id, q, "passTD", 1); }
+          if (recv) { bump(recv.a.id, q, "rec", 1); bump(recv.a.id, q, "recYds", yds); bump(recv.a.id, q, "recTD", 1); markTd(recv.a.id, q, wc); }
           handled = !!(pass || recv); if (recv) { carrier = recv; carrierIdx = 0; }
         }
         am = /^(.+?) Pass Complete for (-?\d+) Yds to (.+?)(?:\s\1|\s[A-Z][a-z]+ [A-Z][a-z]+ Fumble|$)/.exec(text);
@@ -472,12 +534,17 @@ function statsFromDrives(drives, athletesByTeam) {
     // official rush from the line of scrimmage — statYardage carries that. A
     // plain recovery with no advance is not a rush.
     if (!handled && isFumbleType && /FUMBLES \(Aborted\)/.test(text)) {
-      const am = /(?:recovers|RECOVERED by [A-Z]{2,3}-)[^.]*\.\s+(?=[A-Z])/.exec(text);
+      const am = /(?:and recovers at|recovered by [A-Z]{2,3}-\S+ at) (?:[A-Z]{2,3} )?-?\d+\.\s+(?=[A-Z])/i.exec(text);
       if (am) {
         const adv = matchAt(M, text, am.index + am[0].length);
         const rest = adv ? text.slice(am.index + am[0].length + adv.len) : "";
         if (adv && /^\s+(?:to|pushed ob|ran ob)\b.*\bfor (-?\d+) yards?/.test(rest) && play.statYardage != null) {
-          bump(adv.a.id, q, "rushYds", play.statYardage); if (isTd) { bump(adv.a.id, q, "rushTD", 1); markTd(adv.a.id, q, wc); }
+          // QB recovers his own aborted snap and runs → an official rush from the line of
+          // scrimmage (play yardage). A DIFFERENT player picking it up is NOT credited a
+          // rush by ESPN in 4 of 5 week 1-3 cases (Williams, Kraft, Etienne, Croskey-Merritt
+          // all 0); the one exception (J.Taylor) is corrected by the final-game box check.
+          const qb = matchAt(M, text, 0);
+          if (qb && qb.a.id === adv.a.id) { bump(adv.a.id, q, "rushYds", play.statYardage); if (isTd) { bump(adv.a.id, q, "rushTD", 1); markTd(adv.a.id, q, wc); } }
           handled = true;
         }
       }
@@ -487,65 +554,31 @@ function statsFromDrives(drives, athletesByTeam) {
       if (rusher && new RegExp("^\\s*" + RUSH_VERB).test(text.slice(rusher.len))) {
         const rawYds = yardsFromText(text) ?? ((isRushType && play.statYardage != null) ? play.statYardage : 0);
         let yds = spotFoulCredit(M, full, play, rawYds);
-        if (isFumbleType) { const fy = fumbleSpotYards(M, text, play, rusher, rawYds, 0); if (fy != null) yds = fy; }
+        if (isFumbleType || /\bFUMBLES\b/.test(text)) { const fy = fumbleSpotYards(M, text, play, rusher, rawYds, 0); if (fy != null) yds = fy; }
         bump(rusher.a.id, q, "rushYds", yds); if (isTd) { bump(rusher.a.id, q, "rushTD", 1); markTd(rusher.a.id, q, wc); }
         carrier = rusher; carrierIdx = 0;
         handled = true;
       } else if (!handled) {
         const am = /^(.+?) (\d+) Yd (?:Rush|Run)\b/.exec(text); // alternate format
-        if (am) { const r = matchAt(M, am[1], 0); if (r) { bump(r.a.id, q, "rushYds", +am[2]); if (isTd) { bump(r.a.id, q, "rushTD", 1); markTd(r.a.id, q, wc); } carrier = r; carrierIdx = 0; handled = true; } }
+        if (am) { const r = matchAt(M, am[1], 0); if (r) { bump(r.a.id, q, "rushYds", +am[2]); bump(r.a.id, q, "rushTD", 1); markTd(r.a.id, q, wc); carrier = r; carrierIdx = 0; handled = true; } }
         if (!handled && isRushType) unmatched.push({ why: "rusher", type, text: full });
       }
     }
     // ---- interception thrown (incl. pick-six) ----
-    if (type === "Pass Interception Return" || type === "Interception Return Touchdown") {
+    if (type === "Pass Interception Return" || type === "Interception Return Touchdown" || /\bINTERCEPTED by\b/.test(text)) {
       const pm = /(^|\.\s+)((?:[A-Z][A-Za-z'-]*\.)?[A-Z][A-Za-z.' -]*?) pass /.exec(text);
       const passer = pm && matchAt(M, text, pm.index + pm[1].length);
       if (passer) bump(passer.a.id, q, "passInt", 1); else unmatched.push({ why: "int-passer", type, text: full });
     }
-    // ---- fumble lost (recovered by the other team) ----
-    const fIdx = text.search(/\bFUMBLES\b/);
-    if (fIdx >= 0) {
-      const lostTypes = /\(Opponent\)|^Sack Opp Fumble Recovery$/.test(type);
-      if (lostTypes) {
-        let fumbler = null;
-        if (carrier && carrierIdx >= 0 && carrierIdx < fIdx) fumbler = carrier;
-        else {
-          // start of the sentence containing FUMBLES, then the one before it
-          const starts = [0]; const re = /\.\s+(?=[A-Z(])/g; let m2;
-          while ((m2 = re.exec(text))) starts.push(m2.index + m2[0].length);
-          const before = starts.filter((i) => i <= fIdx);
-          for (let i = before.length - 1; i >= 0 && !fumbler && i >= before.length - 2; i--) {
-            const cc = coreClause(text.slice(before[i]));
-            const at = text.indexOf(cc, before[i]);
-            fumbler = matchAt(M, text, at >= 0 ? at : before[i]);
-          }
-        }
-        if (fumbler) bump(fumbler.a.id, q, "fumLost", 1); else unmatched.push({ why: "fumbler", type, text: full });
-      }
+    // ---- fumble lost: decided by which side recovered it first (see fumbleSides) ----
+    const Md = (() => { const id2 = Object.keys(athletesByTeam).find((t) => t !== teamId); return id2 && Mby[id2]; })();
+    const fe = fumbleSides(M, Md, text, carrier, carrierIdx);
+    if (fe) {
+      const lost = fe.lost != null ? fe.lost : /\(Opponent\)|^Sack Opp Fumble Recovery$/.test(type);
+      if (lost) { if (fe.fumbler) bump(fe.fumbler.a.id, q, "fumLost", 1); else unmatched.push({ why: "fumbler", type, text: full }); }
     }
     // Alternate-format text has "Fumble" (no FUMBLES): the parsed carrier lost it.
-    if (fIdx < 0 && /\(Opponent\)/.test(type) && /\bFumble\b/.test(text) && carrier) bump(carrier.a.id, q, "fumLost", 1);
-    // Kickoff / punt return fumble recovered by the kicking team (the play's "offense"):
-    // the returner is on the defense side of the play.
-    if (fIdx >= 0 && (type === "Kickoff" || type === "Punt")) {
-      const rm = /RECOVERED by [A-Z]{2,3}-(\S+) at\b/.exec(text.slice(fIdx)); // greedy: the name itself contains a dot
-      // ESPN's "offense" on a kick play isn't reliably the kicking team, so find
-      // which side the recoverer is on; the returner is on the other side.
-      const dfnId0 = Object.keys(athletesByTeam).find((t) => t !== teamId);
-      let recoverer = rm ? matchAt(M, rm[1], 0) : null, MM = dfnId0 && Mby[dfnId0];
-      if (!recoverer && rm && MM) { const r2 = matchAt(MM, rm[1], 0); if (r2) { recoverer = r2; MM = M; } }
-      if (recoverer) {
-        let returner = null;
-        if (MM) {
-          const starts = [0]; const re = /\.\s+(?=[A-Z(])/g; let m2;
-          while ((m2 = re.exec(text))) starts.push(m2.index + m2[0].length);
-          const before = starts.filter((i) => i <= fIdx);
-          for (let i = before.length - 1; i >= 0 && !returner && i >= before.length - 2; i--) returner = matchAt(MM, text, before[i]);
-        }
-        if (returner) bump(returner.a.id, q, "fumLost", 1); else unmatched.push({ why: "returner", type, text: full });
-      }
-    }
+    if (!fe && /\(Opponent\)/.test(type) && /\bFumble\b/.test(text) && carrier) bump(carrier.a.id, q, "fumLost", 1);
     // Muffed punt / kickoff: the returner (on the play's DEFENSE side) loses it when the kicking team recovers.
     if (/\bMUFFS\b/.test(text) && /\(Opponent\)/.test(type)) {
       const mIdx = text.search(/\s+MUFFS\b/);
@@ -597,9 +630,12 @@ function kickDefFromDrives(drives, athletesByTeam, teamIds) {
     const dfn = teamIds.find((t) => t !== off) || null;
     if (!off || !dfn) return;
     const M = Mby[off];
-    if (type === "Penalty" || NULLIFIED.test(full)) return;
+    const standing = standingText(full);
+    if (/\bNo Play\b/.test(standing)) return;
+    const tdNullified = /NULLIFIED by Penalty|TOUCHDOWN NULLIFIED/i.test(standing);
     const text = coreClause(full.split(/TWO-POINT CONVERSION ATTEMPT\./)[0]);
-    const isTd = /\bTOUCHDOWN\b/.test(text);
+    const isTd = !tdNullified && /\bTOUCHDOWN\b/.test(text);
+    const Md = Mby[dfn];
 
     // ---------------- kicker ----------------
     if (type === "Field Goal Good" || type === "Field Goal Missed" || type === "Blocked Field Goal") {
@@ -645,10 +681,12 @@ function kickDefFromDrives(drives, athletesByTeam, teamIds) {
     // are real sacks too — the per-player box score omits them (the app's old
     // box-score path under-counted DEF sacks for exactly that reason).
     if (/\bsacked\b/.test(text)) bumpD(dfn, q, "sacks");
-    if (type === "Pass Interception Return" || type === "Interception Return Touchdown") bumpD(dfn, q, "ints");
-    if (type === "Fumble Recovery (Opponent)" || type === "Sack Opp Fumble Recovery") bumpD(dfn, q, "fumRec");
+    if (type === "Pass Interception Return" || type === "Interception Return Touchdown" || /\bINTERCEPTED by\b/.test(text)) bumpD(dfn, q, "ints");
+    { const fe = fumbleSides(M, Md, text, null, -1);
+      if (fe && fe.lost != null) { if (fe.lost) bumpD(fe.recSide === "def" ? dfn : off, q, "fumRec"); }
+      else if (type === "Fumble Recovery (Opponent)" || type === "Sack Opp Fumble Recovery") bumpD(dfn, q, "fumRec"); }
     if (type === "Blocked Punt") bumpD(dfn, q, "blockedKick");
-    if (/\bSAFETY\b/.test(text) && !/NULLIFIED/.test(full)) bumpD(dfn, q, "defSafety");
+    if (/\bSAFETY\b/.test(text) && !/NULLIFIED/.test(standing)) bumpD(dfn, q, "defSafety");
     // Defensive TD: a touchdown on a turnover / blocked-kick play belongs to the defense.
     if (isTd && (type === "Interception Return Touchdown" || type === "Fumble Recovery (Opponent)" || type === "Sack Opp Fumble Recovery" || type === "Blocked Punt" || type === "Blocked Field Goal")) {
       bumpD(dfn, q, "defTD"); ensureD(dfn).tdEvents.push({ period: q, wallclock: play.wallclock || null });
@@ -658,6 +696,30 @@ function kickDefFromDrives(drives, athletesByTeam, teamIds) {
     else if (type === "Muffed Punt Recovery (Opponent)") bumpD(off, q, "fumRec");
   }));
   return { k, def, unmatched };
+}
+// Final-game safety net. Once a game is OVER, ESPN's own box score is the official
+// stat line. If play-text parsing is off by a few yards for a player (a spot-of-foul
+// or fumble-spot convention we haven't seen yet), pull the player's yardage totals
+// to the box score, putting the difference in the quarter of his last play for that
+// stat. Yards only, small deltas only — TDs/INTs/fumbles/receptions are never
+// patched silently, they're returned as "skipped" for logging so a new play-text
+// pattern gets noticed and fixed properly. Live games are never touched (the box
+// can lag the play list by a poll).
+function reconcileYardsToBox(out, byAthlete, maxDelta) {
+  const lim = maxDelta == null ? 12 : maxDelta, fixes = [];
+  Object.keys(byAthlete || {}).forEach((id) => {
+    const raw = (byAthlete[id] && byAthlete[id].raw) || {};
+    ["passYds", "rushYds", "recYds"].forEach((k) => {
+      if (raw[k] == null) return;
+      const rec = out[id]; let sum = 0; if (rec) for (let q = 1; q <= 4; q++) sum += rec.quarters[q].stats[k] || 0;
+      const delta = raw[k] - sum; if (!delta) return;
+      if (Math.abs(delta) > lim) { fixes.push({ id, k, delta, skipped: true }); return; }
+      const o = rec || (out[id] = { quarters: { 1: { stats: {} }, 2: { stats: {} }, 3: { stats: {} }, 4: { stats: {} } }, qtdEvents: [] });
+      const q = (o.last && o.last[k]) || 4;
+      o.quarters[q].stats[k] = (o.quarters[q].stats[k] || 0) + delta; fixes.push({ id, k, delta, q });
+    });
+  });
+  return fixes;
 }
 // ============================== END SHARED PARSER ==============================
 
@@ -730,6 +792,8 @@ async function pollLeague(league) {
     // EVERYTHING comes from play-by-play, recomputed fresh from the complete
     // play list every cycle (mirrors index.html's pollRealStats exactly).
     const offense = statsFromDrives(box.drives, athletesByTeam).out;
+    // Final games only: pull yardage totals to ESPN's official box score (see reconcileYardsToBox).
+    if (box.final) { try { reconcileYardsToBox(offense, box.byAthlete).forEach((f) => console.log("[box reconcile] " + ab + " " + JSON.stringify(f))); } catch (e) {} }
     const kdef = kickDefFromDrives(box.drives, athletesByTeam, box.teamIds);
     for (const p of byTeam[ab]) {
       if (p.pos === "DEF") {
