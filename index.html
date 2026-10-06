@@ -240,7 +240,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20261006a";
+const BUILD_ID = "20261006b";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -1530,9 +1530,28 @@ function quarterStatLines(pos, stats){
   }
   return lines;
 }
-function openPlayerBoxScore(p, wk, returnTo){
+// espn (optional): {stats, allowed} from ESPN's own game data for weeks this league never tracked
+// (free agents etc.) — shown as one whole-game breakdown since there are no per-quarter rows.
+function openPlayerBoxScore(p, wk, returnTo, espn){
   wk = wk || app.currentWeek || 1;
   const row=app.playerWeekStats[wk] && app.playerWeekStats[wk][p.id];
+  if(!row && espn){
+    const lines=quarterStatLines(p.pos, espn.stats); let total=0;
+    const lh=lines.length?lines.map(l=>{ total+=l.pts; return `<div>${l.label} <span style="float:right">${l.pts.toFixed(1)}pts</span></div>`; }).join(""):`<span class="muted">—</span>`;
+    let paRow=""; if(p.pos==="DEF" && espn.allowed!=null){ const f=defBracket(espn.allowed); total+=f; paRow=`<tr style="border-top:1px solid var(--line)"><td>—</td><td style="font-size:12px">${espn.allowed} total points allowed (whole game)</td><td style="text-align:right;font-weight:700">${f.toFixed(1)}</td></tr>`; }
+    const gi2=weekGameInfo(p, wk), ov2=$("overlay");
+    const pic2=p.headshot?`<img src="${p.headshot}" style="width:48px;height:48px;border-radius:50%;object-fit:cover;background:#1a2e22">`:avatarHTML(p);
+    ov2.innerHTML=`<div class="modal"><div class="box" style="max-width:440px;text-align:left">
+      <div class="modal-x" id="pbClose">✕</div>
+      <div style="display:flex;align-items:center;gap:10px">${pic2}<div><div style="font-weight:800">${p.name} · Week ${wk}</div><div class="muted" style="font-size:12px">${p.pos} · ${p.teamAb||""}${gi2?(" · "+(gi2.home?"vs ":"@ ")+gi2.opp):""}</div></div></div>
+      <div style="overflow-x:auto;margin-top:12px"><table class="std"><tr><th>Game</th><th>Stats</th><th style="text-align:right">FP</th></tr>
+        <tr><td style="vertical-align:top">Wk ${wk}</td><td style="font-size:12px">${lh}</td><td style="text-align:right;font-weight:700;vertical-align:top">${(total-(paRow?defBracket(espn.allowed):0)).toFixed(1)}</td></tr>${paRow}
+        <tr style="border-top:2px solid var(--line)"><td colspan="2" style="font-weight:800">Total</td><td style="text-align:right;font-weight:800;color:var(--gold)">${total.toFixed(1)}</td></tr></table></div>
+      <div class="muted" style="font-size:11px;margin-top:8px">From ESPN game data (not tracked live in this league) — whole-game totals, no per-quarter split.</div>
+    </div></div>`;
+    ov2.querySelector("#pbClose").onclick=()=>{ if(returnTo) returnTo(); else ov2.innerHTML=""; };
+    return;
+  }
   const pu=app.powerupPicks.find(x=>x.week===wk && x.player_id===p.id);
   const ov=$("overlay");
   const pic=p.headshot?`<img src="${p.headshot}" style="width:48px;height:48px;border-radius:50%;object-fit:cover;background:#1a2e22">`:avatarHTML(p);
@@ -1991,7 +2010,7 @@ function showDetailModal(){
     const seasonColspan=2+seasonCols.length+(p.pos==="DEF"?1:0);
     // ESPN's own week-by-week for this player (offense/K from the game log, D/ST from the
     // games) — used for any week our league tracking has no row for.
-    const espnW = D.isDef ? (D.defWeeks||{}) : espnSeasonWeeks(p.pos, D.gl26);
+    const espnW = D.isDef ? (D.defWeeks||{}) : espnSeasonWeeks(p.pos, D.gl26); D._espnW=espnW;
     const seasonRows=[]; for(let w=1;w<=18;w++){
       if(w===D.bye){ seasonRows.push(`<tr><td>${w}</td><td class="muted" colspan="${seasonColspan}">BYE</td></tr>`); continue; }
       const g=byWk[w]; const oppTxt=g&&g.opp?("vs "+g.opp):"—";
@@ -2000,7 +2019,7 @@ function showDetailModal(){
       let usedEspn=false;
       if(app.realLeague && p.id){ const sc=playerWeekScore(p.id,w); if(sc!=null) scoreTxt=`<b class="pdWkPt" data-wk="${w}" style="color:var(--gold);cursor:pointer;text-decoration:underline dotted">${sc.toFixed(1)}</b>`; }
       if(!raw && espnW[w]){ raw={stats:espnW[w].stats, allowed:espnW[w].allowed!=null?espnW[w].allowed:null}; usedEspn=true;
-        scoreTxt=`<span style="color:var(--gold)" title="from ESPN game data">${espnW[w].fp.toFixed(1)}</span>`; }
+        scoreTxt=`<b class="pdWkPt" data-wk="${w}" data-espn="1" style="color:var(--gold);cursor:pointer;text-decoration:underline dotted" title="from ESPN game data">${espnW[w].fp.toFixed(1)}</b>`; }
       const statCells=seasonCols.map(([key])=>{
         // No row at all for this week yet = not played/not polled = blank.
         // A row that DOES exist but never accrued this specific stat
@@ -2037,7 +2056,7 @@ function showDetailModal(){
   const dt=ov.querySelector("#pDetailTabs"); if(dt) dt.querySelectorAll(".chip").forEach(b=> b.onclick=()=>{ app.pDetailTab=b.dataset.t; showDetailModal(); });
   const tw=ov.querySelector("#statTabs"); if(tw) tw.querySelectorAll(".chip").forEach(b=> b.onclick=()=>{ app.pStatTab=b.dataset.t; showDetailModal(); });
   const sst=ov.querySelector("#pSeasonStatTabs"); if(sst) sst.querySelectorAll(".chip").forEach(b=> b.onclick=()=>{ app.pSeasonStatTab=b.dataset.t; showDetailModal(); });
-  ov.querySelectorAll(".pdWkPt").forEach(b=> b.onclick=(e)=>{ e.stopPropagation(); openPlayerBoxScore(p, parseInt(b.dataset.wk,10), showDetailModal); });
+  ov.querySelectorAll(".pdWkPt").forEach(b=> b.onclick=(e)=>{ e.stopPropagation(); const w=parseInt(b.dataset.wk,10); openPlayerBoxScore(p, w, showDetailModal, b.dataset.espn ? (D._espnW||{})[w] : null); });
 }
 function posChips(s){
   const chips=el("div","chips");
