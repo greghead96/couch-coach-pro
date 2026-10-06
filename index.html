@@ -241,7 +241,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20261006c";
+const BUILD_ID = "20261006d";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -1623,23 +1623,40 @@ function openPlayerBoxScore(p, wk, returnTo, espn){
   const pic=p.headshot?`<img src="${p.headshot}" style="width:48px;height:48px;border-radius:50%;object-fit:cover;background:#1a2e22">`:avatarHTML(p);
   const gi=weekGameInfo(p, wk);
   let rows="", total=0;
+  // Hot Start: the lineup's first TD counts 3x. Show it INSIDE the quarter it happened in as a
+  // tripled touchdown line (not a separate bonus row), so Q1 reads e.g. "1 rec TD ×3 🔥 18.0".
+  const hotB=hotStartBonusFor(p.id, wk); let hotQ=0;
+  if(hotB>0 && row && row.q_pts){ for(let q=1;q<=4;q++){ const v=row.q_pts[q]||row.q_pts[String(q)]; if(v && v.qtd>0){ hotQ=q; break; } } }
   for(let q=1;q<=4;q++){
     const qd=row && row.q_pts && (row.q_pts[q]||row.q_pts[String(q)]);
-    const lines=quarterStatLines(p.pos, qd&&qd.stats);
+    let lines=quarterStatLines(p.pos, qd&&qd.stats);
+    if(q===hotQ && qd && qd.stats){
+      const key=(qd.stats.recTD>0)?"recTD":(qd.stats.rushTD>0)?"rushTD":null;
+      if(key){
+        const sc=app.settings.scoring, per=(key==="recTD"?sc.recTD:sc.rushTD)||6, n=qd.stats[key], word=key==="recTD"?"rec TD":"rush TD";
+        lines=lines.filter(l=>!(l.label.indexOf(word)>=0));
+        if(n>1) lines.push({label:`${n-1} ${word}${n-1!==1?"s":""} (${per}pts each)`, pts:per*(n-1)});
+        // a Double/Freeze on this same quarter still scales the base TD; the Hot Start bonus is added after.
+        const pq=app.powerupPicks.find(x=>x.week===wk && x.player_id===p.id && x.powerup_key!=="hotstart" && Number(x.quarter)===q);
+        const mm=pq?(pq.powerup_key==="double"?2:pq.powerup_key==="freeze"?0:1):1;
+        lines.unshift({label:`1 ${word} (${per}pts) <b style="color:var(--gold)">× 3 🔥 Hot Start${mm!==1?` · quarter ×${mm}`:""}</b>`, pts:per*mm+hotB, hot:true});
+      }
+    }
     const puQ=app.powerupPicks.find(x=>x.week===wk && x.player_id===p.id && x.powerup_key!=="hotstart" && Number(x.quarter)===q);
     const isPuQ=!!puQ; const cfg=isPuQ?POWERUPS[puQ.powerup_key]:null;
     const mult = cfg&&puQ.powerup_key==="double" ? 2 : (cfg&&puQ.powerup_key==="freeze" ? 0 : 1);
     let qTotal=0;
     const lineHtml = lines.length ? lines.map(l=>{
-      const adj=Math.round(l.pts*mult*10)/10; qTotal+=adj;
-      const tag = mult!==1 ? ` <b style="color:var(--gold)">× ${mult===0?"0":mult} ${cfg.icon}</b>` : "";
+      const m = l.hot ? 1 : mult; // Hot Start bonus is added after Double/Freeze, as in the team score
+      const adj=Math.round(l.pts*m*10)/10; qTotal+=adj;
+      const tag = (m!==1 && !l.hot) ? ` <b style="color:var(--gold)">× ${mult===0?"0":mult} ${cfg.icon}</b>` : "";
       return `<div>${l.label}${tag} <span style="float:right">${adj.toFixed(1)}pts</span></div>`;
     }).join("") : `<span class="muted">—</span>`;
     rows+=`<tr><td style="vertical-align:top">Q${q}</td><td style="font-size:12px">${lineHtml}</td><td style="text-align:right;font-weight:700;vertical-align:top">${qTotal.toFixed(1)}</td></tr>`;
     total+=qTotal;
   }
   let hotRow="";
-  { const hb=hotStartBonusFor(p.id, wk); if(hb>0){ total+=hb; hotRow=`<tr style="border-top:1px solid var(--line)"><td>🔥</td><td style="font-size:12px"><b>Hot Start</b> — first touchdown in the lineup, 3× (bonus on top of the TD points above)</td><td style="text-align:right;font-weight:700">+${hb.toFixed(1)}</td></tr>`; } }
+  { const hb=hotQ?0:hotB; if(hb>0){ total+=hb; hotRow=`<tr style="border-top:1px solid var(--line)"><td>🔥</td><td style="font-size:12px"><b>Hot Start</b> — first touchdown in the lineup, 3× (bonus on top of the TD points above)</td><td style="text-align:right;font-weight:700">+${hb.toFixed(1)}</td></tr>`; } }
   let paRow="";
   if(row && row.q_pts && row.q_pts.pa){
     const pa=row.q_pts.pa; total+=pa.fp;
