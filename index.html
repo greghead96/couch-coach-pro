@@ -210,6 +210,7 @@
   .dcell.now { box-shadow:0 0 0 2px var(--gold) inset; }
   .dcell .pk { color:var(--muted); font-size:8px; }
   .dcell .pn { font-weight:700; font-size:10px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .rkTag { display:inline-block; font-size:9px; font-weight:800; padding:0 4px; border-radius:4px; margin-left:4px; line-height:14px; vertical-align:middle; color:var(--gold); border:1px solid var(--gold); }
   .inj { display:inline-block; font-size:9px; font-weight:800; padding:0 4px; border-radius:4px; margin-left:4px; line-height:14px; vertical-align:middle; letter-spacing:.2px; }
   .inj-q { background:#fbbf24; color:#1a1300; } .inj-d { background:#fb923c; color:#1f0d00; } .inj-o { background:#ef4444; color:#fff; }
   .inj-ir { background:transparent; color:#f87171; border:1px solid #f87171; } .inj-sus { background:#7f1d1d; color:#fff; }
@@ -240,7 +241,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20261006b";
+const BUILD_ID = "20261006c";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -573,6 +574,67 @@ function getStandings(){
     ? app.leagueData.standings
     : LEAGUE.slice().sort((a,b)=>b.w-a.w||b.pf-a.pf);
 }
+// ===== Season position rankings =====
+// Every player at a position, ranked by total fantasy points this season under THIS league's
+// scoring (top QB = QB with the most points, top RB = RB with the most, ...). Re-ranked whenever
+// stats load. Source: player_week_stats rows for ALL players in finished games (the poller stores
+// everyone's line when a game ends), summed per player. Finished weeks are cached locally.
+const RANK_CACHE_V=1;
+function compactWeekStats(r){ // one player-week row -> {stats summed over quarters, allowed?}
+  const st={}; for(let q=1;q<=4;q++){ const v=r.q_pts&&(r.q_pts[q]||r.q_pts[String(q)]); if(v&&v.stats) Object.keys(v.stats).forEach(k=>{ st[k]=(st[k]||0)+v.stats[k]; }); }
+  const o={s:st}; if(r.q_pts&&r.q_pts.pa) o.a=r.q_pts.pa.allowed||0; return o;
+}
+async function fetchRankWeek(wk){
+  const out={}; let from=0;
+  for(;;){
+    const {data,error}=await sb.from("player_week_stats").select("athlete_id,q_pts").eq("season",SEASON_YEAR).eq("season_type","regular").eq("week",wk).range(from,from+999);
+    if(error||!data) break;
+    data.forEach(r=>{ if(!String(r.athlete_id).startsWith("game_")) out[r.athlete_id]=compactWeekStats(r); });
+    if(data.length<1000) break; from+=1000;
+  }
+  return out;
+}
+async function loadSeasonRanks(force){
+  if(!app.realLeague || app._ranksLoading) return;
+  if(!force && app._ranksAt && Date.now()-app._ranksAt<25*60*1000) return;
+  const cur=app.currentWeek||1; app._ranksLoading=true;
+  try{
+    const weeks={};
+    for(let wk=1; wk<=cur; wk++){
+      const key="ccf_rk_"+RANK_CACHE_V+"_"+SEASON_YEAR+"_"+wk; let w=null;
+      if(wk<cur){ try{ const c=JSON.parse(localStorage.getItem(key)||"null"); if(c && Date.now()-c.t<24*3600*1000) w=c.d; }catch(e){} }
+      if(!w){ w=await fetchRankWeek(wk); if(wk<cur){ try{ localStorage.setItem(key, JSON.stringify({t:Date.now(), d:w})); }catch(e){} } }
+      weeks[wk]=w;
+    }
+    app._rankWeeks=weeks; recomputeSeasonRanks(); app._ranksAt=Date.now();
+  }catch(e){} finally{ app._ranksLoading=false; }
+  const f={draft:renderDraft,players:renderPlayers,team:renderTeam,matchup:renderMatchup}[app.tab];
+  if(f && !document.querySelector("#overlay .modal")) f();
+}
+function recomputeSeasonRanks(){
+  if(!app._rankWeeks) return;
+  const tot={}; // id -> {fp, g}
+  Object.keys(app._rankWeeks).forEach(wk=>{ const w=app._rankWeeks[wk];
+    Object.keys(w).forEach(id=>{
+      let pos = String(id).startsWith("def_") ? "DEF" : ((poolById(id)||{}).pos);
+      if(!pos) return;
+      const r=w[id]; let fp=quarterFpFromStats(pos, r.s);
+      if(pos==="DEF" && r.a!=null) fp+=defBracket(r.a);
+      const t=tot[id]||(tot[id]={pos, fp:0, g:0}); t.fp+=fp; t.g++;
+    }); });
+  const byPos={}; Object.keys(tot).forEach(id=>{ (byPos[tot[id].pos]=byPos[tot[id].pos]||[]).push(id); });
+  const ranks={}, ovr=[];
+  Object.keys(byPos).forEach(pos=>{
+    const ids=byPos[pos].sort((a,b)=>tot[b].fp-tot[a].fp); let last=null, lastRank=0;
+    ids.forEach((id,i)=>{ const fp=Math.round(tot[id].fp*10)/10; const rank=(last!==null && fp===last)?lastRank:i+1; last=fp; lastRank=rank; ranks[id]={pos, rank, of:ids.length, fp, g:tot[id].g}; });
+  });
+  app._ranks=ranks;
+}
+function seasonRank(id){ return app._ranks ? app._ranks[id] : null; }
+function rankTag(id){
+  const r=seasonRank(id); if(!r) return "";
+  return `<span class="rkTag" title="${r.pos} #${r.rank} of ${r.of} · ${r.fp.toFixed(1)} fantasy pts in ${r.g} game${r.g!==1?"s":""} this season">${r.pos}${r.rank}</span>`;
+}
 // ESPN injury designations → badge. Questionable (Q) = roughly 50/50 or less than 100%,
 // Doubtful (D) = unlikely to play, Out (O) = will not play, IR = on the injured-reserve list.
 const INJ_MAP={ "questionable":["Q","q"], "doubtful":["D","d"], "out":["O","o"], "injured reserve":["IR","ir"], "day-to-day":["DTD","q"],
@@ -584,7 +646,11 @@ function poolById(id){
 }
 function injBadge(idOrPlayer){
   const id = (idOrPlayer && typeof idOrPlayer==="object") ? (idOrPlayer.player_id||idOrPlayer.id) : idOrPlayer;
-  if(!id || String(id).startsWith("def_") || String(id).startsWith("e_")) return "";
+  if(!id || String(id).startsWith("e_")) return "";
+  return injOnly(id)+rankTag(id);   // every place that shows a status badge also shows the season position rank
+}
+function injOnly(id){
+  if(String(id).startsWith("def_")) return "";
   const pl=poolById(id); if(!pl) return "";
   const raw=(pl.injury && pl.injury!=="ACTIVE") ? pl.injury : (pl.rosterStatus==="practice-squad" ? "Practice Squad" : "");
   if(!raw) return "";
@@ -1744,7 +1810,8 @@ function renderViewTeam(){
 
 // ============================ PLAYERS (in-app add/drop — no Sleeper) ============================
 const POS_ORDER={RB:0,WR:1,QB:2,TE:3,K:4,DEF:5};
-function ensurePool(){ if(!app.pool && !app.poolLoading && !app.poolError) loadPool(); }
+function ensurePool(){ if(!app.pool && !app.poolLoading && !app.poolError) loadPool(); else if(app.pool) loadSeasonRanks(); }
+setInterval(()=>{ if(app.pool && app.realLeague && !document.hidden) loadSeasonRanks(true); }, 30*60*1000);
 // Injury designations change daily (and Fri/Sat/Sun morning), but the player pool is loaded
 // once per session — re-read the rosters every 20 minutes and update in place.
 async function refreshPoolInjuries(){
@@ -1955,7 +2022,8 @@ function showDetailModal(){
   const p=D.p;
   const pic = p.headshot?`<img src="${p.headshot}" style="width:56px;height:56px;border-radius:50%;object-fit:cover;background:#1a2e22">`
     : (p.logo?`<img src="${p.logo}" style="width:48px;height:48px;object-fit:contain">`:avatarHTML(p));
-  const rk = p.rank?` · <span style="color:var(--gold)">ESPN #${p.rank}</span>`:"";
+  const sr = seasonRank(p.id||(p.espnId?"e"+p.espnId:""));
+  const rk = sr ? ` · <span style="color:var(--gold)" title="${sr.fp.toFixed(1)} fantasy pts over ${sr.g} game${sr.g!==1?"s":""}">${sr.pos} #${sr.rank}</span>` : (p.rank?` · <span style="color:var(--gold)">ESPN #${p.rank}</span>`:"");
   const head=`<div style="display:flex;align-items:center;gap:12px">${pic}
     <div><div style="font-weight:800;font-size:18px">${p.name}${injBadge(p.id||(p.espnId?"e"+p.espnId:""))}</div>
       <div class="muted" style="font-size:12px">${p.pos} · ${p.teamAb||""}${p.jersey?" · #"+p.jersey:""}${rk}</div></div></div>`;
@@ -2043,6 +2111,7 @@ function showDetailModal(){
     const tabBody = dTab==="season" ? seasonHtml : (lastHtml+wkHtml || `<div class="muted" style="font-size:12px">No ${SEASON_YEAR-1} NFL games on record${p.exp===0||p.exp==null?" — rookie or first NFL season":""}.</div>`);
     body=`${bio?`<div style="font-size:12px;margin-top:10px">${bio}</div>`:""}
       ${D.bye?`<div class="muted" style="font-size:12px;margin-top:4px">Bye: <b style="color:var(--txt)">Week ${D.bye}</b></div>`:""}
+      ${sr?`<div style="font-size:12px;margin-top:6px"><b style="color:var(--gold)">${sr.pos} #${sr.rank}</b> of ${sr.of} this season · <b>${sr.fp.toFixed(1)}</b> fantasy pts in ${sr.g} game${sr.g!==1?"s":""} <span class="muted">(your league's scoring)</span></div>`:""}
       ${(f.draftRank||f.positionRank)?`<div style="font-size:12px;margin-top:6px">ESPN draft #${f.draftRank||"—"} · ${p.pos}${f.positionRank||"—"} · ${f.percentOwned||0}% rostered</div>`:""}
       ${detailTabs}${tabBody}
       ${f.projection?sec("Outlook")+`<div style="font-size:12px;line-height:1.5">${f.projection}</div>`:""}
@@ -2111,6 +2180,7 @@ function sortPoolBy(list, s, dir){
       return mul*(av-bv);
     });
   }
+  if(app._ranks){ const fp=id=>{ const r=app._ranks[id]; return r?r.fp:-1e9; }; return list.slice().sort((a,b)=>fp(b.id)-fp(a.id)||(a.rank||9999)-(b.rank||9999)||a.name.localeCompare(b.name)); }
   return list.slice().sort((a,b)=>(a.rank||9999)-(b.rank||9999)||a.name.localeCompare(b.name));
 }
 function faRow(p, btnLabel, btnCls, onClick, showBye, scoreMode){
@@ -2118,7 +2188,7 @@ function faRow(p, btnLabel, btnCls, onClick, showBye, scoreMode){
   const inj = (p.injury && p.injury!=="ACTIVE") ? '<span style="color:var(--opp);font-size:9px;font-weight:800">⚠ </span>' : "";
   const isPos = app.pFilter && app.pFilter!=="ALL" && app.pFilter!=="FLEX";
   const rnum = isPos ? p.posRank : p.rank;
-  const rk = rnum ? `<span style="color:var(--gold);font-size:10px;font-weight:800">#${rnum}</span> ` : "";
+  const rk = (rnum && !app._ranks) ? `<span style="color:var(--gold);font-size:10px;font-weight:800">#${rnum}</span> ` : ""; // pre-season ADP only; once season ranks exist the rank tag shows instead
   const byeWk = showBye ? teamByeWeek(p.teamAb) : null;
   const byeTxt = byeWk ? ` · <span style="color:var(--gold)">Bye Wk ${byeWk}</span>` : "";
   const waiverTxt = (scoreMode==="fa" && app.realLeague && p.id && isOnWaivers(p.id)) ? ` · <span style="color:var(--opp);font-weight:800">On Waivers</span>` : "";

@@ -936,6 +936,65 @@ async function autoAdvanceWeeks() {
   }
 }
 
+// ============================ LEAGUE-WIDE STATS (position rankings) ============================
+// Player-card rankings rank EVERY player at a position by season fantasy points, not just the
+// ones some league has rostered. So once a game is final, store stat rows for everyone in it
+// (same parser, same table as the league rows — player_week_stats is global). A marker row
+// "game_<eventId>" records that a game is done, so each game is processed exactly once and the
+// whole thing is idempotent/backfills itself (weeks 1..current) on the first run.
+async function storeGameForRankings(eventId, wk) {
+  const box = await fetchGameBox(eventId);
+  const abt = await athletesByTeamForGame(box);
+  const offense = statsFromDrives(box.drives, abt).out;
+  reconcileYardsToBox(offense, box.byAthlete);
+  const kdef = kickDefFromDrives(box.drives, abt, box.teamIds);
+  const rows = [];
+  const mk = (athleteId, quarters, tdEvents, pa) => {
+    const qpts = {}; let tds = 0, any = false, total = 0; const sum = {};
+    for (let q = 1; q <= 4; q++) {
+      const stats = {}; Object.keys(quarters[q].stats).forEach((k) => { if (quarters[q].stats[k] !== 0) { stats[k] = quarters[q].stats[k]; any = true; sum[k] = (sum[k] || 0) + stats[k]; } });
+      const qtd = (stats.rushTD || 0) + (stats.recTD || 0) + (athleteId.startsWith("def_") ? (stats.defTD || 0) : 0);
+      const fp = infoFpFromStats(stats); qpts[q] = { fp, qtd, stats }; tds += qtd; total += fp;
+    }
+    if (pa != null) { qpts.pa = { allowed: pa, fp: defBracket(pa) }; any = true; total += qpts.pa.fp; }
+    if (!any) return;
+    const first = (tdEvents || []).reduce((m, e) => (e.wallclock && (!m || e.wallclock < m)) ? e.wallclock : m, null);
+    rows.push({ athlete_id: athleteId, week: wk, season: 2026, q_pts: qpts, prev_total: Math.round(total * 10) / 10, prev_qtd: tds, prev_bonus: 0, prev_stats: sum, first_qtd_at: first, season_type: "regular" });
+  };
+  const empty = () => ({ 1: { stats: {} }, 2: { stats: {} }, 3: { stats: {} }, 4: { stats: {} } });
+  const ids = new Set([...Object.keys(offense), ...Object.keys(kdef.k)]);
+  ids.forEach((id) => {
+    const o = offense[id], k = kdef.k[id]; const quarters = empty();
+    for (let q = 1; q <= 4; q++) quarters[q].stats = { ...((o && o.quarters[q].stats) || {}), ...((k && k.quarters[q].stats) || {}) };
+    mk("e" + id, quarters, (o && o.qtdEvents) || [], null);
+  });
+  box.teamIds.forEach((tid) => {
+    const opp = box.teamIds.find((t) => t !== tid); const d = kdef.def[tid];
+    mk("def_" + tid, d ? d.quarters : empty(), d ? d.tdEvents : [], box.teamScores[opp] || 0);
+  });
+  for (let i = 0; i < rows.length; i += 200) await sb("player_week_stats", { method: "POST", headers: { Prefer: "resolution=merge-duplicates" }, body: JSON.stringify(rows.slice(i, i + 200)) });
+  return rows.length;
+}
+async function updateLeagueWideStats() {
+  let espnWk; try { espnWk = await getEspnRegularSeasonWeek(); } catch (e) { return; }
+  if (!espnWk) return;
+  let done;
+  try { done = new Set((await sb("player_week_stats?select=athlete_id&athlete_id=like.game_*&season=eq.2026&limit=5000")).map((r) => r.athlete_id)); }
+  catch (e) { console.error("league-wide stats: marker query failed:", e.message); return; }
+  for (let wk = 1; wk <= espnWk; wk++) {
+    let sbd; try { sbd = await espnFetch(`${ESPN}/scoreboard?seasontype=2&week=${wk}&dates=2026`); } catch (e) { if (e instanceof RateLimitedError) return; continue; }
+    for (const ev of (sbd.events || [])) {
+      const st = ev.status && ev.status.type; if (!st || !st.completed) continue;
+      const marker = "game_" + ev.id; if (done.has(marker)) continue;
+      try {
+        const n = await storeGameForRankings(ev.id, wk);
+        await sb("player_week_stats", { method: "POST", headers: { Prefer: "resolution=merge-duplicates" }, body: JSON.stringify([{ athlete_id: marker, week: wk, season: 2026, q_pts: {}, prev_total: 0, prev_qtd: 0, prev_bonus: 0, prev_stats: {}, first_qtd_at: null, season_type: "regular" }]) });
+        done.add(marker); console.log("league-wide stats: week " + wk + " " + ev.shortName + " — " + n + " player rows");
+      } catch (e) { if (e instanceof RateLimitedError) return; console.error("league-wide stats: " + ev.shortName + " failed:", e.message); }
+    }
+  }
+}
+
 // ============================ WAIVERS ============================
 // Weekly waiver processing — piggybacks on this same job (see main()) rather
 // than a separate schedule. Runs unconditionally (not gated on a live game),
@@ -1133,6 +1192,7 @@ async function main() {
     await autoAdvanceWeeks();
     await processWaivers();
     await resolveExpiredTradeReviews();
+    try { await updateLeagueWideStats(); } catch (e) { console.error("league-wide stats failed:", e.message); }
   }
   try { globalThis.__regularSeasonLive = (await getEspnRegularSeasonWeek()) != null; } catch (e) { globalThis.__regularSeasonLive = true; }
 
@@ -1170,6 +1230,7 @@ async function main() {
       } else console.error(`cycle ${cycle} failed:`, e.message);
     }
     if (process.env.DRY_RUN) break;
+    if (cycle % 10 === 0) { try { await updateLeagueWideStats(); } catch (e) { console.error("league-wide stats failed:", e.message); } }
     if (Date.now() - start >= LOOP_BUDGET_MS) { console.log("run budget reached — next scheduled run takes over."); break; }
     // Stop only after two consecutive "nothing live" checks following the last
     // poll, so the final whistle's plays are captured by one more full cycle.
