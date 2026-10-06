@@ -240,7 +240,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20261005b";
+const BUILD_ID = "20261006a";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -1822,7 +1822,7 @@ async function openPlayerDetail(p){
   if(!isDef){
     const base="https://site.web.api.espn.com/apis/common/v3/sports/football/nfl/athletes/"+p.espnId;
     try{ data=await (await fetch(base+"/overview")).json(); }catch(e){}
-    try{ gl=await (await fetch(base+"/gamelog?season="+(SEASON_YEAR-1))).json(); }catch(e){}
+    if(!app.realLeague || (app.currentWeek||1)<=1){ try{ gl=await (await fetch(base+"/gamelog?season="+(SEASON_YEAR-1))).json(); }catch(e){} } // last season: draft/week 1 only
     try{ gl26=await (await fetch(base+"/gamelog?season="+SEASON_YEAR)).json(); }catch(e){}
   }
   let schedOk=false;
@@ -2014,8 +2014,11 @@ function showDetailModal(){
     }
     const paHeader = p.pos==="DEF" ? "<th>PA</th>" : "";
     const seasonHtml=`${seasonTabsHtml}${D.isDef && !D.defWeeks ? '<div class="muted" style="font-size:11px;margin-bottom:4px">Loading game-by-game stats…</div>':''}<div style="overflow-x:auto;max-height:44vh;overflow-y:auto"><table class="std"><tr><th>Wk</th><th>Opp</th><th>FP</th>${seasonCols.map(([,lbl])=>`<th>${lbl}</th>`).join("")}${paHeader}</tr>${seasonRows.join("")}</table></div>`;
-    const dTab=app.pDetailTab==="last" ? "last" : "season";
-    const detailTabs=`<div class="chips" id="pDetailTabs">
+    // Last season's stats only matter for the draft and week 1; once week 1 is done (current
+    // week > 1) the tab and its data go away and the card is just this season.
+    const showLast = !app.realLeague || (app.currentWeek||1)<=1;
+    const dTab=(showLast && app.pDetailTab==="last") ? "last" : "season";
+    const detailTabs=!showLast ? "" : `<div class="chips" id="pDetailTabs">
       <div class="chip${dTab==="season"?' on':''}" data-t="season">This Season</div>
       <div class="chip${dTab==="last"?' on':''}" data-t="last">Last Season</div></div>`;
     const tabBody = dTab==="season" ? seasonHtml : (lastHtml+wkHtml || `<div class="muted" style="font-size:12px">No ${SEASON_YEAR-1} NFL games on record${p.exp===0||p.exp==null?" — rookie or first NFL season":""}.</div>`);
