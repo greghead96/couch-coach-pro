@@ -240,7 +240,7 @@
 // a deploy can still show stale JS. Poll for a newer BUILD_ID and prompt
 // instead of expecting everyone to know to hard-refresh. Bump this string
 // on every deploy.
-const BUILD_ID = "20261005a";
+const BUILD_ID = "20261005b";
 function showUpdateBanner(){
   if(document.getElementById("updateBanner")) return;
   const b=document.createElement("div"); b.id="updateBanner";
@@ -4070,10 +4070,11 @@ function posOfId(pid){ const pk=(app.draft&&app.draft.picks||[]).find(x=>x.playe
 function hotStartResult(uid, wk){
   const picksWk=app.powerupPicks.filter(p=>p.week===wk);
   const hot=picksWk.find(p=>p.powerup_key==="hotstart" && p.user_id===uid); if(!hot) return null;
-  const subOut={}; picksWk.filter(p=>p.powerup_key==="sub" && p.target_player_id).forEach(p=>{ subOut[p.target_player_id]={inId:p.player_id, q:p.quarter}; });
+  const subOut={}, subIn={};
+  picksWk.filter(p=>p.powerup_key==="sub" && p.target_player_id && p.user_id===uid).forEach(p=>{ const sw={inId:p.player_id, q:p.quarter, orig:p.target_player_id}; subOut[p.target_player_id]=sw; subIn[p.player_id]=sw; });
   let best=null;
-  slotPlayerIds(uid, wk).filter(Boolean).forEach(pid=>{
-    const swap=subOut[pid];
+  slotPlayerIds(uid, wk).filter(Boolean).forEach(sid=>{
+    const swap=subIn[sid]||subOut[sid]; const pid=swap?swap.orig:sid;
     for(let q=1;q<=4;q++){ const c=(swap && q>=swap.q)?swap.inId:pid; const rq=realQuarterly(c, wk);
       if(rq.qtd[q]>0 && hotStartEligible(c)){ const key=rq.firstQtdAt!=null?rq.firstQtdAt:(1e15+q); if(!best||key<best.key) best={key,pid:c}; } }
   });
@@ -4088,12 +4089,18 @@ function computeRealTeamScore(uid, wk, swing){
   const credit=(who,pts)=>{ if(swing && who) swing[who]=(swing[who]||0)+pts; };
   const picksWk=app.powerupPicks.filter(p=>p.week===wk);
   const byPlayerPU={}; picksWk.forEach(p=>{ byPlayerPU[p.player_id]=p; });
-  const subOut={}; picksWk.filter(p=>p.powerup_key==="sub" && p.target_player_id).forEach(p=>{ subOut[p.target_player_id]={inId:p.player_id, q:p.quarter, uid:p.user_id}; });
+  // Emergency Sub: the original starter counts for the quarters BEFORE the swap quarter, the
+  // sub-in from it onward. The lineup may hold either player in that slot — the app rewrites
+  // the lineup to the sub-in when a sub happens, so the week-close snapshot has the SUB-IN, not
+  // the original (the old code only handled the original-in-slot shape, so it counted the
+  // sub-in for the whole game and the original not at all).
+  const subOut={}, subIn={};
+  picksWk.filter(p=>p.powerup_key==="sub" && p.target_player_id && p.user_id===uid).forEach(p=>{ const sw={inId:p.player_id, q:p.quarter, uid:p.user_id, orig:p.target_player_id}; subOut[p.target_player_id]=sw; subIn[p.player_id]=sw; });
   const hotStartPick=picksWk.find(p=>p.powerup_key==="hotstart" && p.user_id===uid);
   const starterIds=slotPlayerIds(uid, wk).filter(Boolean);
   let total=0, bestTD=null;
-  starterIds.forEach(pid=>{
-    const swap=subOut[pid];
+  starterIds.forEach(sid=>{
+    const swap=subIn[sid]||subOut[sid]; const pid=swap?swap.orig:sid;
     for(let q=1;q<=4;q++){
       const contributor=(swap && q>=swap.q) ? swap.inId : pid;
       const rq=realQuarterly(contributor, wk);
@@ -4132,8 +4139,12 @@ function realPlayerAdjustedTotal(pid, wk){
   const rq=realQuarterly(pid, wk);
   let total=rq.pa?rq.pa.fp:0;
   // Stacked power-ups: apply EACH one that targets the quarter being summed.
-  const pus=app.powerupPicks.filter(p=>p.week===wk && p.player_id===pid && p.powerup_key!=="hotstart");
-  for(let q=1;q<=4;q++){ let fp=rq.q[q]; pus.filter(x=>Number(x.quarter)===q).forEach(x=>{ if(x.powerup_key==="double") fp*=2; else if(x.powerup_key==="freeze") fp=0; }); total+=fp; }
+  const pus=app.powerupPicks.filter(p=>p.week===wk && p.player_id===pid && p.powerup_key!=="hotstart" && p.powerup_key!=="sub");
+  // A player in an Emergency Sub only counts for his side of the swap: the original starter for
+  // the quarters before it, the sub-in from it onward.
+  const sw=app.powerupPicks.find(p=>p.week===wk && p.powerup_key==="sub" && (p.player_id===pid || p.target_player_id===pid));
+  const q0 = sw && sw.player_id===pid ? Number(sw.quarter) : 1, q1 = sw && sw.target_player_id===pid ? Number(sw.quarter)-1 : 4;
+  for(let q=q0;q<=q1;q++){ let fp=rq.q[q]; pus.filter(x=>Number(x.quarter)===q).forEach(x=>{ if(x.powerup_key==="double") fp*=2; else if(x.powerup_key==="freeze") fp=0; }); total+=fp; }
   total+=hotStartBonusFor(pid, wk); // the 3x TD bonus shows on the player who earned it
   return Math.round(total*10)/10;
 }
