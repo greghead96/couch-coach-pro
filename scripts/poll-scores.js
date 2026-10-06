@@ -173,6 +173,13 @@ async function anyGameLiveOrStartingSoon() {
   });
 }
 
+// Earliest upcoming kickoff on today's scoreboard (ms epoch), or null.
+async function nextKickoffMs() {
+  const d = await espnFetch(`${ESPN}/scoreboard`);
+  const t = (d.events || []).filter((e) => e.status && e.status.type && e.status.type.state === "pre").map((e) => new Date(e.date).getTime()).filter((x) => x > Date.now());
+  return t.length ? Math.min(...t) : null;
+}
+
 async function fetchGameBox(eventId) {
   const d = await espnFetch(`${ESPN}/summary?event=${eventId}`);
   const comp = (d.header && d.header.competitions && d.header.competitions[0]) || {};
@@ -1129,15 +1136,27 @@ async function main() {
   }
   try { globalThis.__regularSeasonLive = (await getEspnRegularSeasonWeek()) != null; } catch (e) { globalThis.__regularSeasonLive = true; }
 
+  const start = Date.now();
   let live;
   try { live = await anyGameLiveOrStartingSoon(); }
   catch (e) {
     console.log(`scoreboard check failed (${e.message}) — skipping this run, next one retries in 5 min.`);
     return;
   }
+  // GitHub's cron fires unreliably (sometimes only every few hours), so a run that lands just
+  // BEFORE a kickoff must not exit and hope the next trigger arrives in time — it waits for the
+  // game instead (up to ~5.5h ahead, bounded by the run budget).
+  while (!live && !process.env.DRY_RUN && Date.now() - start < LOOP_BUDGET_MS) {
+    let next = null;
+    try { next = await nextKickoffMs(); } catch (e) { /* fall through to exit */ }
+    if (next == null || next - Date.now() > 5.5 * 3600 * 1000) break;
+    const waitMs = Math.min(5 * 60 * 1000, Math.max(30 * 1000, next - Date.now() - 25 * 60 * 1000));
+    console.log(`next kickoff in ${Math.round((next - Date.now()) / 60000)} min — waiting ${Math.round(waitMs / 1000)}s`);
+    await new Promise((r) => setTimeout(r, waitMs));
+    try { live = await anyGameLiveOrStartingSoon(); } catch (e) { /* retry */ }
+  }
   if (!live && !process.env.DRY_RUN) { console.log("no NFL games live or starting soon — skipping this run."); return; }
 
-  const start = Date.now();
   let cycle = 0, quietChecks = 0;
   while (true) {
     cycle++;
